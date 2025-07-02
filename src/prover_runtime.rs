@@ -24,6 +24,7 @@ use rand;
 use log::{debug, warn};
 use std::sync::Arc;
 use crate::orchestrator_client_enhanced::EnhancedOrchestratorClient;
+use sha3::Digest;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -201,7 +202,8 @@ pub async fn start_optimized_batch_workers(
         let mut shutdown_rx = shutdown.resubscribe();
         let environment = environment.clone();
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
-        let callback_opt = status_callback.clone();
+        // 不复制回调函数，而是直接使用引用
+        let callback_opt = status_callback.as_ref();
         
         let handle = tokio::spawn(async move {
             run_memory_optimized_node(
@@ -293,7 +295,11 @@ async fn run_memory_optimized_node(
                             update_status(format!("[{}] 正在提交证明...", timestamp));
                             
                             // 计算哈希
-                            let proof_hash = format!("{:x}", sha3::Sha3_256::digest(&proof));
+                            // 使用正确的sha3::Digest trait方法
+                    let mut hasher = sha3::Sha3_256::new();
+                    hasher.update(&proof);
+                    let hash = hasher.finalize();
+                    let proof_hash = format!("{:x}", hash);
                             
                             // 提交证明
                             match orchestrator.submit_proof(&task.task_id, &proof_hash, proof, signing_key).await {

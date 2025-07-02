@@ -2,13 +2,14 @@
 //! 
 //! 对原始OrchestratorClient的包装，添加高级错误处理和重试机制
 
-use crate::orchestrator::{OrchestratorClient, error::OrchestratorError};
+use crate::orchestrator::{OrchestratorClient, error::OrchestratorError, Orchestrator};
 use crate::environment::Environment;
 use crate::task::Task;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, warn};
 use std::time::{Duration, Instant};
 use rand::Rng;
+use sha3::{Digest, Sha3_256};
 
 /// 增强型Orchestrator客户端
 pub struct EnhancedOrchestratorClient {

@@ -13,7 +13,7 @@ build_proto = []
 jemalloc = ["jemallocator"]
 
 [[bin]]
-name = "nexus-network"
+name = "nexus"
 path = "src/main.rs"
 
 [profile.dev]
@@ -70,6 +70,7 @@ lazy_static = "1.4.0"     # 用于全局证明器实例
 once_cell = "1.19.0"      # 用于单例优化
 parking_lot = "0.12"      # 用于高效锁
 md5 = "0.7.0"             # 用于客户端ID生成
+env_logger = "0.11.2"     # 用于日志初始化
 
 [dev-dependencies]
 assert_cmd = "2"

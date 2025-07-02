@@ -61,10 +61,9 @@ impl ErrorClassifier {
             // Critical: Code/logic errors
             ProverError::MalformedTask(_) => LogLevel::Error,
             ProverError::GuestProgram(_) => LogLevel::Error,
-            ProverError::Serialization(_) => LogLevel::Error,
-
-            // Default to warning for other Stwo errors
+            ProverError::Serialization(_) => LogLevel::Warn,
             ProverError::Stwo(_) => LogLevel::Warn,
+            ProverError::RateLimited(_) => LogLevel::Warn,
         }
     }
 }

@@ -10,7 +10,7 @@ mod keys;
 mod logging;
 mod key_manager;
 mod node_list;
-mod orchestrator_client_enhanced;
+mod orchestrator_client_enhanced;  // 确保导入了增强版客户端
 #[path = "proto/nexus.orchestrator.rs"]
 mod nexus_orchestrator;
 mod orchestrator;
@@ -43,6 +43,7 @@ use tokio::task::JoinHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use log::{debug, warn, info};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -301,13 +302,17 @@ async fn start(
         println!("Read Node ID: {} from config file", node_id.unwrap());
     }
 
+    let node_id_value = node_id.unwrap_or_default();
+    // 定义状态回调
+    let status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync>> = None;
+
     // Create a signing key for the prover.
     let signing_key = match crate::key_manager::load_or_generate_signing_key() {
         Ok(key) => key,
         Err(e) => {
-            warn!("节点 {} 加载签名密钥失败: {}", node_id, e);
+            warn!("节点 {} 加载签名密钥失败: {}", node_id_value, e);
             if let Some(ref callback) = status_callback {
-                callback(*node_id, format!("加载密钥失败: {}", e));
+                callback(node_id_value, format!("加载密钥失败: {}", e));
             }
             return Ok(());
         }

@@ -1,8 +1,9 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::str::FromStr;
+use clap::ValueEnum;
 
 /// Represents the different deployment environments available for the CLI.
-#[derive(Clone, Default, Copy, PartialEq, Eq)]
+#[derive(Clone, Default, Copy, PartialEq, Eq, Debug, ValueEnum)]
 pub enum Environment {
     /// Local development environment.
     Local,
