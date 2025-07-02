@@ -1,53 +1,52 @@
 // Copyright (c) 2024 Nexus. All rights reserved.
 
-// Use jemalloc allocator to solve memory fragmentation issues
-#[cfg(feature = "jemalloc")]
-use jemallocator::Jemalloc;
+mod analytics;
+mod config;
+mod consts;
+mod environment;
+mod error_classifier;
+mod events;
+mod keys;
+mod logging;
+mod key_manager;
+mod node_list;
+mod orchestrator_client_enhanced;  // 确保导入了增强版客户端
+#[path = "proto/nexus.orchestrator.rs"]
+mod nexus_orchestrator;
+mod orchestrator;
+mod pretty;
+mod prover;
+mod prover_runtime;
+mod register;
+pub mod system;
+mod task;
+mod task_cache;
+mod ui;
+mod utils;
+mod workers;
+mod setup;
 
-#[cfg(feature = "jemalloc")]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
-use clap::{Parser, Subcommand};
+use crate::config::{Config, get_config_path};
+use crate::environment::Environment;
+use crate::orchestrator::{Orchestrator, OrchestratorClient};
+use crate::prover_runtime::{start_anonymous_workers, start_authenticated_workers};
+use crate::register::{register_node, register_user};
+use crate::utils::system::MemoryDefragmenter;
+use clap::{ArgAction, Parser, Subcommand};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
-use std::error::Error;
-use std::path::PathBuf;
-use std::io;
-// use tokio::signal;
-use tokio::task::JoinSet;
-use std::sync::Arc;
-use std::collections::HashMap;
-use std::hash::Hasher;
+// 未使用的导入
+// use ed25519_dalek::SigningKey;
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::{error::Error, io};
 use tokio::sync::broadcast;
-// use once_cell::sync::Lazy; // Remove unused import
-
-mod analytics;
-mod config;
-mod environment;
-mod keys;
-#[path = "proto/nexus.orchestrator.rs"]
-mod nexus_orchestrator;
-mod orchestrator_client;
-mod prover;
-mod prover_runtime;  // New: High-efficiency runtime module
-mod setup;
-mod task;
-mod ui;
-mod utils;
-mod node_list;
-
-use crate::config::Config;
-use crate::environment::Environment;
-use crate::setup::clear_node_config;
-use crate::node_list::NodeList;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use log::warn;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -66,12 +65,29 @@ enum Command {
         #[arg(long, value_name = "NODE_ID")]
         node_id: Option<u64>,
 
-        /// Environment to connect to.
-        #[arg(long, value_enum)]
-        env: Option<Environment>,
+        /// Run without the terminal UI
+        #[arg(long = "headless", action = ArgAction::SetTrue)]
+        headless: bool,
+
+        /// Maximum number of threads to use for proving.
+        #[arg(long = "max-threads", value_name = "MAX_THREADS")]
+        max_threads: Option<u32>,
     },
-    
-    /// Start multiple provers from node list file
+    /// Register a new user
+    RegisterUser {
+        /// User's public Ethereum wallet address. 42-character hex string starting with '0x'
+        #[arg(long, value_name = "WALLET_ADDRESS")]
+        wallet_address: String,
+    },
+    /// Register a new node to an existing user, or link an existing node to a user.
+    RegisterNode {
+        /// ID of the node to register. If not provided, a new node will be created.
+        #[arg(long, value_name = "NODE_ID")]
+        node_id: Option<u64>,
+    },
+    /// Clear the node configuration and logout.
+    Logout,
+    /// Start multiple provers from node list file (optimized version)
     BatchFile {
         /// Path to node list file (.txt)
         #[arg(long, value_name = "FILE_PATH")]
@@ -92,54 +108,33 @@ enum Command {
         /// Maximum number of concurrent nodes
         #[arg(long, default_value = "10")]
         max_concurrent: usize,
+        
+        /// Number of worker threads per node
+        #[arg(long, default_value = "1")]
+        workers_per_node: usize,
 
         /// Enable verbose error logging
         #[arg(long)]
         verbose: bool,
     },
-
-    /// Create example node list files
-    CreateExamples {
-        /// Directory to create example files
-        #[arg(long, default_value = "./examples")]
-        dir: String,
-    },
-    
-    /// Logout from the current session
-    Logout,
 }
-
-/// Get the path to the Nexus config file, typically located at ~/.nexus/config.json.
-fn get_config_path() -> Result<PathBuf, ()> {
-    let home_path = home::home_dir().expect("Failed to get home directory");
-    let config_path = home_path.join(".nexus").join("config.json");
-    Ok(config_path)
-}
-
-// Note: Node pool manager removed, now using simple concurrent processing
 
 /// Fixed line display manager for batch processing with advanced memory optimization
 #[derive(Debug)]
 struct FixedLineDisplay {
-    #[allow(dead_code)]
-    max_lines: usize,
-    node_lines: Arc<tokio::sync::RwLock<HashMap<u64, String>>>,
-    last_render_hash: Arc<tokio::sync::Mutex<u64>>,
-    defragmenter: Arc<crate::utils::system::MemoryDefragmenter>,
+    node_lines: Arc<RwLock<HashMap<u64, String>>>,
+    defragmenter: Arc<MemoryDefragmenter>,
 }
 
 impl FixedLineDisplay {
-    fn new(max_lines: usize) -> Self {
+    fn new() -> Self {
         Self {
-            max_lines,
-            node_lines: Arc::new(tokio::sync::RwLock::new(HashMap::with_capacity(max_lines))),
-            last_render_hash: Arc::new(tokio::sync::Mutex::new(0)),
-            defragmenter: Arc::new(crate::utils::system::MemoryDefragmenter::new()),
+            node_lines: Arc::new(RwLock::new(HashMap::new())),
+            defragmenter: crate::prover::get_defragmenter(),
         }
     }
 
     async fn update_node_status(&self, node_id: u64, status: String) {
-        // Status from prover_runtime already contains timestamp, no need to add another one
         let needs_update = {
             let lines = self.node_lines.read().await;
             lines.get(&node_id) != Some(&status)
@@ -150,125 +145,79 @@ impl FixedLineDisplay {
                 let mut lines = self.node_lines.write().await;
                 lines.insert(node_id, status);
             }
-            self.render_display_optimized().await;
+            self.render_display().await;
         }
     }
 
-    #[allow(dead_code)]
-    async fn remove_node(&self, node_id: u64) {
-        {
-            let mut lines = self.node_lines.write().await;
-            lines.remove(&node_id);
-        }
-    }
-
-    // Note: Replacement information feature removed
-
-    async fn render_display_optimized(&self) {
-        let lines = self.node_lines.read().await;
-        
-        // Check for memory defragmentation (enhanced version from 0.8.8)
+    async fn render_display(&self) {
+        // 检查内存碎片整理
         if self.defragmenter.should_defragment().await {
-            println!("🧹 Performing memory defragmentation...");
+            println!("🧹 执行内存碎片整理...");
             let result = self.defragmenter.defragment().await;
             
             if result.was_critical {
-                println!("🚨 Critical memory cleanup complete:");
+                println!("🚨 关键内存清理完成:");
             } else {
-                println!("🔧 Regular memory cleanup complete:");
+                println!("🔧 常规内存清理完成:");
             }
-            println!("   Memory: {:.1}% → {:.1}% (freed {:.1}%)", 
+            println!("   内存: {:.1}% → {:.1}% (释放 {:.1}%)", 
                      result.memory_before * 100.0, 
                      result.memory_after * 100.0,
                      result.memory_freed_percentage());
-            println!("   Freed space: {} KB", result.bytes_freed / 1024);
-            
-            // Force a hash recalculation after defragmentation
-            let mut last_hash = self.last_render_hash.lock().await;
-            *last_hash = 0; // Reset to force refresh
-            drop(last_hash);
+            println!("   释放空间: {} KB", result.bytes_freed / 1024);
         }
 
-        // Legacy memory pressure check as backup
-        if crate::utils::system::check_memory_pressure() {
-            println!("⚠️ High memory usage detected, performing additional cleanup...");
-            crate::utils::system::perform_memory_cleanup();
-            let mut last_hash = self.last_render_hash.lock().await;
-            *last_hash = 0; // Reset to force refresh
-            drop(last_hash);
-        }
+        // 渲染当前状态
+        print!("\x1b[2J\x1b[H"); // 清屏并移动到顶部
         
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for (id, status) in lines.iter() {
-            hasher.write_u64(*id);
-            hasher.write(status.as_bytes());
-        }
-        let current_hash = hasher.finish();
-        
-        let mut last_hash = self.last_render_hash.lock().await;
-        if *last_hash != current_hash {
-            *last_hash = current_hash;
-            drop(last_hash);
-            self.render_display(&lines).await;
-        }
-    }
-
-    async fn render_display(&self, lines: &HashMap<u64, String>) {
-        // 清屏并移动到顶部
-        print!("\x1b[2J\x1b[H");
-        
-        // Use cached string for time formatting
+        // 使用缓存的字符串格式
         let mut time_str = self.defragmenter.get_cached_string(64).await;
         time_str.push_str(&chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
         
-        // 标题
-        println!("🚀 Nexus Enhanced Batch Mining Monitor - {}", time_str);
-        println!("═══════════════════════════════════════");
+        println!("🚀 Nexus 增强型批处理挖矿监视器 - {}", time_str);
+        println!("═══════════════════════════════════════════");
         
-        // 统计信息 - 优化迭代器链避免多次遍历
+        let lines = self.node_lines.read().await;
+        
+        // 统计信息
         let (total_nodes, successful_count, failed_count, active_count) = lines.values()
             .fold((0, 0, 0, 0), |(total, success, failed, active), status| {
                 let new_total = total + 1;
-                let new_success = if status.contains("✅") || status.contains("Success") { success + 1 } else { success };
-                let new_failed = if status.contains("❌") || status.contains("Error") { failed + 1 } else { failed };
-                let new_active = if status.contains("🔄") || status.contains("⚠️") || status.contains("Task Fetcher") { active + 1 } else { active };
+                let new_success = if status.contains("✅") { success + 1 } else { success };
+                let new_failed = if status.contains("❌") { failed + 1 } else { failed };
+                let new_active = if status.contains("获取任务") || status.contains("生成证明") || status.contains("提交证明") { active + 1 } else { active };
                 (new_total, new_success, new_failed, new_active)
             });
         
-        println!("📊 Status: {} Total | {} Active | {} Success | {} Failed", 
+        println!("📊 状态: {} 总数 | {} 活跃 | {} 成功 | {} 失败", 
                  total_nodes, active_count, successful_count, failed_count);
         
-        // Show memory statistics periodically (enhanced from 0.8.8)
+        // 显示内存统计
         let stats = self.defragmenter.get_stats().await;
-        if stats.total_checks > 0 {
-            let cache_hit_rate = (stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses).max(1) as f64) * 100.0;
-            println!("🧠 Memory: {:.1}% | Cache: {:.1}% hit rate | Cleanups: {} | Freed: {} KB", 
-                     crate::utils::system::get_memory_usage_ratio() * 100.0,
-                     cache_hit_rate,
-                     stats.cleanups_performed,
-                     stats.bytes_freed / 1024);
-        } else {
-            // Fallback to basic memory info
-            let (used_mb, total_mb) = crate::utils::system::get_memory_info();
-            let usage_percentage = (used_mb as f64 / total_mb as f64) * 100.0;
-            println!("🧠 Memory: {:.1}% ({} MB / {} MB)", usage_percentage, used_mb, total_mb);
-        }
+        let memory_info = crate::system::get_memory_info();
+        let memory_percentage = (memory_info.0 as f64 / memory_info.1 as f64) * 100.0;
         
-        println!("───────────────────────────────────────");
+        println!("🧠 内存: {:.1}% ({} MB / {} MB) | 清理次数: {} | 释放: {} KB", 
+                memory_percentage, 
+                memory_info.0 / 1000,  // 转为MB并保留3位小数
+                memory_info.1 / 1000,
+                stats.cleanups_performed,
+                stats.bytes_freed / 1024);
         
-        // 按节点ID排序显示 - 预分配容量
-        let mut sorted_lines: Vec<_> = Vec::with_capacity(lines.len());
-        sorted_lines.extend(lines.iter());
+        println!("───────────────────────────────────────────");
+        
+        // 按节点ID排序显示
+        let mut sorted_lines: Vec<_> = lines.iter().collect();
         sorted_lines.sort_unstable_by_key(|(id, _)| *id);
         
         for (node_id, status) in sorted_lines {
-            println!("Node-{}: {}", node_id, status);
+            println!("节点-{}: {}", node_id, status);
         }
         
-        println!("───────────────────────────────────────");
-        println!("💡 Press Ctrl+C to stop all miners");
+        println!("───────────────────────────────────────────");
+        println!("💡 按 Ctrl+C 停止所有挖矿节点");
         
-        // Return time string to cache
+        // 归还缓存字符串
         self.defragmenter.return_string(time_str).await;
         
         // 强制刷新输出
@@ -279,224 +228,288 @@ impl FixedLineDisplay {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Initialize logger
-    env_logger::init();
-    
+    let nexus_environment_str = std::env::var("NEXUS_ENVIRONMENT").unwrap_or_default();
+    let environment = nexus_environment_str
+        .parse::<Environment>()
+        .unwrap_or(Environment::default());
+
+    let config_path = get_config_path()?;
+
     let args = Args::parse();
     match args.command {
-        Command::Start { node_id, env } => {
-            let mut node_id = node_id;
-            // If no node ID is provided, try to load it from the config file.
-            let config_path = get_config_path().expect("Failed to get config path");
-            if node_id.is_none() && config_path.exists() {
-                if let Ok(config) = Config::load_from_file(&config_path) {
-                    let node_id_as_u64 = config
-                        .node_id
-                        .parse::<u64>()
-                        .expect("Failed to parse node ID");
-                    node_id = Some(node_id_as_u64);
-                }
-            }
-
-            let environment = env.unwrap_or_default();
-            start(node_id, environment).await
+        Command::Start {
+            node_id,
+            headless,
+            max_threads,
+        } => start(node_id, environment, config_path, headless, max_threads).await,
+        Command::Logout => {
+            println!("Logging out and clearing node configuration file...");
+            Config::clear_node_config(&config_path).map_err(Into::into)
         }
-        
+        Command::RegisterUser { wallet_address } => {
+            println!("Registering user with wallet address: {}", wallet_address);
+            let orchestrator = Box::new(OrchestratorClient::new(environment));
+            register_user(&wallet_address, &config_path, orchestrator).await
+        }
+        Command::RegisterNode { node_id } => {
+            let orchestrator = Box::new(OrchestratorClient::new(environment));
+            register_node(node_id, &config_path, orchestrator).await
+        }
         Command::BatchFile {
             file,
             env,
             start_delay,
             proof_interval,
             max_concurrent,
+            workers_per_node,
             verbose,
         } => {
             if verbose {
-                std::env::set_var("RUST_LOG", "debug");
+                unsafe {
+                    std::env::set_var("RUST_LOG", "debug");
+                }
+                env_logger::init();
+            } else {
+                unsafe {
+                    std::env::set_var("RUST_LOG", "info");
+                }
                 env_logger::init();
             }
             let environment = env.unwrap_or_default();
-            start_batch_from_file_with_runtime(&file, environment, start_delay, proof_interval, max_concurrent, verbose).await
-        }
-
-        Command::CreateExamples { dir } => {
-            NodeList::create_example_files(&dir)
-                .map_err(|e| -> Box<dyn Error> { Box::new(e) })?;
-            
-            println!("🎉 Example node list files created successfully!");
-            println!("📂 Location: {}", dir);
-            println!("💡 Edit these files with your actual node IDs, then use:");
-            println!("   nexus batch-file --file {}/example_nodes.txt", dir);
-            Ok(())
-        }
-        
-        Command::Logout => {
-            let config_path = get_config_path().expect("Failed to get config path");
-            clear_node_config(&config_path).map_err(Into::into)
+            start_batch_processing(&file, environment, start_delay, proof_interval, max_concurrent, workers_per_node).await
         }
     }
 }
 
 /// Starts the Nexus CLI application.
-async fn start(node_id: Option<u64>, env: Environment) -> Result<(), Box<dyn Error>> {
-    if node_id.is_some() {
-        // Use headless mode for single node with ID
-        start_headless_prover(node_id, env).await
+///
+/// # Arguments
+/// * `node_id` - This client's unique identifier, if available.
+/// * `env` - The environment to connect to.
+/// * `config_path` - Path to the configuration file.
+/// * `headless` - If true, runs without the terminal UI.
+/// * `max_threads` - Optional maximum number of threads to use for proving.
+async fn start(
+    node_id: Option<u64>,
+    env: Environment,
+    config_path: std::path::PathBuf,
+    headless: bool,
+    max_threads: Option<u32>,
+) -> Result<(), Box<dyn Error>> {
+    let mut node_id = node_id;
+    // If no node ID is provided, try to load it from the config file.
+    if node_id.is_none() && config_path.exists() {
+        let config = Config::load_from_file(&config_path)?;
+        node_id = Some(config.node_id.parse::<u64>().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "Failed to parse node_id {:?} from the config file as a u64: {}",
+                    config.node_id, e
+                ),
+            )
+        })?);
+        println!("Read Node ID: {} from config file", node_id.unwrap());
+    }
+
+    let node_id_value = node_id.unwrap_or_default();
+    // 定义状态回调
+    let status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync>> = None;
+
+    // Create a signing key for the prover.
+    let signing_key = match crate::key_manager::load_or_generate_signing_key() {
+        Ok(key) => key,
+        Err(e) => {
+            warn!("节点 {} 加载签名密钥失败: {}", node_id_value, e);
+            if let Some(ref callback) = status_callback {
+                callback(node_id_value, format!("加载密钥失败: {}", e));
+            }
+            return Ok(());
+        }
+    };
+    let orchestrator_client = OrchestratorClient::new(env);
+    // Clamp the number of workers to [1,8]. Keep this low for now to avoid rate limiting.
+    let num_workers: usize = max_threads.unwrap_or(1).clamp(1, 8) as usize;
+    let (shutdown_sender, _) = broadcast::channel(1); // Only one shutdown signal needed
+
+    // Load config to get client_id for analytics
+    let config_path = get_config_path()?;
+    let client_id = if config_path.exists() {
+        match Config::load_from_file(&config_path) {
+            Ok(config) => {
+                // First try user_id, then node_id, then fallback to UUID
+                if !config.user_id.is_empty() {
+                    config.user_id
+                } else if !config.node_id.is_empty() {
+                    config.node_id
+                } else {
+                    uuid::Uuid::new_v4().to_string() // Fallback to random UUID
+                }
+            }
+            Err(_) => uuid::Uuid::new_v4().to_string(), // Fallback to random UUID
+        }
     } else {
-        // Use UI mode for interactive setup
-        start_with_ui(node_id, env).await
+        uuid::Uuid::new_v4().to_string() // Fallback to random UUID
+    };
+
+    let (mut event_receiver, mut join_handles) = match node_id {
+        Some(node_id) => {
+            start_authenticated_workers(
+                node_id,
+                signing_key.clone(),
+                orchestrator_client.clone(),
+                num_workers,
+                shutdown_sender.subscribe(),
+                env,
+                client_id,
+            )
+            .await
+        }
+        None => {
+            start_anonymous_workers(num_workers, shutdown_sender.subscribe(), env, client_id).await
+        }
+    };
+
+    if !headless {
+        // Terminal setup
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+        // Initialize the terminal with Crossterm backend.
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+
+        // Create the application and run it.
+        let app = ui::App::new(
+            node_id,
+            *orchestrator_client.environment(),
+            event_receiver,
+            shutdown_sender,
+        );
+        let res = ui::run(&mut terminal, app).await;
+
+        // Clean up the terminal after running the application.
+        disable_raw_mode()?;
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+        terminal.show_cursor()?;
+
+        res?;
+    } else {
+        // Headless mode: log events to console.
+
+        // Trigger shutdown on Ctrl+C
+        let shutdown_sender_clone = shutdown_sender.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                let _ = shutdown_sender_clone.send(());
+            }
+        });
+
+        let mut shutdown_receiver = shutdown_sender.subscribe();
+        loop {
+            tokio::select! {
+                Some(event) = event_receiver.recv() => {
+                    println!("{}", event);
+                }
+                _ = shutdown_receiver.recv() => {
+                    break;
+                }
+            }
+        }
     }
-}
-
-/// Start with UI (original logic)
-async fn start_with_ui(
-    node_id: Option<u64>,
-    env: Environment,
-) -> Result<(), Box<dyn Error>> {
-    // Terminal setup
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    // Create app and run it
-    let res = ui::run(&mut terminal, ui::App::new(node_id, env, crate::orchestrator_client::OrchestratorClient::new(env)));
-
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        println!("{err:?}");
+    println!("\nExiting...");
+    for handle in join_handles.drain(..) {
+        let _ = handle.await;
     }
-
+    println!("Nexus CLI application exited successfully.");
     Ok(())
 }
 
-async fn start_headless_prover(
-    node_id: Option<u64>,
-    env: Environment,
-) -> Result<(), Box<dyn Error>> {
-    println!("🚀 Starting Nexus Prover in headless mode...");
-    prover::start_prover(env, node_id).await?;
-    Ok(())
-}
-
-/// 高效批处理启动器 - 使用prover_runtime架构 (解决内存占用过高问题)
-async fn start_batch_from_file_with_runtime(
+// 添加批处理函数实现
+async fn start_batch_processing(
     file_path: &str,
-    env: Environment,
+    environment: Environment,
     start_delay: f64,
     proof_interval: u64,
     max_concurrent: usize,
-    _verbose: bool,
+    workers_per_node: usize,
 ) -> Result<(), Box<dyn Error>> {
-    let node_list = node_list::NodeList::load_from_file(file_path)?;
+    // 加载节点列表
+    let node_list = node_list::NodeList::load_from_file(file_path)
+        .map_err(|e| format!("读取节点列表文件失败: {}", e))?;
+    
+    // 检查是否为空
+    if node_list.is_empty() {
+        return Err("节点列表为空".into());
+    }
+    
     let all_nodes = node_list.node_ids().to_vec();
     
-    if all_nodes.is_empty() {
-        return Err("Empty node list".into());
-    }
-    
+    // 计算实际并发数
     let actual_concurrent = max_concurrent.min(all_nodes.len());
     
-    println!("🚀 Nexus Enhanced Runtime Batch Mode");
-    println!("📁 Node file: {}", file_path);
-    println!("📊 Total nodes: {}", all_nodes.len());
-    println!("🔄 Max concurrent: {}", actual_concurrent);
-    println!("⏱️  Start delay: {:.1}s, Proof interval: {}s", start_delay, proof_interval);
-    println!("🌍 Environment: {:?}", env);
-    println!("🎯 Architecture: High-efficiency prover_runtime");
-    println!("🧠 Memory optimization: ENABLED");
+    println!("🚀 Nexus 增强型批处理模式");
+    println!("📁 节点文件: {}", file_path);
+    println!("📊 节点总数: {}", all_nodes.len());
+    println!("🔄 最大并发: {}", actual_concurrent);
+    println!("⏱️  启动延迟: {:.1}s, 证明间隔: {}s", start_delay, proof_interval);
+    println!("🌍 环境: {:?}", environment);
+    println!("🧵 每节点工作线程: {}", workers_per_node);
+    println!("🧠 内存优化: 已启用");
     println!("───────────────────────────────────────");
     
-    // 创建高级显示管理器
-    let display = Arc::new(FixedLineDisplay::new(actual_concurrent));
-    display.render_display(&std::collections::HashMap::new()).await;
+    // 创建固定行显示管理器
+    let display = Arc::new(FixedLineDisplay::new());
+    display.render_display().await;
     
-    // 使用高效工作池为每个节点
-    let mut join_set = JoinSet::new();
+    // 创建增强型Orchestrator客户端
+    let orchestrator = crate::orchestrator::OrchestratorClient::new(environment.clone());
+    
+    // 创建批处理工作器
     let (shutdown_sender, _) = broadcast::channel(1);
     
-    for (index, node_id) in all_nodes.iter().take(actual_concurrent).enumerate() {
-        let node_id = *node_id;
-        let env = env.clone();
-        let display = display.clone();
-        let shutdown_rx = shutdown_sender.subscribe();
-        
-        // 添加启动延迟
-        if index > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs_f64(start_delay)).await;
-        }
-        
-        // 修复: 确保所有错误类型都实现Send trait
-        join_set.spawn(async move {
-            let prefix = format!("Node-{}", node_id);
-            let display_clone = display.clone();
-            
-            // 创建状态回调函数用于固定位置显示
-            let status_callback = Box::new(move |status: String| {
-                let display = display_clone.clone();
-                let node_id = node_id;
-                tokio::spawn(async move {
-                    display.update_node_status(node_id, status).await;
-                });
-            });
-            
-            // 启动内存优化的认证证明循环
-            match crate::prover_runtime::run_authenticated_proving_optimized(
-                node_id,
-                env,
-                prefix.clone(),
-                proof_interval,
-                shutdown_rx,
-                Some(status_callback),
-            ).await {
-                Ok(_) => {
-                    display.update_node_status(node_id, "Stopped".to_string()).await;
-                }
-                Err(e) => {
-                    // 将错误转换为字符串，避免使用不满足Send的错误类型
-                    let error_message = format!("Error: {}", e);
-                    display.update_node_status(node_id, error_message).await;
-                }
-            }
-            
-            // 返回Result<(), String>而不是ProverError，确保满足Send
-            Ok::<(), String>(())
+    // 限制当前批次大小
+    let current_batch: Vec<_> = all_nodes.into_iter().take(actual_concurrent).collect();
+    
+    // 创建状态回调
+    let display_clone = display.clone();
+    let status_callback: Box<dyn Fn(u64, String) + Send + Sync> = Box::new(move |node_id: u64, status: String| {
+        let display = display_clone.clone();
+        tokio::spawn(async move {
+            display.update_node_status(node_id, status).await;
         });
+    });
+    
+    // 启动优化的批处理工作器
+    let join_handles = crate::prover_runtime::start_optimized_batch_workers(
+        current_batch,
+        orchestrator,
+        workers_per_node,
+        start_delay,
+        proof_interval,
+        environment,
+        shutdown_sender.subscribe(),
+        Some(status_callback),
+    ).await;
+    
+    // 等待 Ctrl+C 信号
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!("\n接收到 Ctrl+C，正在停止所有节点...");
+            let _ = shutdown_sender.send(());
+        }
     }
     
-    // 监控和错误处理
-    monitor_runtime_workers(join_set, display).await;
+    // 等待所有工作器退出
+    for handle in join_handles {
+        let _ = handle.await;
+    }
     
+    println!("所有节点已停止");
     Ok(())
 }
-
-/// 监控高效运行时工作器
-async fn monitor_runtime_workers(
-    mut join_set: JoinSet<Result<(), String>>, // 修改这里返回String而不是ProverError
-    display: Arc<FixedLineDisplay>,
-) {
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok(Ok(())) => {
-                // 工作器正常结束
-            }
-            Ok(Err(e)) => {
-                println!("⚠️ Worker error: {}", e);
-            }
-            Err(e) => {
-                println!("💥 Worker panic: {}", e);
-            }
-        }
-        
-        // 更新显示
-        display.render_display_optimized().await;
-    }
-} 

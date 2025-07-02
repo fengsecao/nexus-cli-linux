@@ -1,55 +1,104 @@
-use crate::utils::system::measure_gflops;
+use crate::system::measure_gflops;
 use colored::Colorize;
+use crate::environment::Environment;
+use crossterm::style::Stylize as CrosstermStylize;
 
-pub const LOGO_NAME: &str = r#"
-  ███╗   ██╗  ███████╗  ██╗  ██╗  ██╗   ██╗  ███████╗
-  ████╗  ██║  ██╔════╝  ╚██╗██╔╝  ██║   ██║  ██╔════╝
-  ██╔██╗ ██║  █████╗     ╚███╔╝   ██║   ██║  ███████╗
-  ██║╚██╗██║  ██╔══╝     ██╔██╗   ██║   ██║  ╚════██║
-  ██║ ╚████║  ███████╗  ██╔╝ ██╗  ╚██████╔╝  ███████║
-  ╚═╝  ╚═══╝  ╚══════╝  ╚═╝  ╚═╝   ╚═════╝   ╚══════╝
-"#;
+/// 渲染ASCII艺术横幅
+pub fn render_ascii_banner(text: &str) -> Vec<String> {
+    let height = 7; // ASCII艺术高度
+    let mut result = vec![String::new(); height];
 
-#[allow(unused)]
-pub fn print_banner(environment: &crate::environment::Environment) {
-    // Split the logo into lines and color them differently
-    let logo_lines: Vec<&str> = LOGO_NAME.lines().collect();
-    for line in logo_lines {
+    for c in text.chars() {
+        match c {
+            'N' => {
+                result[0].push_str("█   █ ");
+                result[1].push_str("██  █ ");
+                result[2].push_str("█ █ █ ");
+                result[3].push_str("█ ██  ");
+                result[4].push_str("█   █ ");
+                result[5].push_str("█   █ ");
+                result[6].push_str("     ");
+            },
+            'e' => {
+                result[0].push_str("     ");
+                result[1].push_str("     ");
+                result[2].push_str(" ███ ");
+                result[3].push_str("█  █ ");
+                result[4].push_str("█  █ ");
+                result[5].push_str(" ████");
+                result[6].push_str("     ");
+            },
+            'x' => {
+                result[0].push_str("     ");
+                result[1].push_str("     ");
+                result[2].push_str("█   █");
+                result[3].push_str(" █ █ ");
+                result[4].push_str("  █  ");
+                result[5].push_str("█   █");
+                result[6].push_str("     ");
+            },
+            'u' => {
+                result[0].push_str("     ");
+                result[1].push_str("     ");
+                result[2].push_str("█   █");
+                result[3].push_str("█   █");
+                result[4].push_str("█   █");
+                result[5].push_str(" ███ ");
+                result[6].push_str("     ");
+            },
+            's' => {
+                result[0].push_str("     ");
+                result[1].push_str("     ");
+                result[2].push_str(" ████");
+                result[3].push_str("█    ");
+                result[4].push_str(" ███ ");
+                result[5].push_str("    █");
+                result[6].push_str("████ ");
+            },
+            _ => {
+                for i in 0..height {
+                    result[i].push_str("  ");
+                }
+            }
+        }
+    }
+
+    // 为了视觉效果，转换ASCII为彩色文本
+    let mut colored_lines = Vec::new();
+    for line in result {
         let mut colored_line = String::new();
         for c in line.chars() {
             if c == '█' {
-                colored_line.push_str(&format!("{}", "█".bright_white()));
+                // 使用普通字符串，没有颜色
+                colored_line.push(c);
             } else {
-                colored_line.push_str(&format!("{}", c.to_string().cyan()));
+                // 使用普通字符串，没有颜色
+                colored_line.push(c);
             }
         }
-        println!("{}", colored_line);
+        colored_lines.push(colored_line);
     }
-
-    let version = match option_env!("CARGO_PKG_VERSION") {
-        Some(v) => format!("v{}", v),
-        None => "(unknown version)".into(),
-    };
-    println!(
-        "{} {} {}\n",
-        "  Welcome to the".bright_white(),
-        "Nexus Network CLI".bright_cyan().bold(),
-        version.bright_white()
-    );
-    println!(
-        "{}",
-        "  Use the CLI to contribute to the massively-parallelized Nexus proof network."
-            .bright_white()
-    );
-    println!();
-    println!(
-        "{}: {}",
-        "Computational capacity of this node".bold(),
-        format!("{:.2} GFLOPS", measure_gflops()).bright_cyan()
-    );
-    println!(
-        "{}: {}",
-        "Environment".bold(),
-        environment.to_string().bright_cyan()
-    );
+    
+    colored_lines
 }
+
+/// 生成CLI欢迎横幅
+pub fn generate_welcome_banner(environment: &Environment, version: &str) -> Vec<String> {
+    vec![
+        "".to_string(),
+        "  Welcome to the".to_string(),
+        "Nexus Network CLI".to_string(),
+        version.to_string(),
+        "".to_string(),
+        "  Use the CLI to contribute to the massively-parallelized Nexus proof network."
+            .to_string(),
+        "".to_string(),
+        "".to_string(),
+        "Computational capacity of this node".to_string(),
+        format!("{:.2} GFLOPS", measure_gflops()),
+        "".to_string(),
+        "Environment".to_string(),
+        environment.to_string(),
+        "".to_string(),
+    ]
+} 

@@ -1,16 +1,17 @@
 //! Dashboard screen rendering.
 
 use crate::environment::Environment;
-use crate::ui::ProverEvent;
-use crate::utils::system;
+use crate::events::{Event as WorkerEvent, EventType};
+use crate::system;
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::prelude::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use ratatui::Frame;
 use std::collections::VecDeque;
 use std::time::Instant;
 
 /// State for the dashboard screen, containing node information and menu items.
+#[derive(Debug, Clone)]
 pub struct DashboardState {
     /// Unique identifier for the node.
     pub node_id: Option<u64>,
@@ -34,7 +35,7 @@ pub struct DashboardState {
     pub total_ram_gb: f64,
 
     /// A queue of events received from worker threads.
-    pub events: VecDeque<ProverEvent>,
+    pub events: VecDeque<WorkerEvent>,
 }
 
 impl DashboardState {
@@ -48,7 +49,7 @@ impl DashboardState {
         node_id: Option<u64>,
         environment: Environment,
         start_time: Instant,
-        events: &VecDeque<ProverEvent>,
+        events: &VecDeque<WorkerEvent>,
     ) -> Self {
         Self {
             node_id,
@@ -62,6 +63,11 @@ impl DashboardState {
         }
     }
 }
+
+// const SUCCESS_ICON: &str = "✅";
+// const ERROR_ICON: &str = "⚠️";
+// const REFRESH_ICON: &str = "🔄";
+// const SHUTDOWN_ICON: &str = "🔴";
 
 /// Render the dashboard screen.
 pub fn render_dashboard(f: &mut Frame, state: &DashboardState) {
@@ -118,11 +124,6 @@ pub fn render_dashboard(f: &mut Frame, state: &DashboardState) {
             "NODE ID: Not connected".to_string()
         };
         items.push(ListItem::new(node_id_text));
-        //
-        // items.push(ListItem::new(format!(
-        //     "NODE ID: {}",
-        //     state.node_id.unwrap_or(0)
-        // )));
 
         // Environment
         items.push(ListItem::new(format!("ENVIRONMENT: {}", state.environment)));
@@ -168,23 +169,28 @@ pub fn render_dashboard(f: &mut Frame, state: &DashboardState) {
     let logs: Vec<String> = state
         .events
         .iter()
-        .map(|event| match event {
-            ProverEvent::Message {
-                worker_id: _worker_id,
-                data,
-            } => data.to_string(),
-            ProverEvent::Done { worker_id } => {
-                format!("[{}] Task completed", worker_id)
-            }
+        .filter(|event| event.should_display())
+        .map(|event| {
+            let icon = match event.event_type {
+                EventType::Success => "✅",
+                EventType::Error => "⚠️",
+                EventType::Refresh => "🔄",
+                EventType::Shutdown => "🔴",
+            };
+            format!("{} [{}] {}", icon, event.timestamp, event.msg)
         })
         .collect();
 
     // Logs using List
-    let log_items: Vec<ListItem> = logs
+    let mut log_items: Vec<ListItem> = logs
         .iter()
         .rev() // newest first
         .map(|line| ListItem::new(line.clone()))
         .collect();
+
+    if log_items.is_empty() {
+        log_items.push(ListItem::new("Starting...".to_string()));
+    }
 
     let log_widget = List::new(log_items)
         .block(Block::default().title("LOGS").borders(Borders::NONE))
@@ -197,7 +203,7 @@ pub fn render_dashboard(f: &mut Frame, state: &DashboardState) {
     f.render_widget(log_widget, body_chunks[1]);
 
     // Footer
-    let footer = Paragraph::new("[Q] Quit q [S] Settings  [←][→] Navigate")
+    let footer = Paragraph::new("[Q] Quit")
         .alignment(Alignment::Center) // ← Horizontally center the text
         .style(
             Style::default()

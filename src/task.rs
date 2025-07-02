@@ -20,7 +20,7 @@ pub struct Task {
 
 impl Task {
     /// Creates a new task with the given parameters.
-    #[allow(dead_code)]
+    #[allow(unused)]
     pub fn new(task_id: String, program_id: String, public_inputs: Vec<u8>) -> Self {
         Task {
             task_id,
@@ -41,6 +41,17 @@ impl Display for Task {
     }
 }
 
+// From Task
+impl From<&crate::nexus_orchestrator::Task> for Task {
+    fn from(task: &crate::nexus_orchestrator::Task) -> Self {
+        Task {
+            task_id: task.task_id.clone(),
+            program_id: task.program_id.clone(),
+            public_inputs: task.public_inputs.clone(),
+        }
+    }
+}
+
 // From GetProofTaskResponse
 impl From<&crate::nexus_orchestrator::GetProofTaskResponse> for Task {
     fn from(response: &crate::nexus_orchestrator::GetProofTaskResponse) -> Self {
@@ -50,4 +61,4 @@ impl From<&crate::nexus_orchestrator::GetProofTaskResponse> for Task {
             public_inputs: response.public_inputs.clone(),
         }
     }
-} 
+}

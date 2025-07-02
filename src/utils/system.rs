@@ -1,325 +1,93 @@
-//! System information and performance measurements with advanced memory optimization
-
-use rayon::prelude::*;
-use std::hint::black_box;
-use std::thread::available_parallelism;
-use std::time::Instant;
-use sysinfo::System;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::collections::VecDeque;
-use once_cell::sync::Lazy;
-use parking_lot::Mutex as ParkingMutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+use rayon::prelude::*;
+use rayon::iter::IntoParallelRefIterator;
+use parking_lot::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
+use log::{debug, warn, error};
 
-// Use singleton to avoid frequent system info reallocation
-static SYSTEM_INFO: Lazy<Arc<ParkingMutex<System>>> = Lazy::new(|| {
-    let mut system = System::new_all();
-    system.refresh_all();
-    Arc::new(ParkingMutex::new(system))
-});
+// 导入系统模块，用于获取内存信息
+use crate::system::{get_memory_info, process_memory_gb, total_memory_gb};
 
-// High-performance timestamp cache - second-level caching to avoid duplicate formatting (backup feature)
-#[allow(dead_code)]
-static LAST_TIMESTAMP_SEC: AtomicU64 = AtomicU64::new(0);
-#[allow(dead_code)]
-static CACHED_TIMESTAMP: Lazy<ParkingMutex<String>> = Lazy::new(|| {
-    ParkingMutex::new(chrono::Local::now().format("%H:%M:%S").to_string())
-});
+// 内存使用比率阈值 - 超过这个值会触发内存清理
+const HIGH_MEMORY_THRESHOLD: f64 = 0.85;
+const CRITICAL_MEMORY_THRESHOLD: f64 = 0.92;
+const GC_COOL_DOWN_SECS: u64 = 60; // 避免太频繁触发内存清理
 
-/// High-performance timestamp generation - second-level caching to avoid duplicate formatting (backup feature)
-#[allow(dead_code)]
-pub fn get_timestamp_efficient() -> String {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    
-    let last = LAST_TIMESTAMP_SEC.load(Ordering::Relaxed);
-    
-    if now_secs != last && LAST_TIMESTAMP_SEC.compare_exchange_weak(
-        last, now_secs, Ordering::Relaxed, Ordering::Relaxed
-    ).is_ok() {
-        // Only reformat when seconds change
-        let new_timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        *CACHED_TIMESTAMP.lock() = new_timestamp.clone();
-        new_timestamp
-    } else {
-        // Use cached timestamp
-        CACHED_TIMESTAMP.lock().clone()
-    }
+/// 检查系统内存压力
+pub fn check_memory_pressure() -> bool {
+    let (used_mb, total_mb) = get_memory_info();
+    let ratio = used_mb as f64 / total_mb as f64;
+    ratio > HIGH_MEMORY_THRESHOLD
 }
 
-/// Memory defragmentation configuration and state
-#[derive(Debug, Clone)]
-pub struct MemoryDefragConfig {
-    /// Interval between automatic defragmentation checks (seconds)
-    pub check_interval: u64,
-    /// Memory usage threshold to trigger defragmentation (0.0-1.0)
-    pub pressure_threshold: f64,
-    /// Critical memory threshold for aggressive cleanup (0.0-1.0)
-    pub critical_threshold: f64,
-    /// Maximum size for string/buffer caches
-    pub max_cache_size: usize,
+/// 获取系统内存使用率
+pub fn get_memory_usage_ratio() -> f64 {
+    let (used_mb, total_mb) = get_memory_info();
+    used_mb as f64 / total_mb as f64
 }
 
-impl Default for MemoryDefragConfig {
-    fn default() -> Self {
-        Self {
-            check_interval: 180, // 3 minutes for 0.7.9 (more frequent than 0.8.8)
-            pressure_threshold: 0.85, // 85% threshold
-            critical_threshold: 0.90, // 90% critical threshold (user requested)
-            max_cache_size: 500, // Smaller cache for 0.7.9
+/// 强制进行内存清理 - 调用垃圾回收并释放缓存
+pub fn perform_memory_cleanup() {
+    debug!("执行内存清理...");
+    
+    #[cfg(target_os = "linux")]
+    unsafe {
+        // 在Linux上使用libc的malloc_trim来释放未使用的内存
+        // 这通常比标准的GC更有效
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
         }
+        let _ = malloc_trim(0);
+    }
+    
+    // 强制垃圾回收
+    #[cfg(feature = "jemalloc")]
+    unsafe {
+        // 如果使用了jemalloc，则调用purge释放内存
+        use jemallocator::ffi::mallctl;
+        let _ = mallctl("arena.0.purge".as_ptr() as *const _, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
+    }
+    
+    // 在所有平台上，触发一次大型内存分配和释放，帮助堆整理
+    {
+        // 分配和释放一些内存，促使分配器整理堆
+        let size = 16 * 1024 * 1024; // 16 MB
+        let mut big_vec = Vec::<u8>::with_capacity(size);
+        big_vec.resize(size, 0);
+        drop(big_vec);
+    }
+    
+    // 手动请求垃圾回收
+    #[cfg(not(target_os = "windows"))]
+    unsafe {
+        // 非Windows系统上调用malloc_trim
+        unsafe extern "C" {
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        let _ = malloc_trim(0);
     }
 }
 
-/// Memory fragmentation analyzer and cleaner
-#[derive(Debug)]
-pub struct MemoryDefragmenter {
-    config: MemoryDefragConfig,
-    last_check: Arc<Mutex<Instant>>,
-    string_cache: Arc<Mutex<VecDeque<String>>>,
-    buffer_cache: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    stats: Arc<Mutex<DefragStats>>,
-}
-
-#[derive(Debug, Default)]
-pub struct DefragStats {
+/// 内存碎片整理器的结果统计
+pub struct DefragmenterStats {
+    pub cache_hits: u64,
+    pub cache_misses: u64,
     pub total_checks: u64,
     pub cleanups_performed: u64,
     pub bytes_freed: u64,
-    pub cache_hits: u64,
-    pub cache_misses: u64,
 }
 
-impl MemoryDefragmenter {
-    /// Create a new memory defragmenter with default configuration
-    pub fn new() -> Self {
-        Self::with_config(MemoryDefragConfig::default())
-    }
-
-    /// Create a new memory defragmenter with custom configuration
-    pub fn with_config(config: MemoryDefragConfig) -> Self {
-        let max_cache_size = config.max_cache_size;
-        Self {
-            config,
-            last_check: Arc::new(Mutex::new(Instant::now())),
-            string_cache: Arc::new(Mutex::new(VecDeque::with_capacity(max_cache_size))),
-            buffer_cache: Arc::new(Mutex::new(VecDeque::with_capacity(max_cache_size))),
-            stats: Arc::new(Mutex::new(DefragStats::default())),
-        }
-    }
-
-    /// Check if defragmentation should be performed
-    pub async fn should_defragment(&self) -> bool {
-        let mut last_check = self.last_check.lock().await;
-        let now = Instant::now();
-        
-        if now.duration_since(*last_check).as_secs() >= self.config.check_interval {
-            *last_check = now;
-            let mut stats = self.stats.lock().await;
-            stats.total_checks += 1;
-            drop(stats);
-            drop(last_check);
-            
-            let memory_usage = get_memory_usage_ratio();
-            memory_usage >= self.config.pressure_threshold
-        } else {
-            false
-        }
-    }
-
-    /// Perform memory defragmentation and cleanup
-    pub async fn defragment(&self) -> DefragResult {
-        let memory_before = get_memory_usage_ratio();
-        let mut bytes_freed = 0u64;
-        
-        // Aggressive cleanup if critical threshold reached
-        let is_critical = memory_before >= self.config.critical_threshold;
-        
-        // Clean string cache
-        let freed_strings = self.cleanup_string_cache(is_critical).await;
-        bytes_freed += freed_strings;
-        
-        // Clean buffer cache
-        let freed_buffers = self.cleanup_buffer_cache(is_critical).await;
-        bytes_freed += freed_buffers;
-        
-        // Force garbage collection for system allocator
-        if is_critical {
-            self.force_allocator_cleanup().await;
-        }
-        
-        // Update statistics
-        let mut stats = self.stats.lock().await;
-        stats.cleanups_performed += 1;
-        stats.bytes_freed += bytes_freed;
-        
-        let memory_after = get_memory_usage_ratio();
-        
-        DefragResult {
-            memory_before,
-            memory_after,
-            bytes_freed,
-            was_critical: is_critical,
-        }
-    }
-
-    /// Clean up string cache with optional aggressive mode
-    async fn cleanup_string_cache(&self, aggressive: bool) -> u64 {
-        let mut cache = self.string_cache.lock().await;
-        
-        let target_size = if aggressive {
-            self.config.max_cache_size / 4 // Keep only 25%
-        } else {
-            self.config.max_cache_size / 2 // Keep 50%
-        };
-        
-        let mut bytes_freed = 0u64;
-        while cache.len() > target_size {
-            if let Some(s) = cache.pop_front() {
-                bytes_freed += s.capacity() as u64;
-            }
-        }
-        
-        // Shrink capacity if possible
-        cache.shrink_to_fit();
-        
-        bytes_freed
-    }
-
-    /// Clean up buffer cache with optional aggressive mode
-    async fn cleanup_buffer_cache(&self, aggressive: bool) -> u64 {
-        let mut cache = self.buffer_cache.lock().await;
-        
-        let target_size = if aggressive {
-            self.config.max_cache_size / 4 // Keep only 25%
-        } else {
-            self.config.max_cache_size / 2 // Keep 50%
-        };
-        
-        let mut bytes_freed = 0u64;
-        while cache.len() > target_size {
-            if let Some(buf) = cache.pop_front() {
-                bytes_freed += buf.capacity() as u64;
-            }
-        }
-        
-        // Shrink capacity if possible
-        cache.shrink_to_fit();
-        
-        bytes_freed
-    }
-
-    /// Force system allocator cleanup (platform-specific)
-    async fn force_allocator_cleanup(&self) {
-        // For glibc malloc, we can try to trim
-        #[cfg(target_os = "linux")]
-        unsafe {
-            extern "C" {
-                fn malloc_trim(pad: usize) -> i32;
-            }
-            // Attempt to return unused memory to the system
-            malloc_trim(0);
-        }
-        
-        // For other platforms, we rely on natural cleanup
-        tokio::task::yield_now().await;
-    }
-
-    /// Get a reusable string from cache or create new one
-    pub async fn get_cached_string(&self, capacity: usize) -> String {
-        let mut cache = self.string_cache.lock().await;
-        
-        // Try to find a suitable string in cache
-        if let Some(mut s) = cache.pop_front() {
-            if s.capacity() >= capacity {
-                s.clear();
-                let mut stats = self.stats.lock().await;
-                stats.cache_hits += 1;
-                return s;
-            } else {
-                // Put it back if not suitable
-                cache.push_back(s);
-            }
-        }
-        
-        let mut stats = self.stats.lock().await;
-        stats.cache_misses += 1;
-        drop(stats);
-        
-        String::with_capacity(capacity)
-    }
-
-    /// Return a string to cache for reuse
-    pub async fn return_string(&self, mut s: String) {
-        s.clear();
-        let mut cache = self.string_cache.lock().await;
-        
-        if cache.len() < self.config.max_cache_size {
-            cache.push_back(s);
-        }
-    }
-
-    /// Get a reusable buffer from cache or create new one
-    #[allow(dead_code)]
-    pub async fn get_cached_buffer(&self, capacity: usize) -> Vec<u8> {
-        let mut cache = self.buffer_cache.lock().await;
-        
-        // Try to find a suitable buffer in cache
-        if let Some(mut buf) = cache.pop_front() {
-            if buf.capacity() >= capacity {
-                buf.clear();
-                let mut stats = self.stats.lock().await;
-                stats.cache_hits += 1;
-                return buf;
-            } else {
-                // Put it back if not suitable
-                cache.push_back(buf);
-            }
-        }
-        
-        let mut stats = self.stats.lock().await;
-        stats.cache_misses += 1;
-        drop(stats);
-        
-        Vec::with_capacity(capacity)
-    }
-
-    /// Return a buffer to cache for reuse
-    #[allow(dead_code)]
-    pub async fn return_buffer(&self, mut buf: Vec<u8>) {
-        buf.clear();
-        let mut cache = self.buffer_cache.lock().await;
-        
-        if cache.len() < self.config.max_cache_size {
-            cache.push_back(buf);
-        }
-    }
-
-    /// Get current statistics
-    pub async fn get_stats(&self) -> DefragStats {
-        let stats = self.stats.lock().await;
-        DefragStats {
-            total_checks: stats.total_checks,
-            cleanups_performed: stats.cleanups_performed,
-            bytes_freed: stats.bytes_freed,
-            cache_hits: stats.cache_hits,
-            cache_misses: stats.cache_misses,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct DefragResult {
+/// 内存碎片整理器结果
+pub struct DefragmentationResult {
     pub memory_before: f64,
     pub memory_after: f64,
     pub bytes_freed: u64,
     pub was_critical: bool,
 }
 
-impl DefragResult {
+impl DefragmentationResult {
     pub fn memory_freed_percentage(&self) -> f64 {
         if self.memory_before > 0.0 {
             ((self.memory_before - self.memory_after) / self.memory_before) * 100.0
@@ -329,106 +97,159 @@ impl DefragResult {
     }
 }
 
-pub fn get_memory_usage_ratio() -> f64 {
-    let mut system = SYSTEM_INFO.lock();
-    system.refresh_memory();
-    let total = system.total_memory() as f64;
-    let available = system.available_memory() as f64;
-    if total > 0.0 {
-        (total - available) / total
-    } else {
-        0.0
-    }
+/// 高级内存碎片整理器 - 提供智能内存清理和缓存字符串功能
+pub struct MemoryDefragmenter {
+    last_gc_time: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    total_checks: AtomicU64,
+    cleanups_performed: AtomicU64,
+    bytes_freed: AtomicU64,
+    is_defragmenting: AtomicBool,
+    
+    // 字符串缓存池 - 避免UI渲染期间的内存分配
+    string_cache: Arc<AsyncMutex<Vec<String>>>,
 }
 
-pub fn num_cores() -> usize {
-    available_parallelism().map(|n| n.get()).unwrap_or(1)
-}
-
-pub fn total_memory_gb() -> f64 {
-    let system = SYSTEM_INFO.lock();
-    system.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0)
-}
-
-#[allow(dead_code)]
-pub fn process_memory_gb() -> f64 {
-    let mut system = SYSTEM_INFO.lock();
-    system.refresh_all();
-    if let Some(process) = system.process(sysinfo::get_current_pid().unwrap()) {
-        process.memory() as f64 / (1024.0 * 1024.0 * 1024.0)
-    } else {
-        0.0
-    }
-}
-
-/// Check if system is under memory pressure
-pub fn check_memory_pressure() -> bool {
-    get_memory_usage_ratio() > 0.90 // 90% threshold for pressure (user requested)
-}
-
-/// Perform Linux-specific memory cleanup
-pub fn perform_memory_cleanup() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        extern "C" {
-            fn malloc_trim(pad: usize) -> i32;
+impl MemoryDefragmenter {
+    /// 创建新的内存碎片整理器
+    pub fn new() -> Self {
+        Self {
+            last_gc_time: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+            total_checks: AtomicU64::new(0),
+            cleanups_performed: AtomicU64::new(0),
+            bytes_freed: AtomicU64::new(0),
+            is_defragmenting: AtomicBool::new(false),
+            string_cache: Arc::new(AsyncMutex::new(Vec::with_capacity(32))),
         }
-        malloc_trim(0);
     }
-}
-
-#[allow(dead_code)]
-pub fn get_available_memory_mb() -> i32 {
-    let mut system = SYSTEM_INFO.lock();
-    system.refresh_memory();
-    (system.available_memory() / (1024 * 1024)) as i32
-}
-
-#[allow(dead_code)]
-pub fn estimate_peak_gflops() -> f32 {
-    let ncores = num_cores();
-    ncores as f32 * 100.0 // Estimate based on core count
-}
-
-pub fn measure_gflops() -> f32 {
-    let start = Instant::now();
-    let n = 10_000_000;
     
-    // Pre-allocate vector to avoid allocation overhead
-    let data: Vec<f32> = (0..n).map(|i| i as f32).collect();
-    
-    let result: f32 = data.par_iter()
-        .map(|&x| {
-            let mut y = x;
-            for _ in 0..10 {
-                y = y * 2.1 + 1.3; // Simple arithmetic operations
-            }
-            black_box(y)
-                })
-                .sum();
-
-    let duration = start.elapsed();
-    let ops = n as f32 * 10.0; // 10 operations per element
-    let gflops = (ops / duration.as_secs_f32()) / 1_000_000_000.0;
-    
-    // Use result to prevent optimization
-    if result > 0.0 {
-        gflops
-    } else {
-        0.0
+    /// 检查是否应该进行内存碎片整理
+    pub async fn should_defragment(&self) -> bool {
+        self.total_checks.fetch_add(1, Ordering::Relaxed);
+        
+        // 避免并发清理
+        if self.is_defragmenting.load(Ordering::Relaxed) {
+            return false;
+        }
+        
+        // 获取当前内存使用情况
+        let memory_ratio = get_memory_usage_ratio();
+        
+        // 检查是否满足清理条件
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        let last_gc = self.last_gc_time.load(Ordering::Relaxed);
+        let time_since_last_gc = now - last_gc;
+        
+        if memory_ratio > CRITICAL_MEMORY_THRESHOLD {
+            // 内存使用超过临界值，立即清理
+            debug!("内存使用超过临界值 {:.1}%，触发立即清理", memory_ratio * 100.0);
+            true
+        } else if memory_ratio > HIGH_MEMORY_THRESHOLD && time_since_last_gc > GC_COOL_DOWN_SECS {
+            // 内存使用超过高阈值且超过冷却时间
+            debug!("内存使用超过阈值 {:.1}%，上次清理在{}秒前", 
+                  memory_ratio * 100.0, time_since_last_gc);
+            true
+        } else {
+            false
+        }
     }
-}
-
-pub fn get_memory_info() -> (i32, i32) {
-    let mut system = SYSTEM_INFO.lock();
-    system.refresh_memory();
-    let total_mb = (system.total_memory() / (1024 * 1024)) as i32;
-    let available_mb = (system.available_memory() / (1024 * 1024)) as i32;
-    let used_mb = total_mb - available_mb;
-    (used_mb, total_mb)
-}
-
-#[allow(dead_code)]
-fn bytes_to_mb_i32(bytes: u64) -> i32 {
-    (bytes / (1024 * 1024)) as i32
-}
+    
+    /// 执行内存碎片整理
+    pub async fn defragment(&self) -> DefragmentationResult {
+        // 设置标志，避免并发清理
+        if self.is_defragmenting.compare_exchange(
+            false, true, Ordering::Acquire, Ordering::Relaxed
+        ).is_err() {
+            // 已经有一个清理进程在运行
+            return DefragmentationResult {
+                memory_before: 0.0,
+                memory_after: 0.0,
+                bytes_freed: 0,
+                was_critical: false,
+            };
+        }
+        
+        let memory_before = get_memory_usage_ratio();
+        let process_memory_before = process_memory_gb();
+        let is_critical = memory_before > CRITICAL_MEMORY_THRESHOLD;
+        
+        // 执行内存清理
+        perform_memory_cleanup();
+        
+        // 更新统计信息
+        self.cleanups_performed.fetch_add(1, Ordering::Relaxed);
+        
+        // 更新最后清理时间
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.last_gc_time.store(now, Ordering::Relaxed);
+        
+        // 给清理一点时间生效
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        let memory_after = get_memory_usage_ratio();
+        let process_memory_after = process_memory_gb();
+        let bytes_freed = if process_memory_after < process_memory_before {
+            ((process_memory_before - process_memory_after) * 1024.0 * 1024.0 * 1024.0) as u64
+        } else {
+            0
+        };
+        
+        // 更新释放的字节数
+        self.bytes_freed.fetch_add(bytes_freed, Ordering::Relaxed);
+        
+        // 重置状态
+        self.is_defragmenting.store(false, Ordering::Release);
+        
+        DefragmentationResult {
+            memory_before,
+            memory_after,
+            bytes_freed,
+            was_critical: is_critical,
+        }
+    }
+    
+    /// 获取统计信息
+    pub async fn get_stats(&self) -> DefragmenterStats {
+        DefragmenterStats {
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            total_checks: self.total_checks.load(Ordering::Relaxed),
+            cleanups_performed: self.cleanups_performed.load(Ordering::Relaxed),
+            bytes_freed: self.bytes_freed.load(Ordering::Relaxed),
+        }
+    }
+    
+    /// 从缓存池获取一个字符串
+    pub async fn get_cached_string(&self, capacity: usize) -> String {
+        let mut cache = self.string_cache.lock().await;
+        if let Some(mut s) = cache.pop() {
+            s.clear();
+            s.shrink_to(capacity);
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+            s
+        } else {
+            self.cache_misses.fetch_add(1, Ordering::Relaxed);
+            String::with_capacity(capacity)
+        }
+    }
+    
+    /// 将字符串归还给缓存池
+    pub async fn return_string(&self, s: String) {
+        let mut cache = self.string_cache.lock().await;
+        
+        // 限制缓存大小，避免过度缓存
+        if cache.len() < 100 {
+            cache.push(s);
+        }
+    }
+} 
