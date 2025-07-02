@@ -3,7 +3,7 @@ use std::str::FromStr;
 use clap::ValueEnum;
 
 /// Represents the different deployment environments available for the CLI.
-#[derive(Clone, Default, Copy, PartialEq, Eq, Debug, ValueEnum)]
+#[derive(Clone, Default, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Environment {
     /// Local development environment.
     Local,

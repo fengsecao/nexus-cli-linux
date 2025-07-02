@@ -6,10 +6,8 @@ use crate::orchestrator::{OrchestratorClient, error::OrchestratorError, Orchestr
 use crate::environment::Environment;
 use crate::task::Task;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use log::{debug, warn};
+use log::warn;
 use std::time::{Duration, Instant};
-use rand::Rng;
-use sha3::{Digest, Sha3_256};
 
 /// 增强型Orchestrator客户端
 pub struct EnhancedOrchestratorClient {
@@ -72,7 +70,7 @@ impl EnhancedOrchestratorClient {
         
         loop {
             attempts += 1;
-            match self.client.submit_proof(task_id, proof_hash, proof.clone(), signing_key, 1).await {
+            match self.client.submit_proof(task_id, proof_hash, proof.clone(), signing_key.clone(), 1).await {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     match &e {

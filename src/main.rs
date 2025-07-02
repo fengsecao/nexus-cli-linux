@@ -22,6 +22,7 @@ pub mod system;
 mod task;
 mod task_cache;
 mod ui;
+mod utils;
 mod workers;
 
 use crate::config::{Config, get_config_path};
@@ -29,21 +30,22 @@ use crate::environment::Environment;
 use crate::orchestrator::{Orchestrator, OrchestratorClient};
 use crate::prover_runtime::{start_anonymous_workers, start_authenticated_workers};
 use crate::register::{register_node, register_user};
+use crate::utils::system::MemoryDefragmenter;
 use clap::{ArgAction, Parser, Subcommand};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ed25519_dalek::SigningKey;
+// 未使用的导入
+// use ed25519_dalek::SigningKey;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{error::Error, io};
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use log::{debug, warn, info};
+use log::warn;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -120,7 +122,7 @@ enum Command {
 #[derive(Debug)]
 struct FixedLineDisplay {
     node_lines: Arc<RwLock<HashMap<u64, String>>>,
-    defragmenter: Arc<crate::utils::system::MemoryDefragmenter>,
+    defragmenter: Arc<MemoryDefragmenter>,
 }
 
 impl FixedLineDisplay {
@@ -262,8 +264,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             verbose,
         } => {
             if verbose {
-                std::env::set_var("RUST_LOG", "debug");
-                env_logger::init();
+                unsafe {
+                    std::env::set_var("RUST_LOG", "debug");
+                }
+            } else {
+                unsafe {
+                    std::env::set_var("RUST_LOG", "info");
+                }
             }
             let environment = env.unwrap_or_default();
             start_batch_processing(&file, environment, start_delay, proof_interval, max_concurrent, workers_per_node).await

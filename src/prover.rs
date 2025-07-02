@@ -1,7 +1,8 @@
 use crate::analytics::track;
 use crate::environment::Environment;
 use crate::task::Task;
-use crate::utils::system::{check_memory_pressure, perform_memory_cleanup, get_memory_usage_ratio, MemoryDefragmenter};
+use crate::system::{check_memory_pressure, perform_memory_cleanup, get_memory_usage_ratio};
+use crate::utils::system::MemoryDefragmenter;
 use log::{debug, error};
 use nexus_sdk::stwo::seq::Proof;
 use nexus_sdk::{KnownExitCodes, Local, Prover, Viewable, stwo::seq::Stwo};

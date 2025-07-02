@@ -10,7 +10,8 @@ use crate::orchestrator::OrchestratorClient;
 use crate::task::Task;
 use crate::task_cache::TaskCache;
 use crate::workers::{offline, online};
-use crate::utils::system::{check_memory_pressure, perform_memory_cleanup, get_memory_usage_ratio, MemoryDefragmenter};
+use crate::system::{check_memory_pressure, perform_memory_cleanup, get_memory_usage_ratio};
+use crate::utils::system::MemoryDefragmenter;
 use crate::prover::get_defragmenter;
 use ed25519_dalek::SigningKey;
 use nexus_sdk::stwo::seq::Proof;
@@ -25,6 +26,7 @@ use log::{debug, warn};
 use std::sync::Arc;
 use crate::orchestrator_client_enhanced::EnhancedOrchestratorClient;
 use sha3::Digest;
+use postcard;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -202,8 +204,6 @@ pub async fn start_optimized_batch_workers(
         let mut shutdown_rx = shutdown.resubscribe();
         let environment = environment.clone();
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
-        // 不复制回调函数，而是直接使用引用
-        let callback_opt = status_callback.as_ref();
         
         let handle = tokio::spawn(async move {
             run_memory_optimized_node(
@@ -215,7 +215,7 @@ pub async fn start_optimized_batch_workers(
                 environment,
                 client_id,
                 shutdown_rx,
-                callback_opt,
+                status_callback,  // 直接传递Box<dyn Fn...>
             ).await;
         });
         
@@ -296,13 +296,16 @@ async fn run_memory_optimized_node(
                             
                             // 计算哈希
                             // 使用正确的sha3::Digest trait方法
-                    let mut hasher = sha3::Sha3_256::new();
-                    hasher.update(&proof);
-                    let hash = hasher.finalize();
-                    let proof_hash = format!("{:x}", hash);
+                            let mut hasher = sha3::Sha3_256::new();
+                            // 将Proof转换为Vec<u8>
+                            let proof_bytes = postcard::to_allocvec(&proof)
+                                .unwrap_or_else(|_| Vec::new());
+                            hasher.update(&proof_bytes);
+                            let hash = hasher.finalize();
+                            let proof_hash = format!("{:x}", hash);
                             
                             // 提交证明
-                            match orchestrator.submit_proof(&task.task_id, &proof_hash, proof, signing_key).await {
+                            match orchestrator.submit_proof(&task.task_id, &proof_hash, proof_bytes, signing_key).await {
                                 Ok(_) => {
                                     // 成功提交证明
                                     proof_count += 1;
