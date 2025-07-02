@@ -25,6 +25,7 @@ use log::{debug, warn};
 use crate::orchestrator_client_enhanced::EnhancedOrchestratorClient;
 use sha3::Digest;
 use postcard;
+use std::sync::Arc;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -146,13 +147,13 @@ pub async fn start_anonymous_workers(
 /// 内存优化的多节点批处理模式 - 自适应内存管理
 pub async fn start_optimized_batch_workers(
     nodes: Vec<u64>,
-    orchestrator: OrchestratorClient,
+    _orchestrator: OrchestratorClient,
     num_workers_per_node: usize,
     start_delay: f64,
     proof_interval: u64,
     environment: Environment,
     shutdown: broadcast::Receiver<()>,
-    status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync>>,
+    status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
 ) -> Vec<JoinHandle<()>> {
     let mut join_handles = Vec::new();
     let defragmenter = get_defragmenter();
@@ -189,9 +190,10 @@ pub async fn start_optimized_batch_workers(
             Ok(key) => key,
             Err(e) => {
                 warn!("节点 {} 加载签名密钥失败: {}", node_id, e);
-                if let Some(ref callback) = status_callback {
-                    callback(*node_id, format!("加载密钥失败: {}", e));
-                }
+                            // 使用克隆的回调
+            if let Some(callback) = status_callback.clone() {
+                callback(*node_id, format!("加载密钥失败: {}", e));
+            }
                 continue;
             }
         };
@@ -199,10 +201,12 @@ pub async fn start_optimized_batch_workers(
         let node_id = *node_id;
         // 使用增强版客户端
         let enhanced_orchestrator = EnhancedOrchestratorClient::new(environment.clone());
-        let mut shutdown_rx = shutdown.resubscribe();
+        let shutdown_rx = shutdown.resubscribe();
         let environment = environment.clone();
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
         
+        // 在传递给tokio::spawn之前克隆status_callback
+        let status_callback_clone = status_callback.clone();
         let handle = tokio::spawn(async move {
             run_memory_optimized_node(
                 node_id,
@@ -213,7 +217,7 @@ pub async fn start_optimized_batch_workers(
                 environment,
                 client_id,
                 shutdown_rx,
-                status_callback,  // 直接传递Box<dyn Fn...>
+                status_callback_clone, // 使用克隆的回调
             ).await;
         });
         
@@ -228,12 +232,12 @@ async fn run_memory_optimized_node(
     node_id: u64,
     signing_key: SigningKey,
     orchestrator: EnhancedOrchestratorClient,
-    num_workers: usize,
+    _num_workers: usize,
     proof_interval: u64,
     environment: Environment,
     client_id: String,
     mut shutdown: broadcast::Receiver<()>,
-    status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync>>,
+    status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>, // 修复生命周期
 ) {
     const MAX_ATTEMPTS: usize = 5;
     let mut consecutive_failures = 0;
@@ -241,7 +245,7 @@ async fn run_memory_optimized_node(
     
     // 更新节点状态
     let update_status = |status: String| {
-        if let Some(ref callback) = status_callback {
+        if let Some(callback) = &status_callback {
             callback(node_id, status);
         }
     };
@@ -302,8 +306,8 @@ async fn run_memory_optimized_node(
                             let hash = hasher.finalize();
                             let proof_hash = format!("{:x}", hash);
                             
-                            // 提交证明
-                            match orchestrator.submit_proof(&task.task_id, &proof_hash, proof_bytes, signing_key).await {
+                            // 提交证明 - 克隆签名密钥以避免所有权问题
+                            match orchestrator.submit_proof(&task.task_id, &proof_hash, proof_bytes, signing_key.clone()).await {
                                 Ok(_) => {
                                     // 成功提交证明
                                     proof_count += 1;

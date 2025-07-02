@@ -1,11 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use rayon::prelude::*;
-use rayon::iter::IntoParallelRefIterator;
-use parking_lot::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
-use log::{debug, warn, error};
+use log::debug;
 
 // 导入系统模块，用于获取内存信息
 use crate::system::{get_memory_info, process_memory_gb};
@@ -33,18 +30,20 @@ pub fn perform_memory_cleanup() {
     debug!("执行内存清理...");
     
     #[cfg(target_os = "linux")]
-    unsafe {
+    {
         // 在Linux上使用libc的malloc_trim来释放未使用的内存
         // 这通常比标准的GC更有效
-        unsafe extern "C" {
-            fn malloc_trim(pad: usize) -> i32;
+        unsafe {
+            extern "C" {
+                fn malloc_trim(pad: usize) -> i32;
+            }
+            let _ = malloc_trim(0);
         }
-        let _ = malloc_trim(0);
     }
     
     // 强制垃圾回收
     #[cfg(feature = "jemalloc")]
-    unsafe {
+    {
         // 如果使用了jemalloc，则调用purge释放内存
         // 移除对私有模块的使用
         // use jemallocator::ffi::mallctl;
@@ -62,12 +61,14 @@ pub fn perform_memory_cleanup() {
     
     // 手动请求垃圾回收
     #[cfg(not(target_os = "windows"))]
-    unsafe {
+    {
         // 非Windows系统上调用malloc_trim
-        unsafe extern "C" {
-            fn malloc_trim(pad: usize) -> i32;
+        unsafe {
+            extern "C" {
+                fn malloc_trim(pad: usize) -> i32;
+            }
+            let _ = malloc_trim(0);
         }
-        let _ = malloc_trim(0);
     }
 }
 
