@@ -15,6 +15,35 @@ const NUM_REPEATS: usize = 5; // Number of repeats to average the results
 // Cache for flops measurement - only measure once per application run
 static FLOPS_CACHE: OnceLock<f32> = OnceLock::new();
 
+// 内存使用比率阈值 - 超过这个值会触发内存清理
+const HIGH_MEMORY_THRESHOLD: f64 = 0.85;
+const CRITICAL_MEMORY_THRESHOLD: f64 = 0.92;
+
+/// 检查系统内存压力
+pub fn check_memory_pressure() -> bool {
+    let (used_mb, total_mb) = get_memory_info();
+    let ratio = used_mb as f64 / total_mb as f64;
+    ratio > HIGH_MEMORY_THRESHOLD
+}
+
+/// 获取系统内存使用率
+pub fn get_memory_usage_ratio() -> f64 {
+    let (used_mb, total_mb) = get_memory_info();
+    used_mb as f64 / total_mb as f64
+}
+
+/// 强制进行内存清理 - 调用垃圾回收并释放缓存
+pub fn perform_memory_cleanup() {
+    // 在所有平台上，触发一次大型内存分配和释放，帮助堆整理
+    {
+        // 分配和释放一些内存，促使分配器整理堆
+        let size = 16 * 1024 * 1024; // 16 MB
+        let mut big_vec = Vec::<u8>::with_capacity(size);
+        big_vec.resize(size, 0);
+        drop(big_vec);
+    }
+}
+
 /// Get the number of logical cores available on the machine.
 pub fn num_cores() -> usize {
     available_parallelism().map(|n| n.get()).unwrap_or(1) // Fallback to 1 if detection fails

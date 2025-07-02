@@ -1,7 +1,5 @@
 use crate::system::measure_gflops;
-use colored::Colorize;
 use crate::environment::Environment;
-use crossterm::style::Stylize as CrosstermStylize;
 
 /// 渲染ASCII艺术横幅
 pub fn render_ascii_banner(text: &str) -> Vec<String> {

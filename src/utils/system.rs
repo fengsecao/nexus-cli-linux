@@ -8,7 +8,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use log::{debug, warn, error};
 
 // 导入系统模块，用于获取内存信息
-use crate::system::{get_memory_info, process_memory_gb, total_memory_gb};
+use crate::system::{get_memory_info, process_memory_gb};
 
 // 内存使用比率阈值 - 超过这个值会触发内存清理
 const HIGH_MEMORY_THRESHOLD: f64 = 0.85;
@@ -46,8 +46,9 @@ pub fn perform_memory_cleanup() {
     #[cfg(feature = "jemalloc")]
     unsafe {
         // 如果使用了jemalloc，则调用purge释放内存
-        use jemallocator::ffi::mallctl;
-        let _ = mallctl("arena.0.purge".as_ptr() as *const _, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
+        // 移除对私有模块的使用
+        // use jemallocator::ffi::mallctl;
+        // let _ = mallctl("arena.0.purge".as_ptr() as *const _, std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
     }
     
     // 在所有平台上，触发一次大型内存分配和释放，帮助堆整理
@@ -98,6 +99,7 @@ impl DefragmentationResult {
 }
 
 /// 高级内存碎片整理器 - 提供智能内存清理和缓存字符串功能
+#[derive(Debug)]
 pub struct MemoryDefragmenter {
     last_gc_time: AtomicU64,
     cache_hits: AtomicU64,
