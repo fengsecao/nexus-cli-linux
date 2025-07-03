@@ -1,8 +1,8 @@
-# Nexus Network 0.8.17 多节点内存优化版
+# Nexus Network 0.8.18 多节点内存优化版
 
 > 参考@hua_web3的代码修改: https://github.com/huahua1220/nexus-cli-linux
 
-基于 Nexus Network CLI 0.8.17 版本的多节点内存优化实现，解决高内存占用和多节点管理问题。
+基于 Nexus Network CLI 0.8.18 版本的多节点内存优化实现，解决高内存占用和多节点管理问题。
 
 ## 📋 主要特性
 
