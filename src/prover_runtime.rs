@@ -382,6 +382,14 @@ async fn run_memory_optimized_node(
                                         break;
                                     } else {
                                         update_status(format!("[{}] ❌ 缓存证明提交失败: {}", timestamp, error_str));
+                                        
+                                        // 检查是否为404错误（任务未找到），如果是则不再重试
+                                        if error_str.contains("404") || error_str.contains("NotFoundError") || error_str.contains("Task not found") {
+                                            update_status(format!("[{}] 🔍 任务已不存在 (404)，停止重试并获取新任务", timestamp));
+                                            retry_count = MAX_429_RETRIES; // 设置为最大值以跳出循环
+                                            break; // 立即退出重试循环
+                                        }
+                                        
                                         // 如果不是429错误，我们不需要那么多重试
                                         if retry_count >= 2 {
                                             update_status(format!("[{}] 放弃缓存证明，尝试重新生成...", timestamp));
@@ -458,6 +466,14 @@ async fn run_memory_optimized_node(
                                     } else {
                                             update_status(format!("[{}] ❌ 提交失败 (重试 {}/{}): {}", 
                                                 timestamp, retry_count + 1, MAX_SUBMISSION_RETRIES, error_str));
+                                        
+                                        // 检查是否为404错误（任务未找到），如果是则不再重试
+                                        if error_str.contains("404") || error_str.contains("NotFoundError") || error_str.contains("Task not found") {
+                                            update_status(format!("[{}] 🔍 任务已不存在 (404)，停止重试并获取新任务", timestamp));
+                                            success = false; // 设置为false以获取新任务
+                                            break; // 立即退出重试循环
+                                        }
+                                        
                                         tokio::time::sleep(Duration::from_secs(2)).await;
                                     }
                                         retry_count += 1;
