@@ -79,6 +79,10 @@ impl DashboardState {
                     self.total_success_count += 1;
                 }
             },
+            EventType::ProofSubmitted => {
+                // 直接计数，因为这个事件类型就表示证明提交成功
+                self.total_success_count += 1;
+            },
             EventType::Error => {
                 if event.msg.contains("Error submitting proof") || 
                    event.msg.contains("Failed to submit proof") {
@@ -215,6 +219,12 @@ pub fn render_dashboard(f: &mut Frame, state: &DashboardState) {
                 EventType::Shutdown => "",
                 EventType::Warning => "",
                 EventType::Status => "",
+                EventType::TaskReceived => "←",
+                EventType::TaskCompleted => "✓",
+                EventType::ProofGenerated => "⚙",
+                EventType::ProofSubmitted => "→",
+                EventType::SystemEvent => "⚡",
+                EventType::MemoryCleanup => "♻",
             };
             format!("{} [{}] {}", icon, event.timestamp, event.msg)
         })

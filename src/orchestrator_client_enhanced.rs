@@ -10,7 +10,6 @@ use log::{warn, debug};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use nexus_sdk::stwo::seq::Proof;
 
 /// 缓存的证明数据
 #[derive(Clone)]
