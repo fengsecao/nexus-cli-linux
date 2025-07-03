@@ -221,7 +221,7 @@ pub async fn start_optimized_batch_workers(
         
         let node_id = *node_id;
         // 使用增强版客户端
-        let enhanced_orchestrator = if let Some(proxy_file) = proxy_file {
+        let enhanced_orchestrator = if let Some(ref proxy_file) = proxy_file {
             EnhancedOrchestratorClient::new_with_proxy(environment.clone(), Some(proxy_file.as_str()))
         } else {
             EnhancedOrchestratorClient::new(environment.clone())
