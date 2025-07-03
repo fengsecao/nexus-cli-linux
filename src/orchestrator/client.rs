@@ -78,25 +78,31 @@ impl ProxyManager {
                     continue;
                 }
 
-                // 解析格式: host:port:username:password_country-COUNTRY
+                // 解析格式: host:port:username:password
                 let parts: Vec<&str> = line.split(':').collect();
                 if parts.len() >= 4 {
                     let host = parts[0];
                     let port = parts[1];
                     let username = parts[2];
                     
-                    // 处理密码和国家信息
-                    let password_parts: Vec<&str> = parts[3].split("_country-").collect();
-                    let password = password_parts[0];
-                    let country = if password_parts.len() > 1 { password_parts[1] } else { "UNKNOWN" };
+                    // 第四部分及之后的所有内容都作为密码
+                    // 重新组合第四部分及之后的所有内容（如果有的话）
+                    let password = if parts.len() > 4 {
+                        // 如果有多个冒号，重新组合第四部分及之后的所有内容
+                        parts[3..].join(":")
+                    } else {
+                        // 只有四部分，直接使用第四部分
+                        parts[3].to_string()
+                    };
                     
+                    // 使用HTTP协议
                     let url = format!("http://{}:{}", host, port);
                     
                     proxies.push(ProxyInfo {
                         url,
                         username: username.to_string(),
-                        password: password.to_string(),
-                        country: country.to_string(),
+                        password,
+                        country: "UNKNOWN".to_string(), // 不再处理国家信息
                     });
                     _valid_count += 1;
                 } else {
@@ -135,6 +141,13 @@ impl ProxyManager {
         }
         
         selected
+    }
+
+    /// 标记代理为不可用（将来可以实现）
+    pub fn mark_proxy_unavailable(&self, _proxy_url: &str) {
+        // 未来可以实现代理黑名单功能
+        // 目前只记录日志
+        warn!("代理被标记为不可用: {}", _proxy_url);
     }
 }
 
@@ -231,41 +244,103 @@ impl OrchestratorClient {
 
     /// 创建带有代理的HTTP客户端
     async fn create_client_with_proxy(&self) -> Client {
-        // 尝试获取代理
-        if let Some(proxy_info) = self.proxy_manager.next_proxy() {
-            info!("使用代理: {} ({})", proxy_info.url, proxy_info.country);
-            
-            // 创建代理
-            match Proxy::all(&proxy_info.url) {
-                Ok(proxy) => {
-                    let proxy_with_auth = proxy.basic_auth(&proxy_info.username, &proxy_info.password);
-                    // 创建新的builder实例
-                    let builder = ClientBuilder::new()
-                        .timeout(Duration::from_secs(10))
-                        .proxy(proxy_with_auth);
-                    
-                    match builder.build() {
-                        Ok(client) => return client,
-                        Err(e) => {
-                            error!("创建代理客户端失败: {}", e);
+        // 尝试最多3个代理
+        const MAX_PROXY_ATTEMPTS: usize = 3;
+        
+        for attempt in 0..MAX_PROXY_ATTEMPTS {
+            // 尝试获取代理
+            if let Some(proxy_info) = self.proxy_manager.next_proxy() {
+                info!("尝试代理 {}/{}: {} ({})", attempt + 1, MAX_PROXY_ATTEMPTS, proxy_info.url, proxy_info.country);
+                
+                // 创建代理
+                match Proxy::all(&proxy_info.url) {
+                    Ok(proxy) => {
+                        let proxy_with_auth = proxy.basic_auth(&proxy_info.username, &proxy_info.password);
+                        // 创建新的builder实例
+                        let builder = ClientBuilder::new()
+                            .timeout(Duration::from_secs(15))  // 增加超时时间
+                            .proxy(proxy_with_auth);
+                        
+                        match builder.build() {
+                            Ok(client) => {
+                                // 测试代理连接
+                                match self.test_proxy_connection(&client).await {
+                                    true => {
+                                        info!("代理连接测试成功: {} ({})", proxy_info.url, proxy_info.country);
+                                        return client;
+                                    }
+                                    false => {
+                                        error!("代理连接测试失败: {} ({})", proxy_info.url, proxy_info.country);
+                                        // 标记代理为不可用
+                                        self.proxy_manager.mark_proxy_unavailable(&proxy_info.url);
+                                        // 继续尝试下一个代理
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("创建代理客户端失败: {} - {}", proxy_info.url, e);
+                                // 继续尝试下一个代理
+                                continue;
+                            }
                         }
                     }
+                    Err(e) => {
+                        error!("创建代理失败: {} - {}", proxy_info.url, e);
+                        // 继续尝试下一个代理
+                        continue;
+                    }
                 }
-                Err(e) => {
-                    error!("创建代理失败: {}", e);
-                }
+            } else {
+                // 如果没有可用代理
+                warn!("没有可用的代理，使用默认连接");
+                break;
             }
-        } else {
-            // 如果没有可用代理
-            warn!("没有可用的代理，使用默认连接");
         }
         
-        // 如果获取代理失败，使用默认客户端
-        warn!("使用默认连接（无代理）");
+        // 如果所有代理都失败，使用默认客户端
+        info!("所有代理尝试失败或没有可用代理，使用默认连接（无代理）");
         ClientBuilder::new()
             .timeout(Duration::from_secs(10))
             .build()
             .expect("Failed to create HTTP client")
+    }
+
+    /// 测试代理连接
+    async fn test_proxy_connection(&self, client: &Client) -> bool {
+        // 尝试连接到Nexus服务器进行测试
+        // 如果Nexus服务器不可用，尝试连接到一个更可靠的网站
+        let test_urls = [
+            self.build_url("v3/health"),
+            "https://www.cloudflare.com/cdn-cgi/trace".to_string(),
+            "https://www.google.com".to_string(),
+        ];
+        
+        for test_url in test_urls.iter() {
+            info!("测试代理连接到: {}", test_url);
+            match client.get(test_url)
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        info!("代理连接测试成功: {}", test_url);
+                        return true;
+                    } else {
+                        warn!("代理连接测试失败: {} - 服务器返回状态码 {}", test_url, response.status());
+                        // 继续尝试下一个测试URL
+                    }
+                }
+                Err(e) => {
+                    warn!("代理连接测试失败: {} - {}", test_url, e);
+                    // 继续尝试下一个测试URL
+                }
+            }
+        }
+        
+        // 所有测试URL都失败
+        error!("所有代理连接测试都失败");
+        false
     }
 
     async fn get_request<T: Message + Default>(
