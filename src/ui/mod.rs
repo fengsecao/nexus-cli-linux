@@ -81,7 +81,13 @@ impl App {
     #[allow(unused)]
     pub fn login(&mut self) {
         let node_id = Some(123); // Placeholder for node ID, replace with actual logic to get node ID
-        let state = DashboardState::new(node_id, self.environment.clone(), self.start_time, &self.events);
+        let mut state = DashboardState::new(node_id, self.environment.clone(), self.start_time, &self.events);
+        
+        // 初始化计数器
+        for event in &self.events {
+            state.update_counts(event);
+        }
+        
         self.current_screen = Screen::Dashboard(state);
     }
 }
@@ -98,16 +104,29 @@ pub async fn run<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> std::i
             if app.events.len() >= MAX_EVENTS {
                 app.events.pop_front();
             }
-            app.events.push_back(event);
+            app.events.push_back(event.clone());
+            
+            // 如果当前是Dashboard屏幕，更新计数
+            if let Screen::Dashboard(ref mut state) = app.current_screen {
+                state.update_counts(&event);
+            }
         }
 
         // Update the state based on the current screen
         match app.current_screen {
             Screen::Splash => {}
             Screen::Login => {}
-            Screen::Dashboard(_) => {
-                let state = DashboardState::new(app.node_id, app.environment.clone(), app.start_time, &app.events);
-                app.current_screen = Screen::Dashboard(state);
+            Screen::Dashboard(ref state) => {
+                // 创建新的状态，但保留成功和失败计数
+                let mut new_state = DashboardState::new(
+                    app.node_id, 
+                    app.environment.clone(), 
+                    app.start_time, 
+                    &app.events
+                );
+                new_state.total_success_count = state.total_success_count;
+                new_state.total_error_count = state.total_error_count;
+                app.current_screen = Screen::Dashboard(new_state);
             }
         }
         terminal.draw(|f| render(f, &app.current_screen))?;
@@ -115,12 +134,19 @@ pub async fn run<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> std::i
         // Handle splash-to-login transition
         if let Screen::Splash = app.current_screen {
             if splash_start.elapsed() >= splash_duration {
-                app.current_screen = Screen::Dashboard(DashboardState::new(
+                let mut dashboard_state = DashboardState::new(
                     app.node_id,
                     app.environment.clone(),
                     app.start_time,
                     &app.events,
-                ));
+                );
+                
+                // 初始化计数器
+                for event in &app.events {
+                    dashboard_state.update_counts(event);
+                }
+                
+                app.current_screen = Screen::Dashboard(dashboard_state);
                 continue;
             }
         }
@@ -144,12 +170,19 @@ pub async fn run<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> std::i
                     Screen::Splash => {
                         // Any key press will skip the splash screen
                         if key.code != KeyCode::Esc && key.code != KeyCode::Char('q') {
-                            app.current_screen = Screen::Dashboard(DashboardState::new(
+                            let mut dashboard_state = DashboardState::new(
                                 app.node_id,
                                 app.environment.clone(),
                                 app.start_time,
                                 &app.events,
-                            ));
+                            );
+                            
+                            // 初始化计数器
+                            for event in &app.events {
+                                dashboard_state.update_counts(event);
+                            }
+                            
+                            app.current_screen = Screen::Dashboard(dashboard_state);
                         }
                     }
                     Screen::Login => {

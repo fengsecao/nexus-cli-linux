@@ -36,6 +36,12 @@ pub struct DashboardState {
 
     /// A queue of events received from worker threads.
     pub events: VecDeque<WorkerEvent>,
+    
+    /// 累计成功提交的证明数量
+    pub total_success_count: u64,
+    
+    /// 累计失败的证明数量
+    pub total_error_count: u64,
 }
 
 impl DashboardState {
@@ -60,6 +66,26 @@ impl DashboardState {
             total_cores: system::num_cores(),
             total_ram_gb: system::total_memory_gb(),
             events: events.clone(),
+            total_success_count: 0,
+            total_error_count: 0,
+        }
+    }
+    
+    /// 更新成功和失败计数
+    pub fn update_counts(&mut self, event: &WorkerEvent) {
+        match event.event_type {
+            EventType::Success => {
+                if event.msg.contains("Proof submitted successfully") {
+                    self.total_success_count += 1;
+                }
+            },
+            EventType::Error => {
+                if event.msg.contains("Error submitting proof") || 
+                   event.msg.contains("Failed to submit proof") {
+                    self.total_error_count += 1;
+                }
+            },
+            _ => {}
         }
     }
 }
@@ -156,6 +182,17 @@ pub fn render_dashboard(f: &mut Frame, state: &DashboardState) {
         items.push(ListItem::new(format!(
             "TOTAL RAM: {:.3} GB",
             state.total_ram_gb
+        )));
+        
+        // 显示累计成功和失败的数量
+        items.push(ListItem::new(format!(
+            "TOTAL SUCCESS: {}",
+            state.total_success_count
+        )));
+        
+        items.push(ListItem::new(format!(
+            "TOTAL ERRORS: {}",
+            state.total_error_count
         )));
 
         List::new(items)

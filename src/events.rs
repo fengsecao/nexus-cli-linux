@@ -21,6 +21,8 @@ pub enum Worker {
 pub enum EventType {
     Success,
     Error,
+    Warning,
+    Status,
     Refresh,
     Shutdown,
 }

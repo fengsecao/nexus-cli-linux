@@ -138,7 +138,7 @@ async fn attempt_task_fetch(
     let _ = event_sender
         .send(Event::task_fetcher_with_level(
             format!(
-                "🔍 Fetching tasks (queue: {} tasks)",
+                "Fetching tasks (queue: {} tasks)",
                 TASK_QUEUE_SIZE - sender.capacity()
             ),
             crate::events::EventType::Refresh,
@@ -175,7 +175,7 @@ async fn attempt_task_fetch(
             state.record_fetch_attempt();
             let _ = event_sender
                 .send(Event::task_fetcher_with_level(
-                    format!("⏰ Fetch timeout after {}s", timeout_duration.as_secs()),
+                    format!("Fetch timeout after {}s", timeout_duration.as_secs()),
                     crate::events::EventType::Error,
                     LogLevel::Warn,
                 ))
@@ -197,15 +197,15 @@ async fn log_queue_status(
     let backoff_secs = state.backoff_duration.as_secs();
 
     let message = if state.should_fetch(tasks_in_queue) {
-        format!("⚡ Queue low: {} tasks, ready to fetch", tasks_in_queue)
+        format!("Queue low: {} tasks, ready to fetch", tasks_in_queue)
     } else if tasks_in_queue < LOW_WATER_MARK {
         format!(
-            "⏳ Queue: {} tasks, waiting {}s before next fetch",
+            "Queue: {} tasks, waiting {}s before next fetch",
             tasks_in_queue,
             backoff_secs.saturating_sub(time_since_last.as_secs())
         )
     } else {
-        format!("📊 Queue: {} tasks, healthy", tasks_in_queue)
+        format!("Queue: {} tasks, healthy", tasks_in_queue)
     };
 
     let _ = event_sender
@@ -246,7 +246,7 @@ async fn handle_empty_task_response(
     let tasks_in_queue = TASK_QUEUE_SIZE - sender.capacity();
     let _ = event_sender
         .send(Event::task_fetcher_with_level(
-            format!("📭 No new tasks available (queue: {} tasks)", tasks_in_queue),
+            format!("No new tasks available (queue: {} tasks)", tasks_in_queue),
             crate::events::EventType::Status,
             LogLevel::Info,
         ))
@@ -313,11 +313,11 @@ async fn log_successful_fetch(
     let tasks_in_queue = TASK_QUEUE_SIZE - sender.capacity();
     let message = if added_count > 0 {
         format!(
-            "✅ Added {} new tasks (queue: {} tasks)",
+            "Added {} new tasks (queue: {} tasks)",
             added_count, tasks_in_queue
         )
     } else {
-        format!("📭 No new tasks added (queue: {} tasks)", tasks_in_queue)
+        format!("No new tasks added (queue: {} tasks)", tasks_in_queue)
     };
 
     let _ = event_sender
@@ -337,7 +337,7 @@ async fn handle_all_duplicates(
 ) {
     let _ = event_sender
         .send(Event::task_fetcher_with_level(
-            format!("🔄 All {} tasks were duplicates", duplicate_count),
+            format!("All {} tasks were duplicates", duplicate_count),
             crate::events::EventType::Warning,
             LogLevel::Info,
         ))
@@ -360,7 +360,7 @@ async fn handle_fetch_error(
                 // Rate limiting requires special handling
                 state.increase_backoff_for_rate_limit();
                 (
-                    format!("🚫 Rate limited (429): {}", message),
+                    format!("Rate limited (429): {}", message),
                     crate::events::EventType::Warning,
                     LogLevel::Warn,
                 )
@@ -368,7 +368,7 @@ async fn handle_fetch_error(
                 // 404 is normal when no tasks are available
                 state.reset_backoff();
                 (
-                    "📭 No tasks available (404)".to_string(),
+                    "No tasks available (404)".to_string(),
                     crate::events::EventType::Status,
                     LogLevel::Info,
                 )
@@ -376,7 +376,7 @@ async fn handle_fetch_error(
                 // Other HTTP errors
                 state.increase_backoff_for_error();
                 (
-                    format!("❌ HTTP error {}: {}", status, message),
+                    format!("HTTP error {}: {}", status, message),
                     crate::events::EventType::Error,
                     LogLevel::Error,
                 )
@@ -386,7 +386,7 @@ async fn handle_fetch_error(
             // Non-HTTP errors (network, etc)
             state.increase_backoff_for_error();
             (
-                format!("❌ Network error: {}", error),
+                format!("Network error: {}", error),
                 crate::events::EventType::Error,
                 LogLevel::Error,
             )
@@ -677,7 +677,7 @@ async fn handle_submission_success(
     let _ = event_sender
         .send(Event::proof_submitter(
             format!(
-                "✅ Proof submitted successfully: {} ({})",
+                "Proof submitted successfully: {} ({})",
                 task.task_id, task.program_id
             ),
             crate::events::EventType::Success,
@@ -698,7 +698,7 @@ async fn handle_submission_error(
                 // Rate limiting requires special handling
                 (
                     format!(
-                        "🚫 Rate limited (429) submitting proof for task: {} ({})",
+                        "Rate limited (429) submitting proof for task: {} ({})",
                         task.task_id, task.program_id
                     ),
                     crate::events::EventType::Warning,
@@ -708,7 +708,7 @@ async fn handle_submission_error(
                 // Other HTTP errors
                 (
                     format!(
-                        "❌ HTTP error {} submitting proof for task: {} ({}): {}",
+                        "HTTP error {} submitting proof for task: {} ({}): {}",
                         status, task.task_id, task.program_id, message
                     ),
                     crate::events::EventType::Error,
@@ -720,7 +720,7 @@ async fn handle_submission_error(
             // Non-HTTP errors (network, etc)
             (
                 format!(
-                    "❌ Error submitting proof for task: {} ({}): {}",
+                    "Error submitting proof for task: {} ({}): {}",
                     task.task_id, task.program_id, error
                 ),
                 crate::events::EventType::Error,
