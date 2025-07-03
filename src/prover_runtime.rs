@@ -25,6 +25,7 @@ use log::{debug, warn};
 use crate::orchestrator_client_enhanced::EnhancedOrchestratorClient;
 use sha3::Digest;
 use postcard;
+use std::sync::Arc;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -157,6 +158,9 @@ pub async fn start_optimized_batch_workers(
     let mut join_handles = Vec::new();
     let defragmenter = get_defragmenter();
     
+    // 将回调函数包装在Arc中，这样可以在多个任务之间共享
+    let status_callback_arc = status_callback.map(Arc::new);
+    
     // 预初始化证明器 - 确保它们被共享
     let _ = crate::prover::get_or_create_default_prover().await;
     let _ = crate::prover::get_or_create_initial_prover().await;
@@ -189,9 +193,9 @@ pub async fn start_optimized_batch_workers(
             Ok(key) => key,
             Err(e) => {
                 warn!("节点 {} 加载签名密钥失败: {}", node_id, e);
-                // 使用回调，但不移动它
-                if let Some(ref callback) = status_callback {
-                    callback(*node_id, format!("加载密钥失败: {}", e));
+                // 使用Arc包装的回调
+                if let Some(callback_arc) = &status_callback_arc {
+                    callback_arc(*node_id, format!("加载密钥失败: {}", e));
                 }
                 continue;
             }
@@ -204,16 +208,15 @@ pub async fn start_optimized_batch_workers(
         let environment = environment.clone();
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
         
-        // 创建一个可以安全移动到新任务的回调函数
-        // 为每个节点克隆一次回调函数
-        let status_callback_clone = match &status_callback {
-            Some(callback) => {
-                // 创建一个新的回调函数，将原始回调移动到闭包中
-                let callback_ref = callback.clone();
-                let callback_moved = Box::new(move |node_id: u64, status: String| {
-                    callback_ref(node_id, status);
-                }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>;
-                Some(callback_moved)
+        // 为每个任务克隆Arc包装的回调
+        let node_callback = match &status_callback_arc {
+            Some(callback_arc) => {
+                // 克隆Arc，不是内部的回调函数
+                let callback_arc_clone = Arc::clone(callback_arc);
+                // 创建一个新的闭包，捕获Arc克隆
+                Some(Box::new(move |node_id: u64, status: String| {
+                    callback_arc_clone(node_id, status);
+                }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
             }
             None => None
         };
@@ -228,7 +231,7 @@ pub async fn start_optimized_batch_workers(
                 environment,
                 client_id,
                 shutdown_rx,
-                status_callback_clone,
+                node_callback,
             ).await;
         });
         
