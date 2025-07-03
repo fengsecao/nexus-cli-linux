@@ -350,7 +350,7 @@ async fn start(
     proxy_file: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let mut node_id = node_id;
-    let config = match Config::load_from_file(&config_path) {
+    let _config = match Config::load_from_file(&config_path) {
         Ok(config) => config,
         Err(_) => Config::new(
             String::new(),
@@ -361,7 +361,7 @@ async fn start(
     };
 
     // 创建增强型协调器客户端，传入代理文件
-    let orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(env.clone(), proxy_file.as_deref());
+    let _orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(env.clone(), proxy_file.as_deref());
     // If no node ID is provided, try to load it from the config file.
     if node_id.is_none() && config_path.exists() {
         let config = Config::load_from_file(&config_path)?;
@@ -514,7 +514,7 @@ async fn start_batch_processing(
     println!("📋 已加载 {} 个节点", node_ids.len());
     
     // 创建增强型协调器客户端，传入代理文件
-    let orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(environment, proxy_file.as_deref());
+    let orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(environment.clone(), proxy_file.as_deref());
     
     // 计算实际并发数
     let actual_concurrent = max_concurrent.min(node_ids.len());

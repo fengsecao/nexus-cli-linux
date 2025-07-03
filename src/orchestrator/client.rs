@@ -197,8 +197,6 @@ impl OrchestratorClient {
 
     /// 创建带有代理的HTTP客户端
     async fn create_client_with_proxy(&self) -> Client {
-        let mut builder = ClientBuilder::new().timeout(Duration::from_secs(10));
-        
         // 尝试获取代理
         if let Some(proxy_info) = self.proxy_manager.next_proxy() {
             info!("使用代理: {} ({})", proxy_info.url, proxy_info.country);
@@ -207,7 +205,12 @@ impl OrchestratorClient {
             match Proxy::all(&proxy_info.url) {
                 Ok(proxy) => {
                     let proxy_with_auth = proxy.basic_auth(&proxy_info.username, &proxy_info.password);
-                    match builder.proxy(proxy_with_auth).build() {
+                    // 创建新的builder实例
+                    let builder = ClientBuilder::new()
+                        .timeout(Duration::from_secs(10))
+                        .proxy(proxy_with_auth);
+                    
+                    match builder.build() {
                         Ok(client) => return client,
                         Err(e) => {
                             error!("创建代理客户端失败: {}", e);
@@ -222,7 +225,10 @@ impl OrchestratorClient {
         
         // 如果获取代理失败，使用默认客户端
         warn!("使用默认连接（无代理）");
-        builder.build().expect("Failed to create HTTP client")
+        ClientBuilder::new()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to create HTTP client")
     }
 
     async fn get_request<T: Message + Default>(
