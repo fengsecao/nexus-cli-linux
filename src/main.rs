@@ -558,6 +558,7 @@ async fn start_batch_processing(
         environment.clone(),
         shutdown_sender.subscribe(),
         Some(status_callback),
+        proxy_file,
     ).await;
     
     // 创建消费事件的任务

@@ -69,7 +69,7 @@ impl ProxyManager {
         let reader = io::BufReader::new(file);
         let mut proxies = Vec::new();
         let mut line_count = 0;
-        let mut valid_count = 0;
+        let mut _valid_count = 0;  // 添加下划线前缀
 
         for line in reader.lines() {
             line_count += 1;
@@ -98,7 +98,7 @@ impl ProxyManager {
                         password: password.to_string(),
                         country: country.to_string(),
                     });
-                    valid_count += 1;
+                    _valid_count += 1;
                 } else {
                     warn!("代理格式错误 (行 {}): {}", line_count, line);
                 }

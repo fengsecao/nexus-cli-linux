@@ -154,6 +154,7 @@ pub async fn start_optimized_batch_workers(
     environment: Environment,
     shutdown: broadcast::Receiver<()>,
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
+    proxy_file: Option<String>,
 ) -> (mpsc::Receiver<Event>, Vec<JoinHandle<()>>) {
     // Worker事件
     let (event_sender, event_receiver) = mpsc::channel::<Event>(EVENT_QUEUE_SIZE);
@@ -220,7 +221,11 @@ pub async fn start_optimized_batch_workers(
         
         let node_id = *node_id;
         // 使用增强版客户端
-        let enhanced_orchestrator = EnhancedOrchestratorClient::new(environment.clone());
+        let enhanced_orchestrator = if let Some(proxy_file) = proxy_file {
+            EnhancedOrchestratorClient::new_with_proxy(environment.clone(), Some(proxy_file.as_str()))
+        } else {
+            EnhancedOrchestratorClient::new(environment.clone())
+        };
     let shutdown_rx = shutdown.resubscribe();
         let environment = environment.clone();
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));

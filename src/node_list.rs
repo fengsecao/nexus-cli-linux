@@ -26,7 +26,7 @@ impl NodeList {
         let mut node_ids = Vec::new();
         let file = File::open(path)?;
         let reader = io::BufReader::new(file);
-
+        
         for line in reader.lines() {
             let line = line?;
             let trimmed = line.trim();
@@ -41,7 +41,7 @@ impl NodeList {
                 node_ids.push(node_id);
             }
         }
-
+        
         Ok(Self { node_ids })
     }
     
