@@ -205,17 +205,8 @@ pub async fn start_optimized_batch_workers(
         let environment = environment.clone();
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
         
-        // 创建一个新的回调闭包，将Box<dyn Fn>转换为可以在多个任务间共享的Arc<dyn Fn>
-        let callback_arc = match &status_callback {
-            Some(cb) => {
-                // 创建一个可以克隆的Arc包装回调
-                let cb_arc = Arc::new(move |id: u64, msg: String| {
-                    cb(id, msg);
-                }) as Arc<dyn Fn(u64, String) + Send + Sync>;
-                Some(cb_arc)
-            },
-            None => None,
-        };
+        // 创建一个可以安全移动到新任务的回调函数
+        let status_callback_clone = status_callback.clone();
         
         let handle = tokio::spawn(async move {
             run_memory_optimized_node(
@@ -227,7 +218,7 @@ pub async fn start_optimized_batch_workers(
                 environment,
                 client_id,
                 shutdown_rx,
-                callback_arc,
+                status_callback_clone,
             ).await;
         });
         
@@ -247,7 +238,7 @@ async fn run_memory_optimized_node(
     environment: Environment,
     client_id: String,
     mut shutdown: broadcast::Receiver<()>,
-    status_callback: Option<Arc<dyn Fn(u64, String) + Send + Sync>>,
+    status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
 ) {
     const MAX_ATTEMPTS: usize = 5;
     let mut consecutive_failures = 0;
@@ -255,7 +246,7 @@ async fn run_memory_optimized_node(
     
     // 更新节点状态
     let update_status = |status: String| {
-        if let Some(ref callback) = &status_callback {
+        if let Some(callback) = &status_callback {
             callback(node_id, status);
         }
     };

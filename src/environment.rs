@@ -4,7 +4,7 @@ use clap::ValueEnum;
 use ed25519_dalek::SigningKey;
 
 /// 环境枚举
-#[derive(Clone, Default, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Default, Copy, PartialEq, Eq, ValueEnum, Debug)]
 pub enum EnvironmentType {
     /// Local development environment.
     Local,
@@ -16,7 +16,7 @@ pub enum EnvironmentType {
 }
 
 /// 环境配置
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Environment {
     pub env_type: EnvironmentType,
     pub api_url: String,
@@ -57,6 +57,19 @@ impl Environment {
     }
 }
 
+impl FromStr for Environment {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // 尝试将字符串解析为EnvironmentType
+        if let Ok(env_type) = s.parse::<EnvironmentType>() {
+            Ok(Environment::new(env_type))
+        } else {
+            Err(())
+        }
+    }
+}
+
 impl FromStr for EnvironmentType {
     type Err = ();
 
@@ -83,16 +96,5 @@ impl Display for EnvironmentType {
 impl Display for Environment {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.env_type)
-    }
-}
-
-impl Debug for Environment {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Environment")
-            .field("type", &self.env_type)
-            .field("api_url", &self.api_url)
-            .field("client_id", &self.client_id)
-            .field("namespace", &self.namespace)
-            .finish()
     }
 }

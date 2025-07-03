@@ -94,8 +94,8 @@ enum Command {
         file: String,
 
         /// Environment to connect to.
-        #[arg(long, value_enum)]
-        env: Option<Environment>,
+        #[arg(long)]
+        env: Option<String>,
 
         /// Delay between starting each node (seconds)
         #[arg(long, default_value = "0.5")]
@@ -229,9 +229,17 @@ impl FixedLineDisplay {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let nexus_environment_str = std::env::var("NEXUS_ENVIRONMENT").unwrap_or_default();
-    let environment = nexus_environment_str
-        .parse::<Environment>()
-        .unwrap_or(Environment::default());
+    let environment = if nexus_environment_str.is_empty() {
+        Environment::default()
+    } else {
+        match nexus_environment_str.parse::<Environment>() {
+            Ok(env) => env,
+            Err(_) => {
+                eprintln!("Invalid environment: {}", nexus_environment_str);
+                return Err("Invalid environment".into());
+            }
+        }
+    };
 
     let config_path = get_config_path()?;
 
@@ -275,7 +283,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 env_logger::init();
             }
-            let environment = env.unwrap_or_default();
+            let environment = match env {
+                Some(env_str) => {
+                    // 尝试将字符串解析为环境类型
+                    match env_str.parse::<Environment>() {
+                        Ok(env) => env,
+                        Err(_) => {
+                            eprintln!("Invalid environment: {}", env_str);
+                            return Err("Invalid environment".into());
+                        }
+                    }
+                }
+                None => Environment::default(),
+            };
             start_batch_processing(&file, environment, start_delay, proof_interval, max_concurrent, workers_per_node).await
         }
     }
@@ -327,7 +347,7 @@ async fn start(
             return Ok(());
         }
     };
-    let orchestrator_client = OrchestratorClient::new(env);
+    let orchestrator_client = OrchestratorClient::new(env.clone());
     // Clamp the number of workers to [1,8]. Keep this low for now to avoid rate limiting.
     let num_workers: usize = max_threads.unwrap_or(1).clamp(1, 8) as usize;
     let (shutdown_sender, _) = broadcast::channel(1); // Only one shutdown signal needed
@@ -360,13 +380,13 @@ async fn start(
                 orchestrator_client.clone(),
                 num_workers,
                 shutdown_sender.subscribe(),
-                env,
+                env.clone(),
                 client_id,
             )
             .await
         }
         None => {
-            start_anonymous_workers(num_workers, shutdown_sender.subscribe(), env, client_id).await
+            start_anonymous_workers(num_workers, shutdown_sender.subscribe(), env.clone(), client_id).await
         }
     };
 
@@ -383,7 +403,7 @@ async fn start(
         // Create the application and run it.
         let app = ui::App::new(
             node_id,
-            *orchestrator_client.environment(),
+            orchestrator_client.environment().clone(),
             event_receiver,
             shutdown_sender,
         );
@@ -492,7 +512,7 @@ async fn start_batch_processing(
         workers_per_node,
         start_delay,
         proof_interval,
-        environment,
+        environment.clone(),
         shutdown_sender.subscribe(),
         Some(status_callback),
     ).await;

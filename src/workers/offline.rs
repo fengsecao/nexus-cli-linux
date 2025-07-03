@@ -10,6 +10,7 @@ use crate::error_classifier::ErrorClassifier;
 use crate::events::{Event, EventType};
 use crate::prover::authenticated_proving;
 use crate::task::Task;
+use log::{debug, warn};
 use nexus_sdk::stwo::seq::Proof;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -72,6 +73,8 @@ pub fn start_workers(
         let mut shutdown_rx = shutdown.resubscribe();
         let client_id = client_id.clone();
         let error_classifier = ErrorClassifier::new();
+        let environment_clone = environment.clone();
+        let client_id_clone = client_id.clone();
         let handle = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -84,8 +87,11 @@ pub fn start_workers(
                     }
                     // Check if there are tasks to process
                     Some(task) = task_receiver.recv() => {
-                        match authenticated_proving(&task, &environment, client_id.clone()).await {
+                        let task_id = task.task_id.clone();
+                        debug!("Worker {} processing task {}", worker_id, task_id);
+                        match authenticated_proving(&task, &environment_clone, client_id_clone.clone()).await {
                             Ok(proof) => {
+                                debug!("Worker {} completed task {}", worker_id, task_id);
                                 let message = format!(
                                     "Proof completed successfully (Prover {})",
                                     worker_id
@@ -96,6 +102,7 @@ pub fn start_workers(
                                 let _ = results_sender.send((task, proof)).await;
                             }
                             Err(e) => {
+                                warn!("Worker {} failed to process task {}: {}", worker_id, task_id, e);
                                 let log_level = error_classifier.classify_worker_error(&e);
                                 let message = format!("Error: {}", e);
                                 let event = Event::prover_with_level(worker_id, message, EventType::Error, log_level);
@@ -134,6 +141,8 @@ pub async fn start_anonymous_workers(
         let mut shutdown_rx = shutdown.resubscribe(); // clone receiver for each worker
         let client_id = client_id.clone();
         let error_classifier = ErrorClassifier::new();
+        let environment_clone = environment.clone();
+        let client_id_clone = client_id.clone();
 
         let handle = tokio::spawn(async move {
             loop {
@@ -148,13 +157,16 @@ pub async fn start_anonymous_workers(
 
                     _ = tokio::time::sleep(Duration::from_millis(300)) => {
                         // Perform work
-                        match crate::prover::prove_anonymously(&environment, client_id.clone()).await {
-                            Ok(_proof) => {
+                        debug!("Anonymous worker {} generating proof", worker_id);
+                        match crate::prover::prove_anonymously(&environment_clone, client_id_clone.clone()).await {
+                            Ok(proof) => {
+                                debug!("Anonymous worker {} completed proof", worker_id);
                                 let message = "Anonymous proof completed successfully".to_string();
                                 let _ = prover_event_sender
                                     .send(Event::prover(worker_id, message, EventType::Success)).await;
                             }
                             Err(e) => {
+                                warn!("Anonymous worker {} failed to generate proof: {}", worker_id, e);
                                 let log_level = error_classifier.classify_worker_error(&e);
                                 let message = format!("Anonymous Worker: Error - {}", e);
                                 let event = Event::prover_with_level(worker_id, message, EventType::Error, log_level);

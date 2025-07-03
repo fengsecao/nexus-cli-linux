@@ -1,4 +1,4 @@
-use crate::environment::Environment;
+use crate::environment::{Environment, EnvironmentType};
 use crate::system::{estimate_peak_gflops, measure_gflops, num_cores};
 use chrono::Datelike;
 use chrono::Timelike;
@@ -32,19 +32,19 @@ pub const BETA_MEASUREMENT_ID: &str = "G-GLH0GMEEFH";
 pub const STAGING_API_SECRET: &str = "OI7H53soRMSDWfJf1ittHQ";
 pub const BETA_API_SECRET: &str = "3wxu8FjVSPqOlxSsZEnBOw";
 
-pub fn analytics_id(environment: &Environment) -> String {
-    match environment {
-        Environment::Staging => STAGING_MEASUREMENT_ID.to_string(),
-        Environment::Beta => BETA_MEASUREMENT_ID.to_string(),
-        Environment::Local => String::new(),
+pub fn get_measurement_id(environment: &Environment) -> String {
+    match environment.env_type {
+        EnvironmentType::Staging => STAGING_MEASUREMENT_ID.to_string(),
+        EnvironmentType::Beta => BETA_MEASUREMENT_ID.to_string(),
+        EnvironmentType::Local => String::new(),
     }
 }
 
-pub fn analytics_api_key(environment: &Environment) -> String {
-    match environment {
-        Environment::Staging => STAGING_API_SECRET.to_string(),
-        Environment::Beta => BETA_API_SECRET.to_string(),
-        Environment::Local => String::new(),
+pub fn get_api_secret(environment: &Environment) -> String {
+    match environment.env_type {
+        EnvironmentType::Staging => STAGING_API_SECRET.to_string(),
+        EnvironmentType::Beta => BETA_API_SECRET.to_string(),
+        EnvironmentType::Local => String::new(),
     }
 }
 
@@ -61,8 +61,8 @@ pub async fn track(
     environment: &Environment,
     client_id: String,
 ) -> Result<(), TrackError> {
-    let analytics_id = analytics_id(environment);
-    let analytics_api_key = analytics_api_key(environment);
+    let analytics_id = get_measurement_id(environment);
+    let analytics_api_key = get_api_secret(environment);
     if analytics_id.is_empty() {
         return Ok(());
     }

@@ -13,20 +13,22 @@ use std::time::{Duration, Instant};
 pub struct EnhancedOrchestratorClient {
     client: OrchestratorClient,
     last_request_time: Instant,
+    environment: Environment,
 }
 
 impl EnhancedOrchestratorClient {
-    /// 创建新的增强型客户端
+    /// 创建新的增强型协调器客户端
     pub fn new(environment: Environment) -> Self {
         Self {
-            client: OrchestratorClient::new(environment),
+            client: OrchestratorClient::new(environment.clone()),
             last_request_time: Instant::now(),
+            environment,
         }
     }
     
     /// 获取内部环境
     pub fn environment(&self) -> &Environment {
-        self.client.environment()
+        &self.environment
     }
 
     /// 获取证明任务 - 包含429错误处理

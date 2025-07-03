@@ -31,6 +31,7 @@ pub struct OrchestratorClient {
 }
 
 impl OrchestratorClient {
+    /// Create a new orchestrator client with the given environment.
     pub fn new(environment: Environment) -> Self {
         Self {
             client: ClientBuilder::new()
@@ -208,6 +209,11 @@ impl OrchestratorClient {
         } else {
             Err("Invalid country code from ipinfo.io".into())
         }
+    }
+
+    /// Get a reference to the environment.
+    pub fn environment(&self) -> &Environment {
+        &self.environment
     }
 }
 

@@ -4,7 +4,7 @@ use crate::orchestrator::{OrchestratorClient, Orchestrator};
 use std::error::Error;
 use std::path::PathBuf;
 
-use crate::environment::{Environment, EnvironmentType};
+use crate::environment::Environment;
 // 移除重复导入
 use crate::logging;
 use crate::key_manager;
@@ -73,10 +73,7 @@ pub async fn initialize_environment(
     env_logger::init();
     
     // 创建和初始化环境
-    let mut env = match config.environment.parse::<Environment>() {
-        Ok(env) => env,
-        Err(_) => Environment::default(),
-    };
+    let mut env = Environment::default();
     
     // 设置API URL
     if let Some(url) = api_url {
