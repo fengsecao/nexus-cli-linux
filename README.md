@@ -12,6 +12,7 @@
 - ✅ **高级错误处理**：特别针对 429 限流错误进行优化处理（最多重试12次）
 - ✅ **无限重试机制**：节点失败后会自动重试，保障稳定运行
 - ✅ **实时状态监控**：固定行显示各节点状态和内存使用情况
+- ✅ **代理轮换功能**：支持动态代理池，每次请求使用不同IP，有效避免429限流错误
 
 ## 🚀 安装指南
 
@@ -57,6 +58,9 @@ cargo build --release
 # 运行单个节点（自动读取或创建密钥）
 ./target/release/nexus-network start --node-id <节点ID>
 
+# 使用代理文件
+./target/release/nexus-network start --node-id <节点ID> --proxy-file proxy.txt
+
 # Windows下使用
 .\target\release\nexus-network.exe start --node-id <节点ID>
 ```
@@ -68,6 +72,9 @@ mkdir -p nodes
 
 # 运行批量节点模式
 ./target/release/nexus-network batch-file --file nodes/nodes.txt --max-concurrent 10 --proof-interval 5 --workers-per-node 1
+
+# 使用代理文件
+./target/release/nexus-network batch-file --file nodes/nodes.txt --max-concurrent 10 --proof-interval 5 --workers-per-node 1 --proxy-file proxy.txt
 
 # Windows下使用
 .\target\release\nexus-network.exe batch-file --file nodes\nodes.txt --max-concurrent 10 --proof-interval 5 --workers-per-node 1
@@ -81,6 +88,13 @@ mkdir -p nodes
 456789
 ```
 
+### 代理列表文件格式
+在proxy.txt中，每行放置一个代理，格式为`host:port:username:password_country-COUNTRY`，例如：
+```
+proxy-as.packetstream.vip:31112:10213721:Cbzqd6A86cNJZ_country-MONGOLIA
+proxy-as.packetstream.vip:31112:10413221:Cbzq45Ue6jbJZ_country-CHINA
+```
+
 ## ⚙️ 参数说明
 
 | 参数 | 说明 | 默认值 | 建议值 |
@@ -92,6 +106,7 @@ mkdir -p nodes
 | `--start-delay` | 节点启动间隔时间（秒） | 0.5 | 0.5-1.0 |
 | `--verbose` | 启用详细日志输出 | false | 调试时启用 |
 | `--env` | 连接环境 | production | production |
+| `--proxy-file` | 代理列表文件路径 | proxy.txt | 自定义路径 |
 
 ## 🔧 内存优化原理
 
@@ -102,6 +117,7 @@ mkdir -p nodes
    - 最多重试12次429错误
    - 使用30-60秒随机等待时间
    - 智能退避策略
+   - 代理轮换功能，每次请求使用不同IP
 
 ## 📊 性能对比
 
@@ -109,7 +125,7 @@ mkdir -p nodes
 |------|---------|---------|------|
 | 单节点内存占用 | 约150MB | 约80MB | 降低约47% |
 | 10节点内存占用 | 约1.5GB | 约700MB | 降低约53% |
-| 429错误重试 | 简单重试 | 智能策略 | 更高成功率 |
+| 429错误重试 | 简单重试 | 智能策略+代理轮换 | 大幅提高成功率 |
 | 多节点管理 | 不支持 | 支持 | 大幅提升 |
 
 ## 🖥️ 适用环境
@@ -124,16 +140,22 @@ mkdir -p nodes
    **解决方案**: 减少 `--max-concurrent` 参数值
 
 2. **问题**: 429错误过多
-   **解决方案**: 增加 `--proof-interval` 值到5-10秒
+   **解决方案**: 
+   - 增加 `--proof-interval` 值到5-10秒
+   - 使用 `--proxy-file` 参数指定代理文件
 
 3. **问题**: 节点状态显示异常
    **解决方案**: 使用 `--headless` 模式运行，查看详细日志
+
+4. **问题**: 代理连接失败
+   **解决方案**: 检查代理格式是否正确，确保代理可用
 
 ## 📝 改进计划
 
 - [ ] 添加监控API和Web界面
 - [ ] 支持动态调整并发节点数
 - [ ] 增加节点失败自动替换功能
+- [x] 添加代理轮换功能，避免429错误
 - [ ] 更精细的内存使用控制
 - [ ] 添加Docker支持
 

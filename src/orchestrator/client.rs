@@ -14,31 +14,160 @@ use crate::system::{estimate_peak_gflops, get_memory_info};
 use crate::task::Task;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use prost::Message;
-use reqwest::{Client, ClientBuilder, Response};
-use std::sync::OnceLock;
+use reqwest::{Client, ClientBuilder, Response, Proxy};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use log::{info, warn, error};
+use std::fs::File;
+use std::io::{self, BufRead};
+use std::path::Path;
+use once_cell::sync::OnceCell;
 
 // Privacy-preserving country detection for network optimization.
 // Only stores 2-letter country codes (e.g., "US", "CA", "GB") to help route
 // requests to the nearest Nexus network servers for better performance.
 // No precise location, IP addresses, or personal data is collected or stored.
-static COUNTRY_CODE: OnceLock<String> = OnceLock::new();
+static COUNTRY_CODE: OnceCell<String> = OnceCell::new();
+
+/// 代理信息结构
+#[derive(Clone, Debug)]
+struct ProxyInfo {
+    url: String,
+    username: String,
+    password: String,
+    country: String,
+}
+
+/// 代理管理器
+struct ProxyManager {
+    proxies: Arc<Mutex<Vec<ProxyInfo>>>,
+    last_used_index: Arc<Mutex<usize>>,
+}
+
+impl ProxyManager {
+    /// 创建新的代理管理器
+    pub fn new() -> Self {
+        Self {
+            proxies: Arc::new(Mutex::new(Vec::new())),
+            last_used_index: Arc::new(Mutex::new(0)),
+        }
+    }
+
+    /// 从文件加载代理列表
+    pub fn load_from_file(&self, file_path: &str) -> io::Result<()> {
+        let path = Path::new(file_path);
+        let file = File::open(path)?;
+        let reader = io::BufReader::new(file);
+        let mut proxies = Vec::new();
+
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                if line.trim().is_empty() || line.starts_with('#') {
+                    continue;
+                }
+
+                // 解析格式: host:port:username:password_country-COUNTRY
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 4 {
+                    let host = parts[0];
+                    let port = parts[1];
+                    let username = parts[2];
+                    
+                    // 处理密码和国家信息
+                    let password_parts: Vec<&str> = parts[3].split("_country-").collect();
+                    let password = password_parts[0];
+                    let country = if password_parts.len() > 1 { password_parts[1] } else { "UNKNOWN" };
+                    
+                    let url = format!("http://{}:{}", host, port);
+                    
+                    proxies.push(ProxyInfo {
+                        url,
+                        username: username.to_string(),
+                        password: password.to_string(),
+                        country: country.to_string(),
+                    });
+                }
+            }
+        }
+
+        // 更新代理列表
+        if !proxies.is_empty() {
+            let mut proxy_list = self.proxies.lock().unwrap();
+            *proxy_list = proxies;
+            info!("已加载 {} 个代理", proxy_list.len());
+        } else {
+            warn!("代理文件为空或格式不正确");
+        }
+
+        Ok(())
+    }
+
+    /// 获取下一个代理
+    pub fn next_proxy(&self) -> Option<ProxyInfo> {
+        let proxies = self.proxies.lock().unwrap();
+        if proxies.is_empty() {
+            return None;
+        }
+
+        // 随机选择一个代理
+        let mut rng = thread_rng();
+        proxies.choose(&mut rng).cloned()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorClient {
     client: Client,
     environment: Environment,
+    proxy_manager: Arc<ProxyManager>,
 }
 
 impl OrchestratorClient {
     /// Create a new orchestrator client with the given environment.
     pub fn new(environment: Environment) -> Self {
+        let proxy_manager = Arc::new(ProxyManager::new());
+        
+        // 尝试加载默认代理文件
+        if let Err(e) = proxy_manager.load_from_file("proxy.txt") {
+            warn!("无法加载默认代理文件: {}", e);
+        }
+        
         Self {
             client: ClientBuilder::new()
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("Failed to create HTTP client"),
             environment,
+            proxy_manager,
+        }
+    }
+
+    /// Create a new orchestrator client with proxy support
+    pub fn new_with_proxy(environment: Environment, proxy_file: Option<&str>) -> Self {
+        let proxy_manager = Arc::new(ProxyManager::new());
+        
+        // 尝试加载指定的代理文件
+        if let Some(file_path) = proxy_file {
+            match proxy_manager.load_from_file(file_path) {
+                Ok(_) => info!("成功加载代理文件: {}", file_path),
+                Err(e) => warn!("无法加载代理文件 {}: {}", file_path, e),
+            }
+        } else {
+            // 尝试加载默认代理文件
+            if let Err(e) = proxy_manager.load_from_file("proxy.txt") {
+                warn!("无法加载默认代理文件: {}", e);
+            }
+        }
+        
+        Self {
+            client: ClientBuilder::new()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("Failed to create HTTP client"),
+            environment,
+            proxy_manager,
         }
     }
 
@@ -65,14 +194,46 @@ impl OrchestratorClient {
         Ok(response)
     }
 
+    /// 创建带有代理的HTTP客户端
+    async fn create_client_with_proxy(&self) -> Client {
+        let builder = ClientBuilder::new().timeout(Duration::from_secs(10));
+        
+        // 尝试获取代理
+        if let Some(proxy_info) = self.proxy_manager.next_proxy() {
+            info!("使用代理: {} ({})", proxy_info.url, proxy_info.country);
+            
+            // 创建代理
+            match Proxy::all(&proxy_info.url) {
+                Ok(proxy) => {
+                    let proxy_with_auth = proxy.basic_auth(&proxy_info.username, &proxy_info.password);
+                    match builder.proxy(proxy_with_auth).build() {
+                        Ok(client) => return client,
+                        Err(e) => {
+                            error!("创建代理客户端失败: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("创建代理失败: {}", e);
+                }
+            }
+        }
+        
+        // 如果获取代理失败，使用默认客户端
+        warn!("使用默认连接（无代理）");
+        builder.build().expect("Failed to create HTTP client")
+    }
+
     async fn get_request<T: Message + Default>(
         &self,
         endpoint: &str,
         body: Vec<u8>,
     ) -> Result<T, OrchestratorError> {
         let url = self.build_url(endpoint);
-        let response = self
-            .client
+        // 使用动态代理客户端
+        let client = self.create_client_with_proxy().await;
+        
+        let response = client
             .get(&url)
             .header("Content-Type", "application/octet-stream")
             .body(body)
@@ -90,8 +251,10 @@ impl OrchestratorClient {
         body: Vec<u8>,
     ) -> Result<T, OrchestratorError> {
         let url = self.build_url(endpoint);
-        let response = self
-            .client
+        // 使用动态代理客户端
+        let client = self.create_client_with_proxy().await;
+        
+        let response = client
             .post(&url)
             .header("Content-Type", "application/octet-stream")
             .body(body)
@@ -109,8 +272,10 @@ impl OrchestratorClient {
         body: Vec<u8>,
     ) -> Result<(), OrchestratorError> {
         let url = self.build_url(endpoint);
-        let response = self
-            .client
+        // 使用动态代理客户端
+        let client = self.create_client_with_proxy().await;
+        
+        let response = client
             .post(&url)
             .header("Content-Type", "application/octet-stream")
             .body(body)
@@ -172,8 +337,10 @@ impl OrchestratorClient {
     }
 
     async fn get_country_from_cloudflare(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let response = self
-            .client
+        // 使用动态代理客户端
+        let client = self.create_client_with_proxy().await;
+        
+        let response = client
             .get("https://cloudflare.com/cdn-cgi/trace")
             .timeout(Duration::from_secs(5))
             .send()
@@ -194,8 +361,10 @@ impl OrchestratorClient {
     }
 
     async fn get_country_from_ipinfo(&self) -> Result<String, Box<dyn std::error::Error>> {
-        let response = self
-            .client
+        // 使用动态代理客户端
+        let client = self.create_client_with_proxy().await;
+        
+        let response = client
             .get("https://ipinfo.io/country")
             .timeout(Duration::from_secs(5))
             .send()

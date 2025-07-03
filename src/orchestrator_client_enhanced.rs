@@ -6,7 +6,7 @@ use crate::orchestrator::{OrchestratorClient, error::OrchestratorError, Orchestr
 use crate::environment::Environment;
 use crate::task::Task;
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use log::{warn, debug};
+use log::{warn, debug, info};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -35,6 +35,24 @@ impl EnhancedOrchestratorClient {
     pub fn new(environment: Environment) -> Self {
         Self {
             client: OrchestratorClient::new(environment.clone()),
+            last_request_time: Instant::now(),
+            environment,
+            proof_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+    
+    /// 创建带有代理支持的增强型协调器客户端
+    pub fn new_with_proxy(environment: Environment, proxy_file: Option<&str>) -> Self {
+        // 创建基础客户端
+        let client = if let Some(proxy_path) = proxy_file {
+            info!("使用代理文件: {}", proxy_path);
+            OrchestratorClient::new_with_proxy(environment.clone(), Some(proxy_path))
+        } else {
+            OrchestratorClient::new(environment.clone())
+        };
+        
+        Self {
+            client,
             last_request_time: Instant::now(),
             environment,
             proof_cache: Arc::new(Mutex::new(HashMap::new())),

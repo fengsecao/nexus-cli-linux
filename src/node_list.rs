@@ -5,6 +5,7 @@
 use std::fs::{self, File};
 use std::io::{self, Write, BufReader, BufWriter, BufRead};
 use std::path::Path;
+use log::info;
 
 #[derive(Debug)]
 pub struct NodeList {
@@ -22,28 +23,25 @@ impl NodeList {
 
     /// 从文件加载节点列表
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        
         let mut node_ids = Vec::new();
-        
+        let file = File::open(path)?;
+        let reader = io::BufReader::new(file);
+
         for line in reader.lines() {
             let line = line?;
-            let line = line.trim();
+            let trimmed = line.trim();
             
-            // 跳过空行和注释
-            if line.is_empty() || line.starts_with('#') {
+            // 跳过空行和注释行
+            if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
             
             // 尝试解析为u64
-            if let Ok(node_id) = line.parse::<u64>() {
+            if let Ok(node_id) = trimmed.parse::<u64>() {
                 node_ids.push(node_id);
-            } else {
-                eprintln!("警告: 无法解析节点ID: {}", line);
             }
         }
-        
+
         Ok(Self { node_ids })
     }
     
@@ -113,6 +111,20 @@ impl NodeList {
     pub fn len(&self) -> usize {
         self.node_ids.len()
     }
+}
+
+/// 从文件加载节点ID列表
+pub fn load_node_list<P: AsRef<Path>>(path: P) -> Result<Vec<u64>, String> {
+    let node_list = NodeList::load_from_file(path)
+        .map_err(|e| format!("读取节点列表文件失败: {}", e))?;
+    
+    // 检查是否为空
+    if node_list.is_empty() {
+        return Err("节点列表为空".into());
+    }
+    
+    info!("已加载 {} 个节点ID", node_list.len());
+    Ok(node_list.node_ids().to_vec())
 }
 
 #[cfg(test)]

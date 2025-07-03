@@ -73,6 +73,10 @@ enum Command {
         /// Maximum number of threads to use for proving.
         #[arg(long = "max-threads", value_name = "MAX_THREADS")]
         max_threads: Option<u32>,
+        
+        /// Path to proxy list file
+        #[arg(long = "proxy-file", value_name = "PROXY_FILE")]
+        proxy_file: Option<String>,
     },
     /// Register a new user
     RegisterUser {
@@ -117,6 +121,10 @@ enum Command {
         /// Enable verbose error logging
         #[arg(long)]
         verbose: bool,
+        
+        /// Path to proxy list file
+        #[arg(long = "proxy-file", value_name = "PROXY_FILE")]
+        proxy_file: Option<String>,
     },
 }
 
@@ -270,7 +278,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             node_id,
             headless,
             max_threads,
-        } => start(node_id, environment, config_path, headless, max_threads).await,
+            proxy_file,
+        } => start(node_id, environment, config_path, headless, max_threads, proxy_file).await,
         Command::Logout => {
             println!("Logging out and clearing node configuration file...");
             Config::clear_node_config(&config_path).map_err(Into::into)
@@ -292,6 +301,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             max_concurrent,
             workers_per_node,
             verbose,
+            proxy_file,
         } => {
             if verbose {
                 unsafe {
@@ -317,7 +327,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 None => Environment::default(),
             };
-            start_batch_processing(&file, environment, start_delay, proof_interval, max_concurrent, workers_per_node).await
+            start_batch_processing(&file, environment, start_delay, proof_interval, max_concurrent, workers_per_node, proxy_file).await
         }
     }
 }
@@ -330,14 +340,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
 /// * `config_path` - Path to the configuration file.
 /// * `headless` - If true, runs without the terminal UI.
 /// * `max_threads` - Optional maximum number of threads to use for proving.
+/// * `proxy_file` - Path to the proxy list file.
 async fn start(
     node_id: Option<u64>,
     env: Environment,
     config_path: std::path::PathBuf,
     headless: bool,
     max_threads: Option<u32>,
+    proxy_file: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let mut node_id = node_id;
+    let config = match Config::load(&config_path) {
+        Ok(config) => config,
+        Err(_) => Config::default(),
+    };
+
+    // 创建增强型协调器客户端，传入代理文件
+    let orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(env.clone(), proxy_file.as_deref());
     // If no node ID is provided, try to load it from the config file.
     if node_id.is_none() && config_path.exists() {
         let config = Config::load_from_file(&config_path)?;
@@ -479,24 +498,25 @@ async fn start_batch_processing(
     proof_interval: u64,
     max_concurrent: usize,
     workers_per_node: usize,
+    proxy_file: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     // 加载节点列表
-    let node_list = node_list::NodeList::load_from_file(file_path)
-        .map_err(|e| format!("读取节点列表文件失败: {}", e))?;
-    
-    // 检查是否为空
-    if node_list.is_empty() {
+    let node_ids = node_list::load_node_list(file_path)?;
+    if node_ids.is_empty() {
         return Err("节点列表为空".into());
     }
     
-    let all_nodes = node_list.node_ids().to_vec();
+    println!("📋 已加载 {} 个节点", node_ids.len());
+    
+    // 创建增强型协调器客户端，传入代理文件
+    let orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(environment, proxy_file.as_deref());
     
     // 计算实际并发数
-    let actual_concurrent = max_concurrent.min(all_nodes.len());
+    let actual_concurrent = max_concurrent.min(node_ids.len());
     
     println!("🚀 Nexus 增强型批处理模式");
     println!("📁 节点文件: {}", file_path);
-    println!("📊 节点总数: {}", all_nodes.len());
+    println!("📊 节点总数: {}", node_ids.len());
     println!("🔄 最大并发: {}", actual_concurrent);
     println!("⏱️  启动延迟: {:.1}s, 证明间隔: {}s", start_delay, proof_interval);
     println!("🌍 环境: {:?}", environment);
@@ -508,14 +528,11 @@ async fn start_batch_processing(
     let display = Arc::new(FixedLineDisplay::new());
     display.render_display().await;
     
-    // 创建增强型Orchestrator客户端
-    let orchestrator = crate::orchestrator::OrchestratorClient::new(environment.clone());
-    
     // 创建批处理工作器
     let (shutdown_sender, _) = broadcast::channel(1);
     
     // 限制当前批次大小
-    let current_batch: Vec<_> = all_nodes.into_iter().take(actual_concurrent).collect();
+    let current_batch: Vec<_> = node_ids.into_iter().take(actual_concurrent).collect();
     
     // 创建状态回调
     let display_clone = display.clone();
