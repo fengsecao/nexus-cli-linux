@@ -56,12 +56,23 @@ impl ProxyManager {
 
     /// 从文件加载代理列表
     pub fn load_from_file(&self, file_path: &str) -> io::Result<()> {
+        info!("开始加载代理文件: {}", file_path);
         let path = Path::new(file_path);
-        let file = File::open(path)?;
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                error!("打开代理文件失败: {} - {}", file_path, e);
+                return Err(e);
+            }
+        };
+        
         let reader = io::BufReader::new(file);
         let mut proxies = Vec::new();
+        let mut line_count = 0;
+        let mut valid_count = 0;
 
         for line in reader.lines() {
+            line_count += 1;
             if let Ok(line) = line {
                 if line.trim().is_empty() || line.starts_with('#') {
                     continue;
@@ -87,6 +98,9 @@ impl ProxyManager {
                         password: password.to_string(),
                         country: country.to_string(),
                     });
+                    valid_count += 1;
+                } else {
+                    warn!("代理格式错误 (行 {}): {}", line_count, line);
                 }
             }
         }
@@ -95,24 +109,32 @@ impl ProxyManager {
         if !proxies.is_empty() {
             let mut proxy_list = self.proxies.lock().unwrap();
             *proxy_list = proxies;
-            info!("已加载 {} 个代理", proxy_list.len());
+            info!("已加载 {} 个代理 (总行数: {})", proxy_list.len(), line_count);
+            Ok(())
         } else {
-            warn!("代理文件为空或格式不正确");
+            let err = io::Error::new(io::ErrorKind::InvalidData, "代理文件为空或格式不正确");
+            error!("代理文件无效: {} - 没有找到有效代理", file_path);
+            Err(err)
         }
-
-        Ok(())
     }
 
     /// 获取下一个代理
     pub fn next_proxy(&self) -> Option<ProxyInfo> {
         let proxies = self.proxies.lock().unwrap();
         if proxies.is_empty() {
+            warn!("代理列表为空");
             return None;
         }
 
         // 随机选择一个代理
         let mut rng = thread_rng();
-        proxies.choose(&mut rng).cloned()
+        let selected = proxies.choose(&mut rng).cloned();
+        
+        if selected.is_none() {
+            warn!("无法从代理列表中选择代理");
+        }
+        
+        selected
     }
 }
 
@@ -150,14 +172,27 @@ impl OrchestratorClient {
         
         // 尝试加载指定的代理文件
         if let Some(file_path) = proxy_file {
-            match proxy_manager.load_from_file(file_path) {
-                Ok(_) => info!("成功加载代理文件: {}", file_path),
-                Err(e) => warn!("无法加载代理文件 {}: {}", file_path, e),
+            info!("尝试加载指定代理文件: {}", file_path);
+            // 检查文件是否存在
+            if !Path::new(file_path).exists() {
+                warn!("指定的代理文件不存在: {}", file_path);
+            } else {
+                match proxy_manager.load_from_file(file_path) {
+                    Ok(_) => info!("成功加载代理文件: {}", file_path),
+                    Err(e) => warn!("无法加载代理文件 {}: {}", file_path, e),
+                }
             }
         } else {
             // 尝试加载默认代理文件
-            if let Err(e) = proxy_manager.load_from_file("proxy.txt") {
-                warn!("无法加载默认代理文件: {}", e);
+            let default_path = "proxy.txt";
+            if Path::new(default_path).exists() {
+                info!("尝试加载默认代理文件: {}", default_path);
+                match proxy_manager.load_from_file(default_path) {
+                    Ok(_) => info!("成功加载默认代理文件"),
+                    Err(e) => warn!("无法加载默认代理文件: {}", e),
+                }
+            } else {
+                warn!("默认代理文件不存在: {}", default_path);
             }
         }
         
@@ -220,6 +255,9 @@ impl OrchestratorClient {
                     error!("创建代理失败: {}", e);
                 }
             }
+        } else {
+            // 如果没有可用代理
+            warn!("没有可用的代理，使用默认连接");
         }
         
         // 如果获取代理失败，使用默认客户端
