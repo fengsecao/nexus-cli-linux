@@ -44,7 +44,6 @@ struct ProxyInfo {
 #[derive(Debug)]
 struct ProxyManager {
     proxies: Arc<Mutex<Vec<ProxyInfo>>>,
-    last_used_index: Arc<Mutex<usize>>,
 }
 
 impl ProxyManager {
@@ -52,7 +51,6 @@ impl ProxyManager {
     pub fn new() -> Self {
         Self {
             proxies: Arc::new(Mutex::new(Vec::new())),
-            last_used_index: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -120,6 +118,7 @@ impl ProxyManager {
 
 #[derive(Debug, Clone)]
 pub struct OrchestratorClient {
+    #[allow(dead_code)]
     client: Client,
     environment: Environment,
     proxy_manager: Arc<ProxyManager>,
