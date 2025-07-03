@@ -9,6 +9,7 @@ use crate::environment::Environment;
 use crate::key_manager;
 
 /// 提示用户输入节点ID或创建新节点
+#[allow(dead_code)]
 pub async fn setup_node_id(
     _config_path: &PathBuf,
     config: &mut Config,
@@ -58,6 +59,7 @@ pub async fn setup_node_id(
 }
 
 /// 初始化Nexus环境，包括配置、日志和身份验证
+#[allow(dead_code)]
 pub async fn initialize_environment(
     config_path: &PathBuf,
     api_url: Option<String>,

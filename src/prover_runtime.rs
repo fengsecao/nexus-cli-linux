@@ -154,7 +154,9 @@ pub async fn start_optimized_batch_workers(
     environment: Environment,
     shutdown: broadcast::Receiver<()>,
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
-) -> Vec<JoinHandle<()>> {
+) -> (mpsc::Receiver<Event>, Vec<JoinHandle<()>>) {
+    // Worker事件
+    let (event_sender, event_receiver) = mpsc::channel::<Event>(EVENT_QUEUE_SIZE);
     let mut join_handles = Vec::new();
     let defragmenter = get_defragmenter();
     
@@ -165,11 +167,26 @@ pub async fn start_optimized_batch_workers(
     let _ = crate::prover::get_or_create_default_prover().await;
     let _ = crate::prover::get_or_create_initial_prover().await;
     
+    // 增加初始延迟，避免一次性启动太多节点导致429错误
+    let initial_delay = 3.0; // 3秒初始延迟
+    println!("等待初始延迟 {:.1}秒...", initial_delay);
+    tokio::time::sleep(std::time::Duration::from_secs_f64(initial_delay)).await;
+    
     // 按序启动各节点
     for (index, node_id) in nodes.iter().enumerate() {
         // 添加启动延迟
         if index > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs_f64(start_delay)).await;
+            // 使用更长的延迟，特别是对于前几个节点
+            let actual_delay = if index < 5 {
+                // 前5个节点使用更长的延迟
+                start_delay * 2.0
+            } else {
+                start_delay
+            };
+            
+            println!("启动节点 {} (第{}/{}个), 延迟 {:.1}秒...", 
+                    node_id, index + 1, nodes.len(), actual_delay);
+            tokio::time::sleep(std::time::Duration::from_secs_f64(actual_delay)).await;
         }
         
         // 检查内存压力，如果需要则等待更长时间
@@ -201,44 +218,47 @@ pub async fn start_optimized_batch_workers(
             }
         };
         
-        let node_id = *node_id;
-        // 使用增强版客户端
-        let enhanced_orchestrator = EnhancedOrchestratorClient::new(environment.clone());
-        let shutdown_rx = shutdown.resubscribe();
-        let environment = environment.clone();
-        let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
-        
-        // 为每个任务克隆Arc包装的回调
-        let node_callback = match &status_callback_arc {
-            Some(callback_arc) => {
-                // 克隆Arc，不是内部的回调函数
-                let callback_arc_clone = Arc::clone(callback_arc);
-                // 创建一个新的闭包，捕获Arc克隆
-                Some(Box::new(move |node_id: u64, status: String| {
-                    callback_arc_clone(node_id, status);
-                }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
-            }
-            None => None
-        };
-        
-        let handle = tokio::spawn(async move {
-            run_memory_optimized_node(
-                node_id,
-                signing_key,
-                enhanced_orchestrator,
-                num_workers_per_node,
-                proof_interval,
-                environment,
-                client_id,
-                shutdown_rx,
-                node_callback,
-            ).await;
-        });
+            let node_id = *node_id;
+    // 使用增强版客户端
+    let enhanced_orchestrator = EnhancedOrchestratorClient::new(environment.clone());
+    let shutdown_rx = shutdown.resubscribe();
+    let environment = environment.clone();
+    let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
+    
+    // 为每个任务克隆Arc包装的回调
+    let node_callback = match &status_callback_arc {
+        Some(callback_arc) => {
+            // 克隆Arc，不是内部的回调函数
+            let callback_arc_clone = Arc::clone(callback_arc);
+            // 创建一个新的闭包，捕获Arc克隆
+            Some(Box::new(move |node_id: u64, status: String| {
+                callback_arc_clone(node_id, status);
+            }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
+        }
+        None => None
+    };
+    
+    let event_sender_clone = event_sender.clone();
+    
+    let handle = tokio::spawn(async move {
+        run_memory_optimized_node(
+            node_id,
+            signing_key,
+            enhanced_orchestrator,
+            num_workers_per_node,
+            proof_interval,
+            environment,
+            client_id,
+            shutdown_rx,
+            node_callback,
+            event_sender_clone,
+        ).await;
+    });
         
         join_handles.push(handle);
     }
     
-    join_handles
+    (event_receiver, join_handles)
 }
 
 /// 内存优化的单节点运行函数 - 包含429错误处理和错误恢复功能
@@ -252,6 +272,7 @@ async fn run_memory_optimized_node(
     client_id: String,
     mut shutdown: broadcast::Receiver<()>,
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
+    event_sender: mpsc::Sender<Event>,
 ) {
     const MAX_ATTEMPTS: usize = 5;
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
@@ -260,11 +281,24 @@ async fn run_memory_optimized_node(
     let mut consecutive_failures = 0;
     let mut proof_count = 0;
     
+    // 使用传入的事件发送器
+    let event_sender = event_sender.clone();
+    
     // 更新节点状态
     let update_status = |status: String| {
         if let Some(callback) = &status_callback {
-            callback(node_id, status);
+            callback(node_id, status.clone());
         }
+    };
+    
+    // 发送事件到UI
+    let send_event = |msg: String, event_type: crate::events::EventType| {
+        let event_sender = event_sender.clone();
+        tokio::spawn(async move {
+            let _ = event_sender
+                .send(Event::proof_submitter(msg, event_type))
+                .await;
+        });
     };
     
     update_status(format!("🚀 启动中"));
@@ -299,8 +333,8 @@ async fn run_memory_optimized_node(
         let mut success = false;
         
         // 尝试获取任务并生成证明
-        while attempt <= MAX_ATTEMPTS {
-            update_status(format!("[{}] 获取任务 ({}/{})", timestamp, attempt, MAX_ATTEMPTS));
+        while attempt <= MAX_TASK_RETRIES {
+            update_status(format!("[{}] 获取任务 ({}/{})", timestamp, attempt, MAX_TASK_RETRIES));
             
             let verifying_key = signing_key.verifying_key();
             match orchestrator.get_task(&node_id.to_string(), &verifying_key).await {
@@ -322,7 +356,9 @@ async fn run_memory_optimized_node(
                                     proof_count += 1;
                                     consecutive_failures = 0;
                                     success = true;
-                                    update_status(format!("[{}] ✅ 缓存证明提交成功! 证明 #{} 完成", timestamp, proof_count));
+                                    let msg = format!("[{}] ✅ 缓存证明提交成功! 证明 #{} 完成", timestamp, proof_count);
+                                    update_status(msg.clone());
+                                    send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     break;
                                 }
                                 Err(e) => {
@@ -338,10 +374,12 @@ async fn run_memory_optimized_node(
                                         continue;
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
                                         // 证明已经被提交，视为成功
-                                        update_status(format!("[{}] ✅ 证明已被接受 (409)", timestamp));
+                                        let msg = format!("[{}] ✅ 证明已被接受 (409)", timestamp);
+                                        update_status(msg.clone());
                                         proof_count += 1;
                                         consecutive_failures = 0;
                                         success = true;
+                                        send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         break;
                                     } else {
                                         update_status(format!("[{}] ❌ 缓存证明提交失败: {}", timestamp, error_str));
@@ -395,7 +433,9 @@ async fn run_memory_optimized_node(
                                         proof_count += 1;
                                         consecutive_failures = 0;
                                         success = true;
-                                        update_status(format!("[{}] ✅ 证明 #{} 完成", timestamp, proof_count));
+                                        let msg = format!("[{}] ✅ 证明 #{} 完成", timestamp, proof_count);
+                                        update_status(msg.clone());
+                                        send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         break;
                                     }
                                     Err(e) => {
@@ -408,12 +448,14 @@ async fn run_memory_optimized_node(
                                                 timestamp, wait_time, retry_count + 1, MAX_SUBMISSION_RETRIES));
                                             tokio::time::sleep(Duration::from_secs(wait_time)).await;
                                         } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
-                                            // 证明已经被提交，视为成功
-                                            update_status(format!("[{}] ✅ 证明已被接受 (409)", timestamp));
-                                            proof_count += 1;
-                                            consecutive_failures = 0;
-                                            success = true;
-                                            break;
+                                                                                    // 证明已经被提交，视为成功
+                                        let msg = format!("[{}] ✅ 证明已被接受 (409)", timestamp);
+                                        update_status(msg.clone());
+                                        proof_count += 1;
+                                        consecutive_failures = 0;
+                                        success = true;
+                                        send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                        break;
                                         } else {
                                             update_status(format!("[{}] ❌ 提交失败 (重试 {}/{}): {}", 
                                                 timestamp, retry_count + 1, MAX_SUBMISSION_RETRIES, error_str));

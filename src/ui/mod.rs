@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
 /// 定义ProverEvent类型
+#[allow(dead_code)]
 type ProverEvent = WorkerEvent;
 
 /// The different screens in the application.

@@ -24,6 +24,7 @@ struct CachedProof {
 pub struct EnhancedOrchestratorClient {
     client: OrchestratorClient,
     last_request_time: Instant,
+    #[allow(dead_code)]
     environment: Environment,
     // 证明缓存 - 任务ID -> 缓存的证明
     proof_cache: Arc<Mutex<HashMap<String, CachedProof>>>,
@@ -41,6 +42,7 @@ impl EnhancedOrchestratorClient {
     }
     
     /// 获取内部环境
+    #[allow(dead_code)]
     pub fn environment(&self) -> &Environment {
         &self.environment
     }
@@ -168,6 +170,7 @@ impl EnhancedOrchestratorClient {
     }
     
     /// 获取带有签名的提交证明URL
+    #[allow(dead_code)]
     pub async fn submit_proof_with_signature(
         &self,
         task_id: &str,

@@ -31,6 +31,7 @@ pub enum ProverError {
     Analytics(String),
     
     #[error("Rate limited (429): {0}")]
+    #[allow(dead_code)]
     RateLimited(String),
 }
 

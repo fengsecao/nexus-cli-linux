@@ -2,6 +2,7 @@ use crate::system::measure_gflops;
 use crate::environment::Environment;
 
 /// 渲染ASCII艺术横幅
+#[allow(dead_code)]
 pub fn render_ascii_banner(text: &str) -> Vec<String> {
     let height = 7; // ASCII艺术高度
     let mut result = vec![String::new(); height];
@@ -81,6 +82,7 @@ pub fn render_ascii_banner(text: &str) -> Vec<String> {
 }
 
 /// 生成CLI欢迎横幅
+#[allow(dead_code)]
 pub fn generate_welcome_banner(environment: &Environment, version: &str) -> Vec<String> {
     vec![
         "".to_string(),

@@ -31,6 +31,7 @@ impl ErrorClassifier {
         Self
     }
 
+    #[allow(dead_code)]
     pub fn classify_fetch_error(&self, error: &OrchestratorError) -> LogLevel {
         match error {
             // Non-critical: Temporary server issues

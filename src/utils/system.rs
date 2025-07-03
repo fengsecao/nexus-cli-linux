@@ -13,6 +13,7 @@ const CRITICAL_MEMORY_THRESHOLD: f64 = 0.92;
 const GC_COOL_DOWN_SECS: u64 = 60; // 避免太频繁触发内存清理
 
 /// 检查系统内存压力
+#[allow(dead_code)]
 pub fn check_memory_pressure() -> bool {
     let (used_mb, total_mb) = get_memory_info();
     let ratio = used_mb as f64 / total_mb as f64;
@@ -76,6 +77,7 @@ pub fn perform_memory_cleanup() {
 pub struct DefragmenterStats {
     pub cache_hits: u64,
     pub cache_misses: u64,
+    #[allow(dead_code)]
     pub total_checks: u64,
     pub cleanups_performed: u64,
     pub bytes_freed: u64,

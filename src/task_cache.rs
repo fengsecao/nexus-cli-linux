@@ -52,6 +52,7 @@ impl TaskCache {
     }
     
     /// 强制清理所有过期任务并返回清理数量
+    #[allow(dead_code)]
     pub async fn force_prune(&self) -> usize {
         let mut queue = self.inner.lock().await;
         let before_len = queue.len();
@@ -61,12 +62,14 @@ impl TaskCache {
     }
     
     /// 获取当前缓存中的任务数量
+    #[allow(dead_code)]
     pub async fn len(&self) -> usize {
         let queue = self.inner.lock().await;
         queue.len()
     }
     
     /// 获取最旧任务的存活时间（毫秒）
+    #[allow(dead_code)]
     pub async fn oldest_task_age_ms(&self) -> Option<u64> {
         let queue = self.inner.lock().await;
         queue.front().map(|(_, timestamp)| timestamp.elapsed().as_millis() as u64)

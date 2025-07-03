@@ -19,9 +19,13 @@ pub enum EnvironmentType {
 #[derive(Clone, Debug)]
 pub struct Environment {
     pub env_type: EnvironmentType,
+    #[allow(dead_code)]
     pub api_url: String,
+    #[allow(dead_code)]
     pub client_id: String,
+    #[allow(dead_code)]
     pub namespace: String,
+    #[allow(dead_code)]
     pub key_manager: SigningKey,
 }
 

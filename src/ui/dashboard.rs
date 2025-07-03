@@ -75,7 +75,9 @@ impl DashboardState {
     pub fn update_counts(&mut self, event: &WorkerEvent) {
         match event.event_type {
             EventType::Success => {
-                if event.msg.contains("Proof submitted successfully") {
+                if event.msg.contains("Proof submitted successfully") || 
+                   event.msg.contains("证明") && (event.msg.contains("完成") || event.msg.contains("成功")) ||
+                   event.msg.contains("✅") {
                     self.total_success_count += 1;
                 }
             },
@@ -85,7 +87,8 @@ impl DashboardState {
             },
             EventType::Error => {
                 if event.msg.contains("Error submitting proof") || 
-                   event.msg.contains("Failed to submit proof") {
+                   event.msg.contains("Failed to submit proof") ||
+                   event.msg.contains("提交失败") {
                     self.total_error_count += 1;
                 }
             },

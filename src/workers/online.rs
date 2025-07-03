@@ -28,6 +28,7 @@ pub struct TaskFetchState {
     backoff_duration: Duration,
     last_queue_log_time: std::time::Instant,
     queue_log_interval: Duration,
+    #[allow(dead_code)]
     error_classifier: ErrorClassifier,
 }
 

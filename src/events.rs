@@ -25,11 +25,17 @@ pub enum EventType {
     Status,
     Refresh,
     Shutdown,
+    #[allow(dead_code)]
     TaskReceived,
+    #[allow(dead_code)]
     TaskCompleted,
+    #[allow(dead_code)]
     ProofGenerated,
+    #[allow(dead_code)]
     ProofSubmitted,
+    #[allow(dead_code)]
     SystemEvent,
+    #[allow(dead_code)]
     MemoryCleanup,
 }
 

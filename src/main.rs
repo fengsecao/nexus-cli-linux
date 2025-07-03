@@ -527,7 +527,7 @@ async fn start_batch_processing(
     });
     
     // 启动优化的批处理工作器
-    let join_handles = crate::prover_runtime::start_optimized_batch_workers(
+    let (event_receiver, join_handles) = crate::prover_runtime::start_optimized_batch_workers(
         current_batch,
         orchestrator,
         workers_per_node,
@@ -537,6 +537,21 @@ async fn start_batch_processing(
         shutdown_sender.subscribe(),
         Some(status_callback),
     ).await;
+    
+    // 创建消费事件的任务
+    let display_clone = display.clone();
+    tokio::spawn(async move {
+        while let Some(event) = event_receiver.recv().await {
+            // 更新成功/失败计数
+            if event.event_type == crate::events::EventType::ProofSubmitted {
+                display_clone.success_count.fetch_add(1, Ordering::Relaxed);
+            } else if event.event_type == crate::events::EventType::Error &&
+                      (event.msg.contains("Error submitting proof") || 
+                       event.msg.contains("Failed to submit proof")) {
+                display_clone.failure_count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
     
     // 等待 Ctrl+C 信号
     tokio::select! {
