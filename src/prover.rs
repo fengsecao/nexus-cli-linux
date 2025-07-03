@@ -151,7 +151,8 @@ pub async fn prove_anonymously(
     let stwo_ref = stwo_prover.as_ref();
     // 调用prove_with_input的克隆版本
     let (view, proof) = {
-        let mut prover = stwo_ref.clone();
+        // 创建一个拥有所有权的克隆
+        let prover = stwo_ref.clone();
         prover.prove_with_input::<(), (u32, u32, u32)>(&(), &public_input)
             .map_err(|e| {
                 ProverError::Stwo(format!(
@@ -215,7 +216,8 @@ pub async fn authenticated_proving(
             let stwo_ref = stwo_prover.as_ref();
             // 调用prove_with_input的克隆版本
             let (view, proof) = {
-                let mut prover = stwo_ref.clone();
+                // 创建一个拥有所有权的克隆
+                let prover = stwo_ref.clone();
                 prover.prove_with_input::<(), u32>(&(), &input)
                     .map_err(|e| ProverError::Stwo(format!("Failed to run fast-fib prover: {}", e)))?
             };
@@ -229,7 +231,8 @@ pub async fn authenticated_proving(
             let stwo_ref = stwo_prover.as_ref();
             // 调用prove_with_input的克隆版本
             let (view, proof) = {
-                let mut prover = stwo_ref.clone();
+                // 创建一个拥有所有权的克隆
+                let prover = stwo_ref.clone();
                 prover.prove_with_input::<(), (u32, u32, u32)>(&(), &inputs)
                     .map_err(|e| {
                         ProverError::Stwo(format!("Failed to run fib_input_initial prover: {}", e))

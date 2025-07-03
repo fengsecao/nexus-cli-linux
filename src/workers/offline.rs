@@ -159,7 +159,7 @@ pub async fn start_anonymous_workers(
                         // Perform work
                         debug!("Anonymous worker {} generating proof", worker_id);
                         match crate::prover::prove_anonymously(&environment_clone, client_id_clone.clone()).await {
-                            Ok(proof) => {
+                            Ok(_proof) => {
                                 debug!("Anonymous worker {} completed proof", worker_id);
                                 let message = "Anonymous proof completed successfully".to_string();
                                 let _ = prover_event_sender

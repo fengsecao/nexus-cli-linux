@@ -5,8 +5,7 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use crate::environment::Environment;
-// 移除重复导入
-use crate::logging;
+// 移除logging导入
 use crate::key_manager;
 
 /// 提示用户输入节点ID或创建新节点
@@ -66,7 +65,7 @@ pub async fn initialize_environment(
     namespace: Option<String>,
 ) -> Result<Environment, String> {
     // 配置初始化
-    let config = Config::load_from_file(config_path)
+    let _config = Config::load_from_file(config_path)
         .map_err(|e| format!("配置加载失败: {}", e))?;
     
     // 日志初始化

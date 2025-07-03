@@ -25,7 +25,6 @@ use log::{debug, warn};
 use crate::orchestrator_client_enhanced::EnhancedOrchestratorClient;
 use sha3::Digest;
 use postcard;
-use std::sync::Arc;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -206,7 +205,11 @@ pub async fn start_optimized_batch_workers(
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
         
         // 创建一个可以安全移动到新任务的回调函数
-        let status_callback_clone = status_callback.clone();
+        let status_callback_clone = if let Some(callback) = &status_callback {
+            Some(callback.clone())
+        } else {
+            None
+        };
         
         let handle = tokio::spawn(async move {
             run_memory_optimized_node(
