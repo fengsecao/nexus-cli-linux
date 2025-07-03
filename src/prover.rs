@@ -147,21 +147,19 @@ pub async fn prove_anonymously(
 
     // 使用全局缓存的证明器
     let stwo_prover = get_or_create_initial_prover().await?;
-    // 从Arc中借用值而不是移动
-    let stwo_ref = stwo_prover.as_ref();
-    // 调用prove_with_input，使用Arc::clone创建新的Arc而不是尝试克隆内部值
-    let (view, proof) = {
-        // 创建一个新的Arc指针，而不是尝试克隆Stwo
-        let prover_arc = Arc::clone(&stwo_prover);
-        // 使用Arc内部的引用
-        prover_arc.as_ref().prove_with_input::<(), (u32, u32, u32)>(&(), &public_input)
-            .map_err(|e| {
-                ProverError::Stwo(format!(
-                    "Failed to run fib_input_initial prover (anonymous): {}",
-                    e
-                ))
-            })?
-    };
+    
+    // 我们需要获取一个拥有所有权的Stwo实例
+    // 创建一个新的Stwo实例而不是使用Arc中的共享引用
+    let stwo_instance = get_initial_stwo_prover()?;
+    
+    // 使用拥有所有权的实例调用prove_with_input
+    let (view, proof) = stwo_instance.prove_with_input::<(), (u32, u32, u32)>(&(), &public_input)
+        .map_err(|e| {
+            ProverError::Stwo(format!(
+                "Failed to run fib_input_initial prover (anonymous): {}",
+                e
+            ))
+        })?;
 
     let exit_code = view.exit_code().map_err(|e| {
         ProverError::GuestProgram(format!("Failed to deserialize exit code: {}", e))
@@ -211,32 +209,26 @@ pub async fn authenticated_proving(
         "fast-fib" => {
             // fast-fib uses string inputs
             let input = get_string_public_input(task)?;
-            // 使用全局缓存的证明器
-            let stwo_prover = get_or_create_default_prover().await?;
-            // 调用prove_with_input，使用Arc::clone创建新的Arc而不是尝试克隆内部值
-            let (view, proof) = {
-                // 创建一个新的Arc指针，而不是尝试克隆Stwo
-                let prover_arc = Arc::clone(&stwo_prover);
-                // 使用Arc内部的引用
-                prover_arc.as_ref().prove_with_input::<(), u32>(&(), &input)
-                    .map_err(|e| ProverError::Stwo(format!("Failed to run fast-fib prover: {}", e)))?
-            };
+            // 我们需要获取一个拥有所有权的Stwo实例
+            // 创建一个新的Stwo实例而不是使用Arc中的共享引用
+            let stwo_instance = get_default_stwo_prover()?;
+            
+            // 使用拥有所有权的实例调用prove_with_input
+            let (view, proof) = stwo_instance.prove_with_input::<(), u32>(&(), &input)
+                .map_err(|e| ProverError::Stwo(format!("Failed to run fast-fib prover: {}", e)))?;
             (view, proof, input)
         }
         "fib_input_initial" => {
             let inputs = get_triple_public_input(task)?;
-            // 使用全局缓存的证明器
-            let stwo_prover = get_or_create_initial_prover().await?;
-            // 调用prove_with_input，使用Arc::clone创建新的Arc而不是尝试克隆内部值
-            let (view, proof) = {
-                // 创建一个新的Arc指针，而不是尝试克隆Stwo
-                let prover_arc = Arc::clone(&stwo_prover);
-                // 使用Arc内部的引用
-                prover_arc.as_ref().prove_with_input::<(), (u32, u32, u32)>(&(), &inputs)
-                    .map_err(|e| {
-                        ProverError::Stwo(format!("Failed to run fib_input_initial prover: {}", e))
-                    })?
-            };
+            // 我们需要获取一个拥有所有权的Stwo实例
+            // 创建一个新的Stwo实例而不是使用Arc中的共享引用
+            let stwo_instance = get_initial_stwo_prover()?;
+            
+            // 使用拥有所有权的实例调用prove_with_input
+            let (view, proof) = stwo_instance.prove_with_input::<(), (u32, u32, u32)>(&(), &inputs)
+                .map_err(|e| {
+                    ProverError::Stwo(format!("Failed to run fib_input_initial prover: {}", e))
+                })?;
             (view, proof, inputs.0)
         }
         _ => {
