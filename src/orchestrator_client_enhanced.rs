@@ -21,8 +21,9 @@ struct CachedProof {
 }
 
 /// 增强型Orchestrator客户端
+#[derive(Clone)]
 pub struct EnhancedOrchestratorClient {
-    client: OrchestratorClient,
+    pub client: OrchestratorClient,
     last_request_time: Instant,
     #[allow(dead_code)]
     environment: Environment,

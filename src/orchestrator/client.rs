@@ -41,6 +41,7 @@ struct ProxyInfo {
 }
 
 /// 代理管理器
+#[derive(Debug)]
 struct ProxyManager {
     proxies: Arc<Mutex<Vec<ProxyInfo>>>,
     last_used_index: Arc<Mutex<usize>>,
@@ -196,7 +197,7 @@ impl OrchestratorClient {
 
     /// 创建带有代理的HTTP客户端
     async fn create_client_with_proxy(&self) -> Client {
-        let builder = ClientBuilder::new().timeout(Duration::from_secs(10));
+        let mut builder = ClientBuilder::new().timeout(Duration::from_secs(10));
         
         // 尝试获取代理
         if let Some(proxy_info) = self.proxy_manager.next_proxy() {

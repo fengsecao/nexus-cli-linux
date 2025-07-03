@@ -350,9 +350,14 @@ async fn start(
     proxy_file: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let mut node_id = node_id;
-    let config = match Config::load(&config_path) {
+    let config = match Config::load_from_file(&config_path) {
         Ok(config) => config,
-        Err(_) => Config::default(),
+        Err(_) => Config::new(
+            String::new(),
+            String::new(),
+            String::new(),
+            Environment::default(),
+        ),
     };
 
     // 创建增强型协调器客户端，传入代理文件
@@ -546,7 +551,7 @@ async fn start_batch_processing(
     // 启动优化的批处理工作器
     let (mut event_receiver, join_handles) = crate::prover_runtime::start_optimized_batch_workers(
         current_batch,
-        orchestrator,
+        orchestrator.client.clone(),
         workers_per_node,
         start_delay,
         proof_interval,
