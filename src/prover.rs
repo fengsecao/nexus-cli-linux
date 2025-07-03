@@ -145,8 +145,8 @@ pub async fn prove_anonymously(
         perform_memory_cleanup();
     }
 
-    // 使用全局缓存的证明器
-    let stwo_prover = get_or_create_initial_prover().await?;
+    // 不需要缓存的证明器，直接创建新实例
+    // let stwo_prover = get_or_create_initial_prover().await?;
     
     // 我们需要获取一个拥有所有权的Stwo实例
     // 创建一个新的Stwo实例而不是使用Arc中的共享引用
