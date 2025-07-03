@@ -25,6 +25,12 @@ pub enum EventType {
     Status,
     Refresh,
     Shutdown,
+    TaskReceived,
+    TaskCompleted,
+    ProofGenerated,
+    ProofSubmitted,
+    SystemEvent,
+    MemoryCleanup,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

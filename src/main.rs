@@ -47,6 +47,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use log::warn;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -124,6 +125,9 @@ enum Command {
 struct FixedLineDisplay {
     node_lines: Arc<RwLock<HashMap<u64, String>>>,
     defragmenter: Arc<MemoryDefragmenter>,
+    // 持久化的成功和失败计数
+    success_count: Arc<AtomicU64>,
+    failure_count: Arc<AtomicU64>,
 }
 
 impl FixedLineDisplay {
@@ -131,10 +135,19 @@ impl FixedLineDisplay {
         Self {
             node_lines: Arc::new(RwLock::new(HashMap::new())),
             defragmenter: crate::prover::get_defragmenter(),
+            success_count: Arc::new(AtomicU64::new(0)),
+            failure_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
     async fn update_node_status(&self, node_id: u64, status: String) {
+        // 检查是否是成功或失败状态，并更新计数
+        if status.contains("成功") || status.contains("提交证明成功") {
+            self.success_count.fetch_add(1, Ordering::Relaxed);
+        } else if status.contains("失败") || status.contains("错误") {
+            self.failure_count.fetch_add(1, Ordering::Relaxed);
+        }
+        
         let needs_update = {
             let lines = self.node_lines.read().await;
             lines.get(&node_id) != Some(&status)
@@ -179,14 +192,15 @@ impl FixedLineDisplay {
         
         let lines = self.node_lines.read().await;
         
-        // 统计信息
-        let (total_nodes, successful_count, failed_count, active_count) = lines.values()
-            .fold((0, 0, 0, 0), |(total, success, failed, active), status| {
+        // 获取持久化的成功和失败计数
+        let (successful_count, failed_count) = self.get_persistent_counts().await;
+        
+        // 统计信息 - 只计算活跃节点数量，成功和失败使用累计值
+        let (total_nodes, active_count) = lines.values()
+            .fold((0, 0), |(total, active), status| {
                 let new_total = total + 1;
-                let new_success = if status.contains("✅") { success + 1 } else { success };
-                let new_failed = if status.contains("❌") { failed + 1 } else { failed };
                 let new_active = if status.contains("获取任务") || status.contains("生成证明") || status.contains("提交证明") { active + 1 } else { active };
-                (new_total, new_success, new_failed, new_active)
+                (new_total, new_active)
             });
         
         println!("📊 状态: {} 总数 | {} 活跃 | {} 成功 | {} 失败", 
@@ -223,6 +237,13 @@ impl FixedLineDisplay {
         // 强制刷新输出
         use std::io::Write;
         std::io::stdout().flush().unwrap();
+    }
+
+    // 获取持久化的成功和失败计数
+    async fn get_persistent_counts(&self) -> (u64, u64) {
+        let success = self.success_count.load(Ordering::Relaxed);
+        let failure = self.failure_count.load(Ordering::Relaxed);
+        (success, failure)
     }
 }
 

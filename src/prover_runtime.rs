@@ -254,6 +254,9 @@ async fn run_memory_optimized_node(
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
 ) {
     const MAX_ATTEMPTS: usize = 5;
+    const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
+    const MAX_TASK_RETRIES: usize = 5; // 增加到5次
+    const MAX_429_RETRIES: usize = 12; // 专门针对429错误的重试次数
     let mut consecutive_failures = 0;
     let mut proof_count = 0;
     
@@ -302,7 +305,69 @@ async fn run_memory_optimized_node(
             let verifying_key = signing_key.verifying_key();
             match orchestrator.get_task(&node_id.to_string(), &verifying_key).await {
                 Ok(task) => {
-                    // 任务获取成功，开始生成证明
+                    // 检查是否有该任务的缓存证明
+                    if let Some((cached_proof_bytes, cached_proof_hash, attempts)) = orchestrator.get_cached_proof(&task.task_id) {
+                        // 有缓存的证明，直接尝试提交
+                        update_status(format!("[{}] 使用缓存证明重试提交 (尝试次数: {})", timestamp, attempts + 1));
+                        
+                        // 针对缓存的证明，我们可以进行更多次数的重试，特别是429错误
+                        let mut retry_count = 0;
+                        let mut rate_limited = false;
+                        
+                        // 对于缓存的证明，我们可以更积极地重试
+                        while retry_count < MAX_429_RETRIES {
+                            match orchestrator.submit_proof(&task.task_id, &cached_proof_hash, cached_proof_bytes.clone(), signing_key.clone()).await {
+                                Ok(_) => {
+                                    // 成功提交证明
+                                    proof_count += 1;
+                                    consecutive_failures = 0;
+                                    success = true;
+                                    update_status(format!("[{}] ✅ 缓存证明提交成功! 证明 #{} 完成", timestamp, proof_count));
+                                    break;
+                                }
+                                Err(e) => {
+                                    let error_str = e.to_string();
+                                    if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
+                                        // 速率限制错误 - 使用随机等待时间
+                                        rate_limited = true;
+                                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
+                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{})", 
+                                            timestamp, wait_time, retry_count + 1, MAX_429_RETRIES));
+                                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        retry_count += 1;
+                                        continue;
+                                    } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
+                                        // 证明已经被提交，视为成功
+                                        update_status(format!("[{}] ✅ 证明已被接受 (409)", timestamp));
+                                        proof_count += 1;
+                                        consecutive_failures = 0;
+                                        success = true;
+                                        break;
+                                    } else {
+                                        update_status(format!("[{}] ❌ 缓存证明提交失败: {}", timestamp, error_str));
+                                        // 如果不是429错误，我们不需要那么多重试
+                                        if retry_count >= 2 {
+                                            update_status(format!("[{}] 放弃缓存证明，尝试重新生成...", timestamp));
+                                            break;
+                                        }
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                        retry_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // 如果成功提交或达到429重试上限但仍是速率限制，则继续下一个循环
+                        if success || (retry_count >= MAX_429_RETRIES && rate_limited) {
+                            if !success && rate_limited {
+                                update_status(format!("[{}] ⚠️ 429重试次数已达上限，等待一段时间后再尝试", timestamp));
+                                tokio::time::sleep(Duration::from_secs(60)).await; // 长时间等待
+                            }
+                            break;
+                        }
+                    }
+                    
+                    // 没有缓存或缓存提交失败，重新生成证明
                     update_status(format!("[{}] 正在生成证明...", timestamp));
                     
                     match crate::prover::authenticated_proving(&task, &environment, client_id.clone()).await {
@@ -311,7 +376,6 @@ async fn run_memory_optimized_node(
                             update_status(format!("[{}] 正在提交证明...", timestamp));
                             
                             // 计算哈希
-                            // 使用正确的sha3::Digest trait方法
                             let mut hasher = sha3::Sha3_256::new();
                             // 将Proof转换为Vec<u8>
                             let proof_bytes = postcard::to_allocvec(&proof)
@@ -321,28 +385,57 @@ async fn run_memory_optimized_node(
                             let proof_hash = format!("{:x}", hash);
                             
                             // 提交证明 - 克隆签名密钥以避免所有权问题
-                            match orchestrator.submit_proof(&task.task_id, &proof_hash, proof_bytes, signing_key.clone()).await {
-                                Ok(_) => {
-                                    // 成功提交证明
-                                    proof_count += 1;
-                                    consecutive_failures = 0;
-                                    success = true;
-                                    update_status(format!("[{}] ✅ 证明 #{} 完成", timestamp, proof_count));
-                                    break;
-                                }
-                                Err(e) => {
-                                    let error_str = e.to_string();
-                                    if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
-                                        // 速率限制错误 - 使用随机等待时间
-                                        let wait_time = 40 + rand::random::<u64>() % 41; // 40-80秒随机
-                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s", timestamp, wait_time));
-                                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
-                                    } else {
-                                        update_status(format!("[{}] ❌ 提交失败: {}", timestamp, error_str));
-                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                            let mut retry_count = 0;
+                            let mut rate_limited = false;
+                            
+                            while retry_count < MAX_SUBMISSION_RETRIES {
+                                match orchestrator.submit_proof(&task.task_id, &proof_hash, proof_bytes.clone(), signing_key.clone()).await {
+                                    Ok(_) => {
+                                        // 成功提交证明
+                                        proof_count += 1;
+                                        consecutive_failures = 0;
+                                        success = true;
+                                        update_status(format!("[{}] ✅ 证明 #{} 完成", timestamp, proof_count));
+                                        break;
                                     }
-                                    attempt += 1;
+                                    Err(e) => {
+                                        let error_str = e.to_string();
+                                        if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
+                                            // 速率限制错误 - 使用随机等待时间
+                                            rate_limited = true;
+                                            let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
+                                            update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{})", 
+                                                timestamp, wait_time, retry_count + 1, MAX_SUBMISSION_RETRIES));
+                                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
+                                            // 证明已经被提交，视为成功
+                                            update_status(format!("[{}] ✅ 证明已被接受 (409)", timestamp));
+                                            proof_count += 1;
+                                            consecutive_failures = 0;
+                                            success = true;
+                                            break;
+                                        } else {
+                                            update_status(format!("[{}] ❌ 提交失败 (重试 {}/{}): {}", 
+                                                timestamp, retry_count + 1, MAX_SUBMISSION_RETRIES, error_str));
+                                            tokio::time::sleep(Duration::from_secs(2)).await;
+                                        }
+                                        retry_count += 1;
+                                    }
                                 }
+                            }
+                            
+                            // 如果成功提交或达到重试上限但仍是速率限制，则继续下一个循环
+                            if success || (retry_count >= MAX_SUBMISSION_RETRIES && rate_limited) {
+                                if !success && rate_limited {
+                                    update_status(format!("[{}] ⚠️ 提交重试次数已达上限，等待一段时间后再尝试", timestamp));
+                                    tokio::time::sleep(Duration::from_secs(60)).await; // 长时间等待
+                                }
+                                break;
+                            }
+                            
+                            // 如果所有重试都失败，则增加尝试计数
+                            if !success {
+                                attempt += 1;
                             }
                         }
                         Err(e) => {

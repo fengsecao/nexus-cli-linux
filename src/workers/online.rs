@@ -601,7 +601,7 @@ async fn report_performance_stats(
     };
 
     let msg = format!(
-        "Performance: {} tasks completed in {:.1}s ({:.1} tasks/min)",
+        "Performance: {} tasks in {:.1}s ({:.1} tasks/min)",
         completed_count,
         elapsed.as_secs_f64(),
         tasks_per_minute
@@ -670,69 +670,64 @@ async fn handle_submission_success(
     event_sender: &mpsc::Sender<Event>,
     successful_tasks: &TaskCache,
 ) {
-    // Add to successful tasks cache to prevent reprocessing
+    // Record successful submission to prevent duplicates
     successful_tasks.insert(task.task_id.clone()).await;
 
-    // Log success with task details
+    // Log the success
     let _ = event_sender
         .send(Event::proof_submitter(
             format!(
-                "Proof submitted successfully: {} ({})",
-                task.task_id, task.program_id
+                "Proof submitted successfully for task {}",
+                task.task_id
             ),
             crate::events::EventType::Success,
         ))
         .await;
 }
 
-/// Handle proof submission errors
+/// Handle proof submission error
 async fn handle_submission_error(
     task: &Task,
     error: OrchestratorError,
     event_sender: &mpsc::Sender<Event>,
 ) {
-    // Classify error and determine appropriate response
-    let (message, error_type, log_level) = match &error {
+    // Determine the error type and log level based on the error
+    let (message, log_level) = match error {
         OrchestratorError::Http { status, message } => {
-            if *status == 429 {
-                // Rate limiting requires special handling
+            if status == 429 {
+                // Rate limiting is a warning, not an error
                 (
-                    format!(
-                        "Rate limited (429) submitting proof for task: {} ({})",
-                        task.task_id, task.program_id
-                    ),
-                    crate::events::EventType::Warning,
+                    format!("Rate limited (429) for task {}: {}", task.task_id, message),
+                    LogLevel::Warn,
+                )
+            } else if status == 409 {
+                // Conflict (duplicate submission) is a warning
+                (
+                    format!("Duplicate proof for task {}: {}", task.task_id, message),
                     LogLevel::Warn,
                 )
             } else {
                 // Other HTTP errors
                 (
-                    format!(
-                        "HTTP error {} submitting proof for task: {} ({}): {}",
-                        status, task.task_id, task.program_id, message
-                    ),
-                    crate::events::EventType::Error,
+                    format!("HTTP error {} for task {}: {}", status, task.task_id, message),
                     LogLevel::Error,
                 )
             }
         }
         _ => {
-            // Non-HTTP errors (network, etc)
+            // Network errors
             (
-                format!(
-                    "Error submitting proof for task: {} ({}): {}",
-                    task.task_id, task.program_id, error
-                ),
-                crate::events::EventType::Error,
+                format!("Network error for task {}: {}", task.task_id, error),
                 LogLevel::Error,
             )
         }
     };
 
+    // Send the error event
     let _ = event_sender
         .send(Event::proof_submitter_with_level(
             message,
-            error_type,
+            crate::events::EventType::Error,
             log_level,
         ))
         .await;
