@@ -209,10 +209,12 @@ pub fn render_dashboard(f: &mut Frame, state: &DashboardState) {
         .filter(|event| event.should_display())
         .map(|event| {
             let icon = match event.event_type {
-                EventType::Success => "✅",
-                EventType::Error => "⚠️",
-                EventType::Refresh => "🔄",
-                EventType::Shutdown => "🔴",
+                EventType::Success => "√",
+                EventType::Error => "×",
+                EventType::Refresh => "",
+                EventType::Shutdown => "",
+                EventType::Warning => "",
+                EventType::Status => "",
             };
             format!("{} [{}] {}", icon, event.timestamp, event.msg)
         })
