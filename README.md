@@ -13,6 +13,9 @@
 - ✅ **无限重试机制**：节点失败后会自动重试，保障稳定运行
 - ✅ **实时状态监控**：固定行显示各节点状态和内存使用情况
 - ✅ **代理轮换功能**：支持动态代理池，每次请求使用不同IP，有效避免429限流错误
+  - 支持多种代理格式，包含带国家标识的代理
+  - 无需预先测试，自动跳过不可用代理
+  - 代理失败时自动回退到直连模式
 
 ## 🚀 安装指南
 
@@ -80,6 +83,18 @@ mkdir -p nodes
 .\target\release\nexus-network.exe batch-file --file nodes\nodes.txt --max-concurrent 10 --proof-interval 5 --workers-per-node 1
 ```
 
+### 代理功能使用说明
+
+代理功能可以有效避免429限流错误，提高节点稳定性：
+
+1. **准备代理文件**：创建一个文本文件（默认为`proxy.txt`），每行一个代理
+2. **启动时指定代理文件**：使用`--proxy-file`参数指定代理文件路径
+3. **工作原理**：
+   - 系统会为每个HTTP请求随机选择一个代理
+   - 如果代理连接失败，会自动尝试下一个代理
+   - 所有代理均不可用时，会回退到直连模式
+   - 代理轮换完全自动化，无需手动干预
+
 ### 节点列表文件格式
 在nodes.txt中，每行放置一个节点ID，例如：
 ```
@@ -89,11 +104,13 @@ mkdir -p nodes
 ```
 
 ### 代理列表文件格式
-在proxy.txt中，每行放置一个代理，格式为`host:port:username:password_country-COUNTRY`，例如：
+在proxy.txt中，每行放置一个代理，格式为`host:port:username:password`，例如：
 ```
-proxy-as.packetstream.vip:31112:10213721:Cbzqd6A86cNJZ_country-MONGOLIA
-proxy-as.packetstream.vip:31112:10413221:Cbzq45Ue6jbJZ_country-CHINA
+proxy-as.packetstream.vip:31112:13413241:Cazq45dd6jbmZ_country-CHINA
+123.45.67.89:8080:user:pass
 ```
+
+系统会自动从密码中提取国家信息（如果存在`_country-`标记），但这仅用于显示，不影响代理功能。每次请求会随机选择一个代理，有效避免429限流错误。
 
 ## ⚙️ 参数说明
 
@@ -106,7 +123,7 @@ proxy-as.packetstream.vip:31112:10413221:Cbzq45Ue6jbJZ_country-CHINA
 | `--start-delay` | 节点启动间隔时间（秒） | 0.5 | 0.5-1.0 |
 | `--verbose` | 启用详细日志输出 | false | 调试时启用 |
 | `--env` | 连接环境 | production | production |
-| `--proxy-file` | 代理列表文件路径 | proxy.txt | 自定义路径 |
+| `--proxy-file` | 代理列表文件路径 | - | proxy.txt |
 
 ## 🔧 内存优化原理
 
@@ -117,7 +134,7 @@ proxy-as.packetstream.vip:31112:10413221:Cbzq45Ue6jbJZ_country-CHINA
    - 最多重试12次429错误
    - 使用30-60秒随机等待时间
    - 智能退避策略
-   - 代理轮换功能，每次请求使用不同IP
+   - 代理轮换功能，每次请求自动随机选择不同IP
 
 ## 📊 性能对比
 
@@ -142,13 +159,17 @@ proxy-as.packetstream.vip:31112:10413221:Cbzq45Ue6jbJZ_country-CHINA
 2. **问题**: 429错误过多
    **解决方案**: 
    - 增加 `--proof-interval` 值到5-10秒
-   - 使用 `--proxy-file` 参数指定代理文件
+   - 使用 `--proxy-file` 参数指定代理文件，实现IP轮换
+   - 确保代理文件中有足够多的可用代理
 
 3. **问题**: 节点状态显示异常
    **解决方案**: 使用 `--headless` 模式运行，查看详细日志
 
 4. **问题**: 代理连接失败
-   **解决方案**: 检查代理格式是否正确，确保代理可用
+   **解决方案**: 
+   - 检查代理格式是否正确，确保使用正确的格式：`host:port:username:password`
+   - 确保代理服务器可用且能正常连接
+   - 如果代理需要认证，确保用户名和密码正确
 
 ## 📝 改进计划
 
@@ -156,6 +177,8 @@ proxy-as.packetstream.vip:31112:10413221:Cbzq45Ue6jbJZ_country-CHINA
 - [ ] 支持动态调整并发节点数
 - [ ] 增加节点失败自动替换功能
 - [x] 添加代理轮换功能，避免429错误
+- [ ] 支持SOCKS5代理协议
+- [ ] 添加代理自动测试和评分机制
 - [ ] 更精细的内存使用控制
 - [ ] 添加Docker支持
 

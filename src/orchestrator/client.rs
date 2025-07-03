@@ -95,6 +95,19 @@ impl ProxyManager {
                         parts[3].to_string()
                     };
                     
+                    // 尝试从密码中解析国家信息，但不改变密码本身
+                    let country = if password.contains("_country-") {
+                        // 如果密码包含国家信息，提取出来用于显示
+                        let parts: Vec<&str> = password.split("_country-").collect();
+                        if parts.len() > 1 && !parts[1].is_empty() {
+                            parts[1].to_string()
+                        } else {
+                            "UNKNOWN".to_string()
+                        }
+                    } else {
+                        "UNKNOWN".to_string()
+                    };
+                    
                     // 使用HTTP协议
                     let url = format!("http://{}:{}", host, port);
                     
@@ -102,7 +115,7 @@ impl ProxyManager {
                         url,
                         username: username.to_string(),
                         password,
-                        country: "UNKNOWN".to_string(), // 不再处理国家信息
+                        country,
                     });
                     _valid_count += 1;
                 } else {
@@ -141,13 +154,6 @@ impl ProxyManager {
         }
         
         selected
-    }
-
-    /// 标记代理为不可用（将来可以实现）
-    pub fn mark_proxy_unavailable(&self, _proxy_url: &str) {
-        // 未来可以实现代理黑名单功能
-        // 目前只记录日志
-        warn!("代理被标记为不可用: {}", _proxy_url);
     }
 }
 
