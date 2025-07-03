@@ -205,7 +205,14 @@ pub async fn start_optimized_batch_workers(
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
         
         // 创建一个可以安全移动到新任务的回调函数
-        let status_callback_clone = status_callback.clone();
+        let status_callback_clone = if let Some(callback) = &status_callback {
+            // 创建一个新的Box包装的回调函数
+            Some(Box::new(move |node_id: u64, status: String| {
+                callback(node_id, status);
+            }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
+        } else {
+            None
+        };
         
         let handle = tokio::spawn(async move {
             run_memory_optimized_node(
