@@ -10,7 +10,7 @@ use crate::orchestrator::OrchestratorClient;
 use crate::task::Task;
 use crate::task_cache::TaskCache;
 use crate::workers::{offline, online};
-use crate::system::{check_memory_pressure, perform_memory_cleanup, get_memory_usage_ratio};
+use crate::system::{check_memory_pressure, perform_memory_cleanup};
 use crate::prover::get_defragmenter;
 use ed25519_dalek::SigningKey;
 use nexus_sdk::stwo::seq::Proof;
@@ -190,10 +190,10 @@ pub async fn start_optimized_batch_workers(
             Ok(key) => key,
             Err(e) => {
                 warn!("节点 {} 加载签名密钥失败: {}", node_id, e);
-                            // 使用克隆的回调
-            if let Some(callback) = status_callback.clone() {
-                callback(*node_id, format!("加载密钥失败: {}", e));
-            }
+                // 使用克隆的回调
+                if let Some(ref callback) = status_callback {
+                    callback(*node_id, format!("加载密钥失败: {}", e));
+                }
                 continue;
             }
         };
@@ -205,8 +205,18 @@ pub async fn start_optimized_batch_workers(
         let environment = environment.clone();
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
         
-        // 在传递给tokio::spawn之前克隆status_callback
-        let status_callback_clone = status_callback.clone();
+        // 创建一个新的回调闭包，将Box<dyn Fn>转换为可以在多个任务间共享的Arc<dyn Fn>
+        let callback_arc = match &status_callback {
+            Some(cb) => {
+                // 创建一个可以克隆的Arc包装回调
+                let cb_arc = Arc::new(move |id: u64, msg: String| {
+                    cb(id, msg);
+                }) as Arc<dyn Fn(u64, String) + Send + Sync>;
+                Some(cb_arc)
+            },
+            None => None,
+        };
+        
         let handle = tokio::spawn(async move {
             run_memory_optimized_node(
                 node_id,
@@ -217,7 +227,7 @@ pub async fn start_optimized_batch_workers(
                 environment,
                 client_id,
                 shutdown_rx,
-                status_callback_clone, // 使用克隆的回调
+                callback_arc,
             ).await;
         });
         
@@ -237,7 +247,7 @@ async fn run_memory_optimized_node(
     environment: Environment,
     client_id: String,
     mut shutdown: broadcast::Receiver<()>,
-    status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>, // 修复生命周期
+    status_callback: Option<Arc<dyn Fn(u64, String) + Send + Sync>>,
 ) {
     const MAX_ATTEMPTS: usize = 5;
     let mut consecutive_failures = 0;
@@ -245,7 +255,7 @@ async fn run_memory_optimized_node(
     
     // 更新节点状态
     let update_status = |status: String| {
-        if let Some(callback) = &status_callback {
+        if let Some(ref callback) = &status_callback {
             callback(node_id, status);
         }
     };

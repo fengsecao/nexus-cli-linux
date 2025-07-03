@@ -4,14 +4,14 @@ use crate::orchestrator::{OrchestratorClient, Orchestrator};
 use std::error::Error;
 use std::path::PathBuf;
 
-use crate::environment::Environment;
-use crate::config::Config;
+use crate::environment::{Environment, EnvironmentType};
+// 移除重复导入
 use crate::logging;
-use crate::keys;
+use crate::key_manager;
 
 /// 提示用户输入节点ID或创建新节点
 pub async fn setup_node_id(
-    config_path: &PathBuf,
+    _config_path: &PathBuf,
     config: &mut Config,
     orchestrator: &OrchestratorClient,
 ) -> Result<String, Box<dyn Error>> {
@@ -60,19 +60,23 @@ pub async fn setup_node_id(
 
 /// 初始化Nexus环境，包括配置、日志和身份验证
 pub async fn initialize_environment(
-    _config_path: &PathBuf,
+    config_path: &PathBuf,
     api_url: Option<String>,
     client_id: Option<String>,
     namespace: Option<String>,
 ) -> Result<Environment, String> {
     // 配置初始化
-    let config = Config::load().map_err(|e| format!("配置加载失败: {}", e))?;
+    let config = Config::load_from_file(config_path)
+        .map_err(|e| format!("配置加载失败: {}", e))?;
     
     // 日志初始化
-    logging::initialize().map_err(|e| format!("日志初始化失败: {}", e))?;
+    env_logger::init();
     
     // 创建和初始化环境
-    let mut env = Environment::new();
+    let mut env = match config.environment.parse::<Environment>() {
+        Ok(env) => env,
+        Err(_) => Environment::default(),
+    };
     
     // 设置API URL
     if let Some(url) = api_url {
@@ -90,7 +94,8 @@ pub async fn initialize_environment(
     }
     
     // 加载密钥信息
-    let key_manager = keys::KeyManager::new().await.map_err(|e| format!("密钥管理器创建失败: {}", e))?;
+    let key_manager = key_manager::load_or_generate_signing_key()
+        .map_err(|e| format!("密钥管理器创建失败: {}", e))?;
     env.key_manager = key_manager;
     
     Ok(env)

@@ -34,7 +34,7 @@ pub fn perform_memory_cleanup() {
         // 在Linux上使用libc的malloc_trim来释放未使用的内存
         // 这通常比标准的GC更有效
         unsafe {
-            extern "C" {
+            unsafe extern "C" {
                 fn malloc_trim(pad: usize) -> i32;
             }
             let _ = malloc_trim(0);
@@ -64,7 +64,7 @@ pub fn perform_memory_cleanup() {
     {
         // 非Windows系统上调用malloc_trim
         unsafe {
-            extern "C" {
+            unsafe extern "C" {
                 fn malloc_trim(pad: usize) -> i32;
             }
             let _ = malloc_trim(0);

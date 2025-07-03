@@ -147,8 +147,9 @@ pub async fn prove_anonymously(
 
     // 使用全局缓存的证明器
     let stwo_prover = get_or_create_initial_prover().await?;
-    let (view, proof) = stwo_prover
-        .as_ref()
+    // 从Arc中借用值而不是移动
+    let stwo_ref = stwo_prover.as_ref();
+    let (view, proof) = stwo_ref
         .prove_with_input::<(), (u32, u32, u32)>(&(), &public_input)
         .map_err(|e| {
             ProverError::Stwo(format!(
@@ -207,8 +208,9 @@ pub async fn authenticated_proving(
             let input = get_string_public_input(task)?;
             // 使用全局缓存的证明器
             let stwo_prover = get_or_create_default_prover().await?;
-            let (view, proof) = stwo_prover
-                .as_ref() // 使用引用而不是移动
+            // 从Arc中借用值而不是移动
+            let stwo_ref = stwo_prover.as_ref();
+            let (view, proof) = stwo_ref
                 .prove_with_input::<(), u32>(&(), &input)
                 .map_err(|e| ProverError::Stwo(format!("Failed to run fast-fib prover: {}", e)))?;
             (view, proof, input)
@@ -217,8 +219,9 @@ pub async fn authenticated_proving(
             let inputs = get_triple_public_input(task)?;
             // 使用全局缓存的证明器
             let stwo_prover = get_or_create_initial_prover().await?;
-            let (view, proof) = stwo_prover
-                .as_ref() // 使用引用而不是移动
+            // 从Arc中借用值而不是移动
+            let stwo_ref = stwo_prover.as_ref();
+            let (view, proof) = stwo_ref
                 .prove_with_input::<(), (u32, u32, u32)>(&(), &inputs)
                 .map_err(|e| {
                     ProverError::Stwo(format!("Failed to run fib_input_initial prover: {}", e))
