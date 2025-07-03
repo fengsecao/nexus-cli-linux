@@ -295,7 +295,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } => {
             if verbose {
                 unsafe {
-                    std::env::set_var("RUST_LOG", "debug");
+                std::env::set_var("RUST_LOG", "debug");
                 }
                 env_logger::init();
             } else {
@@ -527,7 +527,7 @@ async fn start_batch_processing(
     });
     
     // 启动优化的批处理工作器
-    let (event_receiver, join_handles) = crate::prover_runtime::start_optimized_batch_workers(
+    let (mut event_receiver, join_handles) = crate::prover_runtime::start_optimized_batch_workers(
         current_batch,
         orchestrator,
         workers_per_node,

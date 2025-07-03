@@ -218,12 +218,12 @@ pub async fn start_optimized_batch_workers(
             }
         };
         
-            let node_id = *node_id;
-    // 使用增强版客户端
-    let enhanced_orchestrator = EnhancedOrchestratorClient::new(environment.clone());
+        let node_id = *node_id;
+        // 使用增强版客户端
+        let enhanced_orchestrator = EnhancedOrchestratorClient::new(environment.clone());
     let shutdown_rx = shutdown.resubscribe();
-    let environment = environment.clone();
-    let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
+        let environment = environment.clone();
+        let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
     
     // 为每个任务克隆Arc包装的回调
     let node_callback = match &status_callback_arc {
@@ -239,21 +239,21 @@ pub async fn start_optimized_batch_workers(
     };
     
     let event_sender_clone = event_sender.clone();
-    
-    let handle = tokio::spawn(async move {
-        run_memory_optimized_node(
-            node_id,
-            signing_key,
-            enhanced_orchestrator,
-            num_workers_per_node,
-            proof_interval,
-            environment,
-            client_id,
-            shutdown_rx,
+        
+        let handle = tokio::spawn(async move {
+            run_memory_optimized_node(
+                node_id,
+                signing_key,
+                enhanced_orchestrator,
+                num_workers_per_node,
+                proof_interval,
+                environment,
+                client_id,
+                shutdown_rx,
             node_callback,
             event_sender_clone,
-        ).await;
-    });
+            ).await;
+        });
         
         join_handles.push(handle);
     }
@@ -414,13 +414,13 @@ async fn run_memory_optimized_node(
                             update_status(format!("[{}] 正在提交证明...", timestamp));
                             
                             // 计算哈希
-                            let mut hasher = sha3::Sha3_256::new();
+                    let mut hasher = sha3::Sha3_256::new();
                             // 将Proof转换为Vec<u8>
                             let proof_bytes = postcard::to_allocvec(&proof)
                                 .unwrap_or_else(|_| Vec::new());
                             hasher.update(&proof_bytes);
-                            let hash = hasher.finalize();
-                            let proof_hash = format!("{:x}", hash);
+                    let hash = hasher.finalize();
+                    let proof_hash = format!("{:x}", hash);
                             
                             // 提交证明 - 克隆签名密钥以避免所有权问题
                             let mut retry_count = 0;
@@ -428,25 +428,25 @@ async fn run_memory_optimized_node(
                             
                             while retry_count < MAX_SUBMISSION_RETRIES {
                                 match orchestrator.submit_proof(&task.task_id, &proof_hash, proof_bytes.clone(), signing_key.clone()).await {
-                                    Ok(_) => {
-                                        // 成功提交证明
-                                        proof_count += 1;
-                                        consecutive_failures = 0;
-                                        success = true;
+                                Ok(_) => {
+                                    // 成功提交证明
+                                    proof_count += 1;
+                                    consecutive_failures = 0;
+                                    success = true;
                                         let msg = format!("[{}] ✅ 证明 #{} 完成", timestamp, proof_count);
                                         update_status(msg.clone());
                                         send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        let error_str = e.to_string();
-                                        if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
-                                            // 速率限制错误 - 使用随机等待时间
+                                    break;
+                                }
+                                Err(e) => {
+                                    let error_str = e.to_string();
+                                    if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
+                                        // 速率限制错误 - 使用随机等待时间
                                             rate_limited = true;
                                             let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
                                             update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{})", 
                                                 timestamp, wait_time, retry_count + 1, MAX_SUBMISSION_RETRIES));
-                                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
                                         } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
                                                                                     // 证明已经被提交，视为成功
                                         let msg = format!("[{}] ✅ 证明已被接受 (409)", timestamp);
@@ -456,11 +456,11 @@ async fn run_memory_optimized_node(
                                         success = true;
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         break;
-                                        } else {
+                                    } else {
                                             update_status(format!("[{}] ❌ 提交失败 (重试 {}/{}): {}", 
                                                 timestamp, retry_count + 1, MAX_SUBMISSION_RETRIES, error_str));
-                                            tokio::time::sleep(Duration::from_secs(2)).await;
-                                        }
+                                        tokio::time::sleep(Duration::from_secs(2)).await;
+                                    }
                                         retry_count += 1;
                                     }
                                 }
@@ -477,7 +477,7 @@ async fn run_memory_optimized_node(
                             
                             // 如果所有重试都失败，则增加尝试计数
                             if !success {
-                                attempt += 1;
+                                    attempt += 1;
                             }
                         }
                         Err(e) => {

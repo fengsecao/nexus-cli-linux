@@ -36,9 +36,9 @@ pub fn perform_memory_cleanup() {
         // 这通常比标准的GC更有效
         unsafe {
             unsafe extern "C" {
-                fn malloc_trim(pad: usize) -> i32;
-            }
-            let _ = malloc_trim(0);
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        let _ = malloc_trim(0);
         }
     }
     
@@ -66,9 +66,9 @@ pub fn perform_memory_cleanup() {
         // 非Windows系统上调用malloc_trim
         unsafe {
             unsafe extern "C" {
-                fn malloc_trim(pad: usize) -> i32;
-            }
-            let _ = malloc_trim(0);
+            fn malloc_trim(pad: usize) -> i32;
+        }
+        let _ = malloc_trim(0);
         }
     }
 }

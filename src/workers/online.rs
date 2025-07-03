@@ -359,7 +359,7 @@ async fn handle_fetch_error(
         OrchestratorError::Http { status, message } => {
             if status == 429 {
                 // Rate limiting requires special handling
-                state.increase_backoff_for_rate_limit();
+        state.increase_backoff_for_rate_limit();
                 (
                     format!("Rate limited (429): {}", message),
                     crate::events::EventType::Warning,
@@ -712,8 +712,8 @@ async fn handle_submission_error(
                 (
                     format!("HTTP error {} for task {}: {}", status, task.task_id, message),
                     LogLevel::Error,
-                )
-            }
+            )
+        }
         }
         _ => {
             // Network errors

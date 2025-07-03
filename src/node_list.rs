@@ -3,9 +3,8 @@
 //! 用于读取、解析和管理节点ID列表
 
 use std::fs::{self, File};
-use std::io::{self, Write, BufReader, BufWriter};
+use std::io::{self, Write, BufReader, BufWriter, BufRead};
 use std::path::Path;
-use std::collections::HashSet;
 
 #[derive(Debug)]
 pub struct NodeList {
