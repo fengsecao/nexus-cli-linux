@@ -49,6 +49,7 @@ use tokio::sync::RwLock;
 use log::warn;
 use std::sync::atomic::{AtomicU64, Ordering};
 use rand;
+use env_logger;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -303,7 +304,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             timeout,
         } => {
             let config_path = get_config_path()?;
-            start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout).await?;
+            return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout).await;
         }
         Command::Logout => {
             println!("Logging out and clearing node configuration file...");
@@ -332,11 +333,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if verbose {
                 // 设置详细日志级别
                 std::env::set_var("RUST_LOG", "debug");
-                logging::init()?;
+                env_logger::init().map_err(|e| format!("Failed to initialize logger: {}", e))?;
             } else {
                 // 设置默认日志级别
                 std::env::set_var("RUST_LOG", "info");
-                logging::init()?;
+                env_logger::init().map_err(|e| format!("Failed to initialize logger: {}", e))?;
             }
 
             // 解析环境变量

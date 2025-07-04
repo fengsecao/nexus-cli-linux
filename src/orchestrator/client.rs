@@ -769,8 +769,8 @@ impl OrchestratorClient {
     }
 
     async fn get_country_from_cloudflare(&self) -> Result<String, Box<dyn std::error::Error>> {
-        // 使用动态代理客户端
-        let client = self.create_client_with_proxy().await;
+        // 使用默认客户端
+        let client = self.get_default_client().await;
         
         let response = client
             .get("https://cloudflare.com/cdn-cgi/trace")
@@ -793,8 +793,8 @@ impl OrchestratorClient {
     }
 
     async fn get_country_from_ipinfo(&self) -> Result<String, Box<dyn std::error::Error>> {
-        // 使用动态代理客户端
-        let client = self.create_client_with_proxy().await;
+        // 使用默认客户端
+        let client = self.get_default_client().await;
         
         let response = client
             .get("https://ipinfo.io/country")
@@ -816,6 +816,21 @@ impl OrchestratorClient {
     pub fn environment(&self) -> &Environment {
         &self.environment
     }
+
+    /// 获取默认客户端（用于兼容旧代码）
+    async fn get_default_client(&self) -> Client {
+        // 尝试获取代理
+        if let Some(proxy_info) = self.proxy_manager.next_proxy() {
+            return self.create_client_with_proxy_info(&proxy_info).await;
+        }
+        
+        // 如果没有可用代理，使用默认客户端
+        info!("使用默认连接（无代理）");
+        ClientBuilder::new()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to create HTTP client")
+    }
 }
 
 #[async_trait::async_trait]
@@ -829,7 +844,10 @@ impl Orchestrator for OrchestratorClient {
         let wallet_path = urlencoding::encode(wallet_address).into_owned();
         let endpoint = format!("v3/users/{}", wallet_path);
 
-        let user_response: UserResponse = self.get_request(&endpoint, vec![]).await?;
+        // 使用默认节点ID
+        let default_node_id = "default";
+        let url = self.build_url(&endpoint);
+        let user_response: UserResponse = self.execute_get_request(&url, vec![], default_node_id).await?;
         Ok(user_response.user_id)
     }
 
@@ -845,8 +863,10 @@ impl Orchestrator for OrchestratorClient {
         };
         let request_bytes = Self::encode_request(&request);
 
-        self.post_request_no_response("v3/users", request_bytes)
-            .await
+        // 使用默认节点ID
+        let default_node_id = "default";
+        let url = self.build_url("v3/users");
+        self.execute_post_request_no_response(&url, request_bytes, default_node_id).await
     }
 
     /// Registers a new node with the orchestrator.
@@ -857,7 +877,10 @@ impl Orchestrator for OrchestratorClient {
         };
         let request_bytes = Self::encode_request(&request);
 
-        let response: RegisterNodeResponse = self.post_request("v3/nodes", request_bytes).await?;
+        // 使用默认节点ID
+        let default_node_id = "default";
+        let url = self.build_url("v3/nodes");
+        let response: RegisterNodeResponse = self.execute_post_request(&url, request_bytes, default_node_id).await?;
         Ok(response.node_id)
     }
 

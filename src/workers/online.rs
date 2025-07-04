@@ -10,7 +10,7 @@ use crate::consts::prover::{
     TASK_QUEUE_SIZE,
 };
 use crate::error_classifier::{ErrorClassifier, LogLevel};
-use crate::events::Event;
+use crate::events::{Event, EventType, LogLevel};
 use crate::orchestrator::Orchestrator;
 use crate::orchestrator::error::OrchestratorError;
 use crate::task::Task;
@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use log::{debug, error, info, warn};
 
 /// 节点速率限制跟踪器，用于记录每个节点的连续429计数
 #[derive(Debug, Clone, Default)]
@@ -315,8 +316,11 @@ async fn handle_fetch_success(
     // 成功获取任务，重置429计数
     if added_count > 0 {
         // 获取第一个任务的节点ID（所有任务应该来自同一个节点）
+        // 创建一个接收器来尝试获取任务
         let mut receiver = sender.clone();
-        if let Ok(task) = receiver.try_recv() {
+        // 注意：tokio的Sender没有try_recv方法，需要使用异步方式
+        // 尝试接收但不阻塞太久
+        if let Ok(task) = tokio::time::timeout(Duration::from_millis(10), receiver.recv()).await.unwrap_or(Err(mpsc::error::TryRecvError::Empty)) {
             // 解析节点ID
             let node_id_str = task.task_id.split('-').next().unwrap_or("0");
             if let Ok(node_id) = node_id_str.parse::<u64>() {
@@ -417,8 +421,11 @@ async fn log_successful_fetch(
     
     // 尝试获取一个任务来获取节点ID
     let mut success_count_str = String::new();
+    // 创建一个接收器来尝试获取任务
     let mut receiver = sender.clone();
-    if let Ok(task) = receiver.try_recv() {
+    // 注意：tokio的Sender没有try_recv方法，需要使用异步方式
+    // 尝试接收但不阻塞太久
+    if let Ok(task) = tokio::time::timeout(Duration::from_millis(10), receiver.recv()).await.unwrap_or(Err(mpsc::error::TryRecvError::Empty)) {
         // 解析节点ID
         let node_id_str = task.task_id.split('-').next().unwrap_or("0");
         if let Ok(node_id) = node_id_str.parse::<u64>() {
