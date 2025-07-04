@@ -72,12 +72,6 @@ impl NodeProxyState {
         proxies.insert(node_id.to_string(), proxy);
     }
 
-    /// 获取节点的失败次数
-    pub fn get_failure_count(&self, node_id: &str) -> usize {
-        let counts = self.failure_counts.lock().unwrap();
-        *counts.get(node_id).unwrap_or(&0)
-    }
-
     /// 增加节点的失败次数
     pub fn increment_failure(&self, node_id: &str) -> usize {
         let mut counts = self.failure_counts.lock().unwrap();

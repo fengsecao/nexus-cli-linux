@@ -16,7 +16,6 @@ pub mod prover {
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Once;
 use rand::Rng;
 
 // 默认429错误重试超时时间（秒）
@@ -24,7 +23,6 @@ const DEFAULT_RETRY_TIMEOUT: u64 = 30;
 
 // 全局429错误重试超时时间
 static RETRY_TIMEOUT: AtomicU64 = AtomicU64::new(DEFAULT_RETRY_TIMEOUT);
-static INIT_ONCE: Once = Once::new();
 
 /// 设置全局429错误重试超时时间
 pub fn set_retry_timeout(timeout_seconds: u64) {
@@ -57,11 +55,4 @@ pub fn get_retry_timeout() -> u64 {
     } else {
         result as u64
     }
-}
-
-/// 初始化常量
-pub fn init() {
-    INIT_ONCE.call_once(|| {
-        // 初始化代码（如果需要）
-    });
 }

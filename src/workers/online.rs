@@ -11,7 +11,6 @@ use crate::consts::prover::{
 };
 use crate::error_classifier::{ErrorClassifier, LogLevel};
 use crate::events::Event;
-use crate::events;
 use crate::orchestrator::Orchestrator;
 use crate::orchestrator::error::OrchestratorError;
 use crate::task::Task;
@@ -55,7 +54,7 @@ impl NodeRateLimitTracker {
         let mut counts = self.node_429_counts.lock().await;
         counts.insert(node_id, 0);
     }
-
+    
     /// 获取指定节点的当前429计数
     pub async fn get_429_count(&self, node_id: u64) -> u32 {
         let counts = self.node_429_counts.lock().await;
@@ -145,7 +144,7 @@ impl TaskFetchState {
     pub fn reset_429_count(&mut self) {
         self.consecutive_429s = 0;
     }
-
+    
     // 获取当前429连续计数
     pub fn get_429_count(&self) -> u32 {
         self.consecutive_429s
@@ -469,8 +468,11 @@ async fn handle_fetch_error(
                 // 增加节点特定的429计数
                 let count = rate_limit_tracker.increment_429_count(*node_id).await;
                 
+                // 计算等待时间（秒）
+                let wait_seconds = state.backoff_duration.as_secs();
+                
                 (
-                    format!("Rate limited (429): {} (连续429: {}次, 成功: {}次)", message, count, success_count),
+                    format!("🚫 速率限制 (429) - 等待 {}s - 成功{}次 - 等待{}次", wait_seconds, success_count, count),
                     crate::events::EventType::Warning,
                     LogLevel::Warn,
                 )
