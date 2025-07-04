@@ -332,12 +332,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if verbose {
                 // 设置详细日志级别
                 std::env::set_var("RUST_LOG", "debug");
-                logging::init_logger()?;
+                logging::init()?;
             } else {
                 // 设置默认日志级别
                 std::env::set_var("RUST_LOG", "info");
-                logging::init_logger()?;
+                logging::init()?;
             }
+
+            // 解析环境变量
+            let environment = match env {
+                Some(env_str) => {
+                    // 尝试将字符串解析为环境类型
+                    match env_str.parse::<Environment>() {
+                        Ok(env) => env,
+                        Err(_) => {
+                            eprintln!("Invalid environment: {}", env_str);
+                            return Err("Invalid environment".into());
+                        }
+                    }
+                }
+                None => Environment::default(),
+            };
 
             // 添加随机变化到启动延迟，在3-5秒之间
             let mut rng = rand::thread_rng();
@@ -349,7 +364,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             
             start_batch_processing(
                 &file,
-                env,
+                environment,
                 randomized_delay,
                 proof_interval,
                 max_concurrent,
@@ -357,7 +372,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 proxy_file,
                 timeout,
             )
-            .await?;
+            .await
         }
     }
 }

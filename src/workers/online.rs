@@ -315,12 +315,15 @@ async fn handle_fetch_success(
     // 成功获取任务，重置429计数
     if added_count > 0 {
         // 获取第一个任务的节点ID（所有任务应该来自同一个节点）
-        if let Some(task) = sender.try_recv().ok() {
-            if let Ok(node_id) = task.node_id.parse::<u64>() {
+        let mut receiver = sender.clone();
+        if let Ok(task) = receiver.try_recv() {
+            // 解析节点ID
+            let node_id_str = task.task_id.split('-').next().unwrap_or("0");
+            if let Ok(node_id) = node_id_str.parse::<u64>() {
                 rate_limit_tracker.reset_429_count(node_id).await;
             }
             // 将任务放回队列
-            if sender.try_send(task).is_err() {
+            if sender.send(task).await.is_err() {
                 let _ = event_sender
                     .send(Event::task_fetcher(
                         "Task queue is closed".to_string(),
@@ -414,14 +417,17 @@ async fn log_successful_fetch(
     
     // 尝试获取一个任务来获取节点ID
     let mut success_count_str = String::new();
-    if let Some(task) = sender.try_recv().ok() {
-        if let Ok(node_id) = task.node_id.parse::<u64>() {
+    let mut receiver = sender.clone();
+    if let Ok(task) = receiver.try_recv() {
+        // 解析节点ID
+        let node_id_str = task.task_id.split('-').next().unwrap_or("0");
+        if let Ok(node_id) = node_id_str.parse::<u64>() {
             let success_count = rate_limit_tracker.get_success_count(node_id).await;
             success_count_str = format!(" (成功: {}次)", success_count);
         }
         
         // 将任务放回队列
-        let _ = sender.try_send(task);
+        let _ = sender.send(task).await;
     }
     
     let message = if added_count > 0 {
@@ -816,7 +822,9 @@ async fn handle_submission_success(
     successful_tasks.insert(task.task_id.clone()).await;
     
     // 成功提交证明，重置429计数
-    if let Ok(node_id) = task.node_id.parse::<u64>() {
+    // 从task_id中提取节点ID
+    let node_id_str = task.task_id.split('-').next().unwrap_or("0");
+    if let Ok(node_id) = node_id_str.parse::<u64>() {
         rate_limit_tracker.reset_429_count(node_id).await;
         
         // 增加成功计数
@@ -853,8 +861,9 @@ async fn handle_submission_error(
     event_sender: &mpsc::Sender<Event>,
     rate_limit_tracker: &NodeRateLimitTracker,
 ) {
-    // 解析节点ID
-    let node_id = task.node_id.parse::<u64>().ok();
+    // 从task_id中提取节点ID
+    let node_id_str = task.task_id.split('-').next().unwrap_or("0");
+    let node_id = node_id_str.parse::<u64>().ok();
     
     // 获取节点成功次数
     let success_count = if let Some(node_id) = node_id {
@@ -900,8 +909,8 @@ async fn handle_submission_error(
                 (
                     format!("HTTP error {} for task {}: {} (成功: {}次)", status, task.task_id, message, success_count),
                     LogLevel::Error,
-            )
-        }
+                )
+            }
         }
         _ => {
             // 重置429计数

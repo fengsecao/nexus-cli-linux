@@ -388,16 +388,29 @@ impl OrchestratorClient {
     /// 检查是否是需要重试的错误（如429或网络错误）
     fn is_retryable_error(&self, error: &OrchestratorError) -> bool {
         match error {
-            OrchestratorError::Http(e) => {
+            OrchestratorError::Http { status, message: _ } => {
                 // 检查是否是429错误
-                if let Some(status) = e.status() {
-                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                        return true;
-                    }
+                if *status == reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16() {
+                    return true;
                 }
                 
+                // 检查是否是网络连接错误（这里无法直接检查，因为HTTP错误已经被封装）
+                false
+            }
+            OrchestratorError::Reqwest(e) => {
                 // 检查是否是网络连接错误
                 e.is_connect() || e.is_timeout()
+            }
+            _ => false,
+        }
+    }
+
+    /// 计算退避时间
+    /// 如果是429错误，使用配置的超时时间（带随机浮动）
+    fn is_429_error(&self, error: &OrchestratorError) -> bool {
+        match error {
+            OrchestratorError::Http { status, message: _ } => {
+                *status == reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16()
             }
             _ => false,
         }
@@ -443,18 +456,8 @@ impl OrchestratorClient {
                 self.replace_proxy(node_id);
             }
             
-            // 计算退避时间
-            // 如果是429错误，使用配置的超时时间（带随机浮动）
-            let is_429 = match error {
-                OrchestratorError::Http(e) => {
-                    if let Some(status) = e.status() {
-                        status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            };
+            // 检查是否是429错误
+            let is_429 = self.is_429_error(error);
             
             let backoff_time = if is_429 {
                 // 使用配置的429超时时间（带±10%随机浮动）
@@ -554,18 +557,8 @@ impl OrchestratorClient {
                 self.replace_proxy(node_id);
             }
             
-            // 计算退避时间
-            // 如果是429错误，使用配置的超时时间（带随机浮动）
-            let is_429 = match error {
-                OrchestratorError::Http(e) => {
-                    if let Some(status) = e.status() {
-                        status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            };
+            // 检查是否是429错误
+            let is_429 = self.is_429_error(error);
             
             let backoff_time = if is_429 {
                 // 使用配置的429超时时间（带±10%随机浮动）
@@ -665,18 +658,8 @@ impl OrchestratorClient {
                 self.replace_proxy(node_id);
             }
             
-            // 计算退避时间
-            // 如果是429错误，使用配置的超时时间（带随机浮动）
-            let is_429 = match error {
-                OrchestratorError::Http(e) => {
-                    if let Some(status) = e.status() {
-                        status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            };
+            // 检查是否是429错误
+            let is_429 = self.is_429_error(error);
             
             let backoff_time = if is_429 {
                 // 使用配置的429超时时间（带±10%随机浮动）
