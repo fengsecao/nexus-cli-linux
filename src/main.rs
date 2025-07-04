@@ -333,11 +333,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if verbose {
                 // 设置详细日志级别
                 std::env::set_var("RUST_LOG", "debug");
-                env_logger::init()?;
+                env_logger::init();
             } else {
                 // 设置默认日志级别
                 std::env::set_var("RUST_LOG", "info");
-                env_logger::init()?;
+                env_logger::init();
             }
 
             // 解析环境变量

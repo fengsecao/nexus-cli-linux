@@ -15,8 +15,8 @@ use crate::orchestrator::Orchestrator;
 use crate::orchestrator::error::OrchestratorError;
 use crate::task::Task;
 use crate::task_cache::TaskCache;
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use nexus_sdk::stwo::seq::Proof;
+use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::SigningKey;
 use sha3::{Digest, Keccak256};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use log::{debug, error, info, warn};
+use nexus_sdk::stwo::seq::Proof;
 
 /// 节点速率限制跟踪器，用于记录每个节点的连续429计数
 #[derive(Debug, Clone, Default)]
@@ -309,57 +309,19 @@ async fn handle_fetch_success(
     }
 
     let (added_count, duplicate_count) =
-        process_fetched_tasks(tasks, sender, event_sender, recent_tasks).await?;
+        process_fetched_tasks(tasks.clone(), sender, event_sender, recent_tasks).await?;
 
     log_fetch_results(added_count, duplicate_count, sender, event_sender, state, rate_limit_tracker).await;
     
     // 成功获取任务，重置429计数
     if added_count > 0 {
-        // 尝试获取任务队列的第一个任务（不阻塞）
-        // 由于tokio的Sender没有接收能力，这里需要创建一个临时的Receiver
-        let (temp_sender, mut temp_receiver) = mpsc::channel::<Task>(1);
-        
-        // 尝试从sender中获取一个任务并发送到临时接收器
-        let mut found_task = false;
-        if let Ok(task) = tokio::time::timeout(Duration::from_millis(10), async {
-            // 从队列中获取一个任务并发送到临时接收器
-            for _ in 0..1 {
-                if let Ok(task) = sender.try_reserve() {
-                    let task = task.send(Task {
-                        task_id: "temp".to_string(),
-                        program_id: "".to_string(),
-                        public_inputs: vec![],
-                    });
-                    return Ok(task);
-                }
-            }
-            Err(())
-        }).await.unwrap_or(Err(())) {
-            found_task = true;
-            
-            // 解析节点ID
+        // 从任务列表中获取第一个任务的节点ID
+        if let Some(task) = tasks.first() {
+            // 从task_id中提取节点ID
             let node_id_str = task.task_id.split('-').next().unwrap_or("0");
             if let Ok(node_id) = node_id_str.parse::<u64>() {
                 rate_limit_tracker.reset_429_count(node_id).await;
             }
-            
-            // 将任务放回队列
-            if sender.send(task).await.is_err() {
-                let _ = event_sender
-                    .send(Event::task_fetcher(
-                        "Task queue is closed".to_string(),
-                        crate::events::EventType::Shutdown,
-                    ))
-                    .await;
-                return Err(true);
-            }
-        }
-        
-        // 如果没有找到任务，但我们知道队列不为空，则使用默认节点ID
-        if !found_task {
-            // 使用默认节点ID
-            let default_node_id = 0;
-            rate_limit_tracker.reset_429_count(default_node_id).await;
         }
     }
     
@@ -443,13 +405,10 @@ async fn log_successful_fetch(
 ) {
     let tasks_in_queue = TASK_QUEUE_SIZE - sender.capacity();
     
-    // 尝试获取一个任务来获取节点ID
-    let mut success_count_str = String::new();
-    
-    // 由于tokio的Sender没有接收能力，这里使用默认节点ID
+    // 使用默认节点ID
     let default_node_id = 0;
     let success_count = rate_limit_tracker.get_success_count(default_node_id).await;
-    success_count_str = format!(" (成功: {}次)", success_count);
+    let success_count_str = format!(" (成功: {}次)", success_count);
     
     let message = if added_count > 0 {
         format!(
