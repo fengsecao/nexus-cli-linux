@@ -21,6 +21,59 @@ use sha3::{Digest, Keccak256};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// 节点速率限制跟踪器，用于记录每个节点的连续429计数
+#[derive(Debug, Clone, Default)]
+pub struct NodeRateLimitTracker {
+    node_429_counts: Arc<Mutex<HashMap<u64, u32>>>,
+    node_success_counts: Arc<Mutex<HashMap<u64, u32>>>, // 添加节点成功计数
+}
+
+impl NodeRateLimitTracker {
+    pub fn new() -> Self {
+        Self {
+            node_429_counts: Arc::new(Mutex::new(HashMap::new())),
+            node_success_counts: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// 增加指定节点的429计数
+    pub async fn increment_429_count(&self, node_id: u64) -> u32 {
+        let mut counts = self.node_429_counts.lock().await;
+        let count = counts.entry(node_id).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// 重置指定节点的429计数
+    pub async fn reset_429_count(&self, node_id: u64) {
+        let mut counts = self.node_429_counts.lock().await;
+        counts.insert(node_id, 0);
+    }
+
+    /// 获取指定节点的当前429计数
+    pub async fn get_429_count(&self, node_id: u64) -> u32 {
+        let counts = self.node_429_counts.lock().await;
+        *counts.get(&node_id).unwrap_or(&0)
+    }
+    
+    /// 增加指定节点的成功计数
+    pub async fn increment_success_count(&self, node_id: u64) -> u32 {
+        let mut counts = self.node_success_counts.lock().await;
+        let count = counts.entry(node_id).or_insert(0);
+        *count += 1;
+        *count
+    }
+    
+    /// 获取指定节点的成功计数
+    pub async fn get_success_count(&self, node_id: u64) -> u32 {
+        let counts = self.node_success_counts.lock().await;
+        *counts.get(&node_id).unwrap_or(&0)
+    }
+}
 
 /// State for managing task fetching behavior
 pub struct TaskFetchState {
@@ -30,6 +83,7 @@ pub struct TaskFetchState {
     queue_log_interval: Duration,
     #[allow(dead_code)]
     error_classifier: ErrorClassifier,
+    consecutive_429s: u32, // 添加连续429计数器
 }
 
 impl TaskFetchState {
@@ -41,6 +95,7 @@ impl TaskFetchState {
             last_queue_log_time: std::time::Instant::now(),
             queue_log_interval: Duration::from_millis(QUEUE_LOG_INTERVAL), // Log queue status every 30 seconds
             error_classifier: ErrorClassifier::new(),
+            consecutive_429s: 0,
         }
     }
 
@@ -78,6 +133,21 @@ impl TaskFetchState {
             Duration::from_millis(BACKOFF_DURATION * 2),
         );
     }
+
+    // 增加429连续计数
+    pub fn increment_429_count(&mut self) {
+        self.consecutive_429s += 1;
+    }
+
+    // 重置429连续计数
+    pub fn reset_429_count(&mut self) {
+        self.consecutive_429s = 0;
+    }
+
+    // 获取当前429连续计数
+    pub fn get_429_count(&self) -> u32 {
+        self.consecutive_429s
+    }
 }
 
 /// Fetches tasks from the orchestrator and place them in the task queue.
@@ -90,6 +160,7 @@ pub async fn fetch_prover_tasks(
     event_sender: mpsc::Sender<Event>,
     mut shutdown: broadcast::Receiver<()>,
     recent_tasks: TaskCache,
+    rate_limit_tracker: NodeRateLimitTracker,
 ) {
     let mut state = TaskFetchState::new();
 
@@ -115,6 +186,7 @@ pub async fn fetch_prover_tasks(
                         &event_sender,
                         &recent_tasks,
                         &mut state,
+                        &rate_limit_tracker,
                     ).await {
                         if should_return {
                             return;
@@ -135,6 +207,7 @@ async fn attempt_task_fetch(
     event_sender: &mpsc::Sender<Event>,
     recent_tasks: &TaskCache,
     state: &mut TaskFetchState,
+    rate_limit_tracker: &NodeRateLimitTracker,
 ) -> Result<(), bool> {
     let _ = event_sender
         .send(Event::task_fetcher_with_level(
@@ -162,12 +235,12 @@ async fn attempt_task_fetch(
             Ok(tasks) => {
                 // Record successful fetch attempt timing
                 state.record_fetch_attempt();
-                handle_fetch_success(tasks, sender, event_sender, recent_tasks, state).await
+                handle_fetch_success(tasks, sender, event_sender, recent_tasks, state, rate_limit_tracker).await
             }
             Err(e) => {
                 // Record failed fetch attempt timing
                 state.record_fetch_attempt();
-                handle_fetch_error(e, event_sender, state).await;
+                handle_fetch_error(e, event_sender, state, node_id, rate_limit_tracker).await;
                 Ok(())
             }
         },
@@ -183,6 +256,8 @@ async fn attempt_task_fetch(
                 .await;
             // Increase backoff for timeout
             state.increase_backoff_for_error();
+            // 重置节点特定的429计数
+            rate_limit_tracker.reset_429_count(*node_id).await;
             Ok(())
         }
     }
@@ -225,6 +300,7 @@ async fn handle_fetch_success(
     event_sender: &mpsc::Sender<Event>,
     recent_tasks: &TaskCache,
     state: &mut TaskFetchState,
+    rate_limit_tracker: &NodeRateLimitTracker,
 ) -> Result<(), bool> {
     if tasks.is_empty() {
         handle_empty_task_response(sender, event_sender, state).await;
@@ -234,7 +310,28 @@ async fn handle_fetch_success(
     let (added_count, duplicate_count) =
         process_fetched_tasks(tasks, sender, event_sender, recent_tasks).await?;
 
-    log_fetch_results(added_count, duplicate_count, sender, event_sender, state).await;
+    log_fetch_results(added_count, duplicate_count, sender, event_sender, state, rate_limit_tracker).await;
+    
+    // 成功获取任务，重置429计数
+    if added_count > 0 {
+        // 获取第一个任务的节点ID（所有任务应该来自同一个节点）
+        if let Some(task) = sender.try_recv().ok() {
+            if let Ok(node_id) = task.node_id.parse::<u64>() {
+                rate_limit_tracker.reset_429_count(node_id).await;
+            }
+            // 将任务放回队列
+            if sender.try_send(task).is_err() {
+                let _ = event_sender
+                    .send(Event::task_fetcher(
+                        "Task queue is closed".to_string(),
+                        crate::events::EventType::Shutdown,
+                    ))
+                    .await;
+                return Err(true);
+            }
+        }
+    }
+    
     Ok(())
 }
 
@@ -296,9 +393,10 @@ async fn log_fetch_results(
     sender: &mpsc::Sender<Task>,
     event_sender: &mpsc::Sender<Event>,
     state: &mut TaskFetchState,
+    rate_limit_tracker: &NodeRateLimitTracker,
 ) {
     if added_count > 0 {
-        log_successful_fetch(added_count, sender, event_sender).await;
+        log_successful_fetch(added_count, sender, event_sender, rate_limit_tracker).await;
         state.reset_backoff();
     } else if duplicate_count > 0 {
         handle_all_duplicates(duplicate_count, event_sender, state).await;
@@ -310,15 +408,29 @@ async fn log_successful_fetch(
     added_count: usize,
     sender: &mpsc::Sender<Task>,
     event_sender: &mpsc::Sender<Event>,
+    rate_limit_tracker: &NodeRateLimitTracker,
 ) {
     let tasks_in_queue = TASK_QUEUE_SIZE - sender.capacity();
+    
+    // 尝试获取一个任务来获取节点ID
+    let mut success_count_str = String::new();
+    if let Some(task) = sender.try_recv().ok() {
+        if let Ok(node_id) = task.node_id.parse::<u64>() {
+            let success_count = rate_limit_tracker.get_success_count(node_id).await;
+            success_count_str = format!(" (成功: {}次)", success_count);
+        }
+        
+        // 将任务放回队列
+        let _ = sender.try_send(task);
+    }
+    
     let message = if added_count > 0 {
         format!(
-            "Added {} new tasks (queue: {} tasks)",
-            added_count, tasks_in_queue
+            "Added {} new tasks (queue: {} tasks){}",
+            added_count, tasks_in_queue, success_count_str
         )
     } else {
-        format!("No new tasks added (queue: {} tasks)", tasks_in_queue)
+        format!("No new tasks added (queue: {} tasks){}", tasks_in_queue, success_count_str)
     };
 
     let _ = event_sender
@@ -353,31 +465,51 @@ async fn handle_fetch_error(
     error: OrchestratorError,
     event_sender: &mpsc::Sender<Event>,
     state: &mut TaskFetchState,
+    node_id: &u64,
+    rate_limit_tracker: &NodeRateLimitTracker,
 ) {
+    // 获取节点成功次数
+    let success_count = rate_limit_tracker.get_success_count(*node_id).await;
+    
     // Classify error and determine appropriate response
     let (message, error_type, log_level) = match error {
         OrchestratorError::Http { status, message } => {
             if status == 429 {
                 // Rate limiting requires special handling
-        state.increase_backoff_for_rate_limit();
+                state.increase_backoff_for_rate_limit();
+                state.increment_429_count(); // 保留原有的计数器
+                
+                // 增加节点特定的429计数
+                let count = rate_limit_tracker.increment_429_count(*node_id).await;
+                
                 (
-                    format!("Rate limited (429): {}", message),
+                    format!("Rate limited (429): {} (连续429: {}次, 成功: {}次)", message, count, success_count),
                     crate::events::EventType::Warning,
                     LogLevel::Warn,
                 )
             } else if status == 404 {
                 // 404 is normal when no tasks are available
                 state.reset_backoff();
+                state.reset_429_count(); // 重置原有的计数器
+                
+                // 重置节点特定的429计数
+                rate_limit_tracker.reset_429_count(*node_id).await;
+                
                 (
-                    "No tasks available (404)".to_string(),
+                    format!("No tasks available (404) (成功: {}次)", success_count),
                     crate::events::EventType::Status,
                     LogLevel::Info,
                 )
             } else {
                 // Other HTTP errors
                 state.increase_backoff_for_error();
+                state.reset_429_count(); // 重置原有的计数器
+                
+                // 重置节点特定的429计数
+                rate_limit_tracker.reset_429_count(*node_id).await;
+                
                 (
-                    format!("HTTP error {}: {}", status, message),
+                    format!("HTTP error {}: {} (成功: {}次)", status, message, success_count),
                     crate::events::EventType::Error,
                     LogLevel::Error,
                 )
@@ -386,8 +518,13 @@ async fn handle_fetch_error(
         _ => {
             // Non-HTTP errors (network, etc)
             state.increase_backoff_for_error();
+            state.reset_429_count(); // 重置原有的计数器
+            
+            // 重置节点特定的429计数
+            rate_limit_tracker.reset_429_count(*node_id).await;
+            
             (
-                format!("Network error: {}", error),
+                format!("Network error: {} (成功: {}次)", error, success_count),
                 crate::events::EventType::Error,
                 LogLevel::Error,
             )
@@ -539,6 +676,7 @@ pub async fn submit_proofs(
     event_sender: mpsc::Sender<Event>,
     mut shutdown: broadcast::Receiver<()>,
     successful_tasks: TaskCache,
+    rate_limit_tracker: NodeRateLimitTracker,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut completed_count = 0;
@@ -558,6 +696,7 @@ pub async fn submit_proofs(
                                 num_workers,
                                 &event_sender,
                                 &successful_tasks,
+                                &rate_limit_tracker,
                             ).await {
                                 if success {
                                     completed_count += 1;
@@ -626,6 +765,7 @@ async fn process_proof_submission(
     num_workers: usize,
     event_sender: &mpsc::Sender<Event>,
     successful_tasks: &TaskCache,
+    rate_limit_tracker: &NodeRateLimitTracker,
 ) -> Option<bool> {
     // Check for duplicate submissions
     if successful_tasks.contains(&task.task_id).await {
@@ -655,11 +795,11 @@ async fn process_proof_submission(
         .await
     {
         Ok(_) => {
-            handle_submission_success(&task, event_sender, successful_tasks).await;
+            handle_submission_success(&task, event_sender, successful_tasks, rate_limit_tracker).await;
             Some(true)
         }
         Err(e) => {
-            handle_submission_error(&task, e, event_sender).await;
+            handle_submission_error(&task, e, event_sender, rate_limit_tracker).await;
             Some(false)
         }
     }
@@ -670,20 +810,40 @@ async fn handle_submission_success(
     task: &Task,
     event_sender: &mpsc::Sender<Event>,
     successful_tasks: &TaskCache,
+    rate_limit_tracker: &NodeRateLimitTracker,
 ) {
     // Record successful submission to prevent duplicates
     successful_tasks.insert(task.task_id.clone()).await;
-
-    // Log the success
-    let _ = event_sender
-        .send(Event::proof_submitter(
-            format!(
-                "Proof submitted successfully for task {}",
-                task.task_id
-            ),
-            crate::events::EventType::Success,
-        ))
-        .await;
+    
+    // 成功提交证明，重置429计数
+    if let Ok(node_id) = task.node_id.parse::<u64>() {
+        rate_limit_tracker.reset_429_count(node_id).await;
+        
+        // 增加成功计数
+        let success_count = rate_limit_tracker.increment_success_count(node_id).await;
+        
+        // Log the success
+        let _ = event_sender
+            .send(Event::proof_submitter(
+                format!(
+                    "Proof submitted successfully for task {} (成功: {}次)",
+                    task.task_id, success_count
+                ),
+                crate::events::EventType::Success,
+            ))
+            .await;
+    } else {
+        // Log the success without success count
+        let _ = event_sender
+            .send(Event::proof_submitter(
+                format!(
+                    "Proof submitted successfully for task {}",
+                    task.task_id
+                ),
+                crate::events::EventType::Success,
+            ))
+            .await;
+    }
 }
 
 /// Handle proof submission error
@@ -691,34 +851,67 @@ async fn handle_submission_error(
     task: &Task,
     error: OrchestratorError,
     event_sender: &mpsc::Sender<Event>,
+    rate_limit_tracker: &NodeRateLimitTracker,
 ) {
+    // 解析节点ID
+    let node_id = task.node_id.parse::<u64>().ok();
+    
+    // 获取节点成功次数
+    let success_count = if let Some(node_id) = node_id {
+        rate_limit_tracker.get_success_count(node_id).await
+    } else {
+        0
+    };
+    
     // Determine the error type and log level based on the error
     let (message, log_level) = match error {
         OrchestratorError::Http { status, message } => {
             if status == 429 {
+                // 增加429计数
+                let count = if let Some(node_id) = node_id {
+                    rate_limit_tracker.increment_429_count(node_id).await
+                } else {
+                    0
+                };
+                
                 // Rate limiting is a warning, not an error
                 (
-                    format!("Rate limited (429) for task {}: {}", task.task_id, message),
+                    format!("Rate limited (429) for task {}: {} (连续429: {}次, 成功: {}次)", task.task_id, message, count, success_count),
                     LogLevel::Warn,
                 )
             } else if status == 409 {
+                // 重置429计数
+                if let Some(node_id) = node_id {
+                    rate_limit_tracker.reset_429_count(node_id).await;
+                }
+                
                 // Conflict (duplicate submission) is a warning
                 (
-                    format!("Duplicate proof for task {}: {}", task.task_id, message),
+                    format!("Duplicate proof for task {}: {} (成功: {}次)", task.task_id, message, success_count),
                     LogLevel::Warn,
                 )
             } else {
+                // 重置429计数
+                if let Some(node_id) = node_id {
+                    rate_limit_tracker.reset_429_count(node_id).await;
+                }
+                
                 // Other HTTP errors
                 (
-                    format!("HTTP error {} for task {}: {}", status, task.task_id, message),
+                    format!("HTTP error {} for task {}: {} (成功: {}次)", status, task.task_id, message, success_count),
                     LogLevel::Error,
             )
         }
         }
         _ => {
+            // 重置429计数
+            if let Some(node_id) = node_id {
+                rate_limit_tracker.reset_429_count(node_id).await;
+            }
+            
             // Network errors
             (
-                format!("Network error for task {}: {}", task.task_id, error),
+                format!("Network error for task {}: {} (成功: {}次)", task.task_id, error, success_count),
                 LogLevel::Error,
             )
         }

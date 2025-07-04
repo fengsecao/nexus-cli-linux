@@ -24,6 +24,8 @@ use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
 use once_cell::sync::OnceCell;
+use std::collections::HashMap;
+use crate::consts;
 
 // Privacy-preserving country detection for network optimization.
 // Only stores 2-letter country codes (e.g., "US", "CA", "GB") to help route
@@ -38,6 +40,57 @@ struct ProxyInfo {
     username: String,
     password: String,
     country: String,
+}
+
+/// 节点代理状态管理
+#[derive(Debug)]
+struct NodeProxyState {
+    /// 存储节点ID到代理的映射关系
+    node_proxies: Mutex<HashMap<String, ProxyInfo>>,
+    /// 记录节点连续失败次数
+    failure_counts: Mutex<HashMap<String, usize>>,
+}
+
+impl NodeProxyState {
+    /// 创建新的节点代理状态管理器
+    pub fn new() -> Self {
+        Self {
+            node_proxies: Mutex::new(HashMap::new()),
+            failure_counts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 获取节点的代理
+    pub fn get_proxy(&self, node_id: &str) -> Option<ProxyInfo> {
+        let proxies = self.node_proxies.lock().unwrap();
+        proxies.get(node_id).cloned()
+    }
+
+    /// 设置节点的代理
+    pub fn set_proxy(&self, node_id: &str, proxy: ProxyInfo) {
+        let mut proxies = self.node_proxies.lock().unwrap();
+        proxies.insert(node_id.to_string(), proxy);
+    }
+
+    /// 获取节点的失败次数
+    pub fn get_failure_count(&self, node_id: &str) -> usize {
+        let counts = self.failure_counts.lock().unwrap();
+        *counts.get(node_id).unwrap_or(&0)
+    }
+
+    /// 增加节点的失败次数
+    pub fn increment_failure(&self, node_id: &str) -> usize {
+        let mut counts = self.failure_counts.lock().unwrap();
+        let count = counts.entry(node_id.to_string()).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// 重置节点的失败次数
+    pub fn reset_failure(&self, node_id: &str) {
+        let mut counts = self.failure_counts.lock().unwrap();
+        counts.insert(node_id.to_string(), 0);
+    }
 }
 
 /// 代理管理器
@@ -163,6 +216,7 @@ pub struct OrchestratorClient {
     client: Client,
     environment: Environment,
     proxy_manager: Arc<ProxyManager>,
+    node_proxy_state: Arc<NodeProxyState>,
 }
 
 impl OrchestratorClient {
@@ -182,6 +236,7 @@ impl OrchestratorClient {
                 .expect("Failed to create HTTP client"),
             environment,
             proxy_manager,
+            node_proxy_state: Arc::new(NodeProxyState::new()),
         }
     }
 
@@ -222,6 +277,7 @@ impl OrchestratorClient {
                 .expect("Failed to create HTTP client"),
             environment,
             proxy_manager,
+            node_proxy_state: Arc::new(NodeProxyState::new()),
         }
     }
 
@@ -248,40 +304,65 @@ impl OrchestratorClient {
         Ok(response)
     }
 
-    /// 创建带有代理的HTTP客户端
-    async fn create_client_with_proxy(&self) -> Client {
-        // 尝试获取代理
-        if let Some(proxy_info) = self.proxy_manager.next_proxy() {
-            info!("使用代理: {} ({})", proxy_info.url, proxy_info.country);
-            
-            // 创建代理
-            match Proxy::all(&proxy_info.url) {
-                Ok(proxy) => {
-                    let proxy_with_auth = proxy.basic_auth(&proxy_info.username, &proxy_info.password);
-                    // 创建新的builder实例
-                    let builder = ClientBuilder::new()
-                        .timeout(Duration::from_secs(15))  // 增加超时时间
-                        .proxy(proxy_with_auth);
-                    
-                    match builder.build() {
-                        Ok(client) => {
-                            return client;
-                        }
-                        Err(e) => {
-                            error!("创建代理客户端失败: {} - {}", proxy_info.url, e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("创建代理失败: {} - {}", proxy_info.url, e);
-                }
-            }
-        } else {
-            // 如果没有可用代理
-            warn!("没有可用的代理，使用默认连接");
+    /// 获取或分配节点的代理
+    fn get_or_assign_proxy(&self, node_id: &str) -> Option<ProxyInfo> {
+        // 先尝试获取已分配的代理
+        if let Some(proxy) = self.node_proxy_state.get_proxy(node_id) {
+            info!("节点 {} 使用已分配的代理: {} ({})", node_id, proxy.url, proxy.country);
+            return Some(proxy);
         }
         
-        // 如果获取代理失败，使用默认客户端
+        // 如果没有分配过代理，随机分配一个
+        if let Some(proxy) = self.proxy_manager.next_proxy() {
+            info!("为节点 {} 分配新代理: {} ({})", node_id, proxy.url, proxy.country);
+            self.node_proxy_state.set_proxy(node_id, proxy.clone());
+            return Some(proxy);
+        }
+        
+        warn!("无法为节点 {} 分配代理", node_id);
+        None
+    }
+    
+    /// 为节点更换代理
+    fn replace_proxy(&self, node_id: &str) -> Option<ProxyInfo> {
+        if let Some(proxy) = self.proxy_manager.next_proxy() {
+            info!("为节点 {} 更换代理: {} ({})", node_id, proxy.url, proxy.country);
+            self.node_proxy_state.set_proxy(node_id, proxy.clone());
+            return Some(proxy);
+        }
+        
+        warn!("无法为节点 {} 更换代理", node_id);
+        None
+    }
+
+    /// 创建带有代理的HTTP客户端（使用指定代理）
+    async fn create_client_with_proxy_info(&self, proxy_info: &ProxyInfo) -> Client {
+        info!("使用代理: {} ({})", proxy_info.url, proxy_info.country);
+        
+        // 创建代理
+        match Proxy::all(&proxy_info.url) {
+            Ok(proxy) => {
+                let proxy_with_auth = proxy.basic_auth(&proxy_info.username, &proxy_info.password);
+                // 创建新的builder实例
+                let builder = ClientBuilder::new()
+                    .timeout(Duration::from_secs(15))  // 增加超时时间
+                    .proxy(proxy_with_auth);
+                
+                match builder.build() {
+                    Ok(client) => {
+                        return client;
+                    }
+                    Err(e) => {
+                        error!("创建代理客户端失败: {} - {}", proxy_info.url, e);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("创建代理失败: {} - {}", proxy_info.url, e);
+            }
+        }
+        
+        // 如果创建代理客户端失败，使用默认客户端
         info!("使用默认连接（无代理）");
         ClientBuilder::new()
             .timeout(Duration::from_secs(10))
@@ -289,17 +370,140 @@ impl OrchestratorClient {
             .expect("Failed to create HTTP client")
     }
 
-    async fn get_request<T: Message + Default>(
+    /// 创建带有代理的HTTP客户端（基于节点ID）
+    async fn create_client_with_node_proxy(&self, node_id: &str) -> Client {
+        // 尝试获取或分配代理
+        if let Some(proxy_info) = self.get_or_assign_proxy(node_id) {
+            return self.create_client_with_proxy_info(&proxy_info).await;
+        }
+        
+        // 如果没有可用代理，使用默认客户端
+        info!("节点 {} 没有可用代理，使用默认连接", node_id);
+        ClientBuilder::new()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to create HTTP client")
+    }
+
+    /// 检查是否是需要重试的错误（如429或网络错误）
+    fn is_retryable_error(&self, error: &OrchestratorError) -> bool {
+        match error {
+            OrchestratorError::Http(e) => {
+                // 检查是否是429错误
+                if let Some(status) = e.status() {
+                    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                        return true;
+                    }
+                }
+                
+                // 检查是否是网络连接错误
+                e.is_connect() || e.is_timeout()
+            }
+            _ => false,
+        }
+    }
+
+    /// 带重试的GET请求
+    async fn get_request_with_retry<T: Message + Default>(
         &self,
         endpoint: &str,
         body: Vec<u8>,
+        node_id: &str,
     ) -> Result<T, OrchestratorError> {
+        const MAX_RETRIES: usize = 3;
         let url = self.build_url(endpoint);
-        // 使用动态代理客户端
-        let client = self.create_client_with_proxy().await;
+        
+        // 初始尝试
+        let mut result = self.execute_get_request::<T>(&url, body.clone(), node_id).await;
+        
+        // 如果成功，重置失败计数并返回结果
+        if result.is_ok() {
+            self.node_proxy_state.reset_failure(node_id);
+            return result;
+        }
+        
+        // 如果是可重试的错误，进行重试
+        let mut retry_count = 0;
+        while retry_count < MAX_RETRIES {
+            let error = result.as_ref().err().unwrap();
+            
+            if !self.is_retryable_error(error) {
+                // 如果不是可重试的错误，直接返回
+                break;
+            }
+            
+            // 增加失败计数
+            let failure_count = self.node_proxy_state.increment_failure(node_id);
+            
+            // 检查是否有可用代理
+            let has_proxy = self.node_proxy_state.get_proxy(node_id).is_some();
+            
+            // 如果有代理，尝试更换代理
+            if has_proxy {
+                self.replace_proxy(node_id);
+            }
+            
+            // 计算退避时间
+            // 如果是429错误，使用配置的超时时间（带随机浮动）
+            let is_429 = match error {
+                OrchestratorError::Http(e) => {
+                    if let Some(status) = e.status() {
+                        status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            
+            let backoff_time = if is_429 {
+                // 使用配置的429超时时间（带±10%随机浮动）
+                consts::get_retry_timeout()
+            } else if !has_proxy || failure_count > 1 {
+                // 对于其他错误，使用指数退避
+                std::cmp::min(2u64.pow((failure_count - 1) as u32), 30)
+            } else {
+                0
+            };
+            
+            if backoff_time > 0 {
+                info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
+                      node_id, 
+                      if is_429 { " (429 Too Many Requests)" } else { "" }, 
+                      backoff_time);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+            } else {
+                info!("节点 {} 请求失败，立即重试", node_id);
+            }
+            
+            // 重试请求
+            result = self.execute_get_request::<T>(&url, body.clone(), node_id).await;
+            
+            // 如果成功，重置失败计数并返回结果
+            if result.is_ok() {
+                self.node_proxy_state.reset_failure(node_id);
+                return result;
+            }
+            
+            retry_count += 1;
+        }
+        
+        // 所有重试都失败，返回最后一次的错误
+        result
+    }
+    
+    /// 执行GET请求
+    async fn execute_get_request<T: Message + Default>(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        node_id: &str,
+    ) -> Result<T, OrchestratorError> {
+        // 使用节点的代理客户端
+        let client = self.create_client_with_node_proxy(node_id).await;
         
         let response = client
-            .get(&url)
+            .get(url)
             .header("Content-Type", "application/octet-stream")
             .body(body)
             .send()
@@ -310,17 +514,107 @@ impl OrchestratorClient {
         Self::decode_response(&response_bytes)
     }
 
-    async fn post_request<T: Message + Default>(
+    /// 带重试的POST请求
+    async fn post_request_with_retry<T: Message + Default>(
         &self,
         endpoint: &str,
         body: Vec<u8>,
+        node_id: &str,
     ) -> Result<T, OrchestratorError> {
+        const MAX_RETRIES: usize = 3;
         let url = self.build_url(endpoint);
-        // 使用动态代理客户端
-        let client = self.create_client_with_proxy().await;
+        
+        // 初始尝试
+        let mut result = self.execute_post_request::<T>(&url, body.clone(), node_id).await;
+        
+        // 如果成功，重置失败计数并返回结果
+        if result.is_ok() {
+            self.node_proxy_state.reset_failure(node_id);
+            return result;
+        }
+        
+        // 如果是可重试的错误，进行重试
+        let mut retry_count = 0;
+        while retry_count < MAX_RETRIES {
+            let error = result.as_ref().err().unwrap();
+            
+            if !self.is_retryable_error(error) {
+                // 如果不是可重试的错误，直接返回
+                break;
+            }
+            
+            // 增加失败计数
+            let failure_count = self.node_proxy_state.increment_failure(node_id);
+            
+            // 检查是否有可用代理
+            let has_proxy = self.node_proxy_state.get_proxy(node_id).is_some();
+            
+            // 如果有代理，尝试更换代理
+            if has_proxy {
+                self.replace_proxy(node_id);
+            }
+            
+            // 计算退避时间
+            // 如果是429错误，使用配置的超时时间（带随机浮动）
+            let is_429 = match error {
+                OrchestratorError::Http(e) => {
+                    if let Some(status) = e.status() {
+                        status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            
+            let backoff_time = if is_429 {
+                // 使用配置的429超时时间（带±10%随机浮动）
+                consts::get_retry_timeout()
+            } else if !has_proxy || failure_count > 1 {
+                // 对于其他错误，使用指数退避
+                std::cmp::min(2u64.pow((failure_count - 1) as u32), 30)
+            } else {
+                0
+            };
+            
+            if backoff_time > 0 {
+                info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
+                      node_id, 
+                      if is_429 { " (429 Too Many Requests)" } else { "" }, 
+                      backoff_time);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+            } else {
+                info!("节点 {} 请求失败，立即重试", node_id);
+            }
+            
+            // 重试请求
+            result = self.execute_post_request::<T>(&url, body.clone(), node_id).await;
+            
+            // 如果成功，重置失败计数并返回结果
+            if result.is_ok() {
+                self.node_proxy_state.reset_failure(node_id);
+                return result;
+            }
+            
+            retry_count += 1;
+        }
+        
+        // 所有重试都失败，返回最后一次的错误
+        result
+    }
+    
+    /// 执行POST请求
+    async fn execute_post_request<T: Message + Default>(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        node_id: &str,
+    ) -> Result<T, OrchestratorError> {
+        // 使用节点的代理客户端
+        let client = self.create_client_with_node_proxy(node_id).await;
         
         let response = client
-            .post(&url)
+            .post(url)
             .header("Content-Type", "application/octet-stream")
             .body(body)
             .send()
@@ -331,17 +625,107 @@ impl OrchestratorClient {
         Self::decode_response(&response_bytes)
     }
 
-    async fn post_request_no_response(
+    /// 带重试的POST请求（无响应）
+    async fn post_request_no_response_with_retry(
         &self,
         endpoint: &str,
         body: Vec<u8>,
+        node_id: &str,
     ) -> Result<(), OrchestratorError> {
+        const MAX_RETRIES: usize = 3;
         let url = self.build_url(endpoint);
-        // 使用动态代理客户端
-        let client = self.create_client_with_proxy().await;
+        
+        // 初始尝试
+        let mut result = self.execute_post_request_no_response(&url, body.clone(), node_id).await;
+        
+        // 如果成功，重置失败计数并返回结果
+        if result.is_ok() {
+            self.node_proxy_state.reset_failure(node_id);
+            return result;
+        }
+        
+        // 如果是可重试的错误，进行重试
+        let mut retry_count = 0;
+        while retry_count < MAX_RETRIES {
+            let error = result.as_ref().err().unwrap();
+            
+            if !self.is_retryable_error(error) {
+                // 如果不是可重试的错误，直接返回
+                break;
+            }
+            
+            // 增加失败计数
+            let failure_count = self.node_proxy_state.increment_failure(node_id);
+            
+            // 检查是否有可用代理
+            let has_proxy = self.node_proxy_state.get_proxy(node_id).is_some();
+            
+            // 如果有代理，尝试更换代理
+            if has_proxy {
+                self.replace_proxy(node_id);
+            }
+            
+            // 计算退避时间
+            // 如果是429错误，使用配置的超时时间（带随机浮动）
+            let is_429 = match error {
+                OrchestratorError::Http(e) => {
+                    if let Some(status) = e.status() {
+                        status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+            
+            let backoff_time = if is_429 {
+                // 使用配置的429超时时间（带±10%随机浮动）
+                consts::get_retry_timeout()
+            } else if !has_proxy || failure_count > 1 {
+                // 对于其他错误，使用指数退避
+                std::cmp::min(2u64.pow((failure_count - 1) as u32), 30)
+            } else {
+                0
+            };
+            
+            if backoff_time > 0 {
+                info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
+                      node_id, 
+                      if is_429 { " (429 Too Many Requests)" } else { "" }, 
+                      backoff_time);
+                tokio::time::sleep(Duration::from_secs(backoff_time)).await;
+            } else {
+                info!("节点 {} 请求失败，立即重试", node_id);
+            }
+            
+            // 重试请求
+            result = self.execute_post_request_no_response(&url, body.clone(), node_id).await;
+            
+            // 如果成功，重置失败计数并返回结果
+            if result.is_ok() {
+                self.node_proxy_state.reset_failure(node_id);
+                return result;
+            }
+            
+            retry_count += 1;
+        }
+        
+        // 所有重试都失败，返回最后一次的错误
+        result
+    }
+    
+    /// 执行POST请求（无响应）
+    async fn execute_post_request_no_response(
+        &self,
+        url: &str,
+        body: Vec<u8>,
+        node_id: &str,
+    ) -> Result<(), OrchestratorError> {
+        // 使用节点的代理客户端
+        let client = self.create_client_with_node_proxy(node_id).await;
         
         let response = client
-            .post(&url)
+            .post(url)
             .header("Content-Type", "application/octet-stream")
             .body(body)
             .send()
@@ -501,7 +885,8 @@ impl Orchestrator for OrchestratorClient {
         };
         let request_bytes = Self::encode_request(&request);
 
-        let response: GetTasksResponse = self.get_request("v3/tasks", request_bytes).await?;
+        // 使用带节点ID的请求方法
+        let response: GetTasksResponse = self.get_request_with_retry("v3/tasks", request_bytes, node_id).await?;
         let tasks = response.tasks.iter().map(Task::from).collect();
         Ok(tasks)
     }
@@ -518,7 +903,8 @@ impl Orchestrator for OrchestratorClient {
         };
         let request_bytes = Self::encode_request(&request);
 
-        let response: GetProofTaskResponse = self.post_request("v3/tasks", request_bytes).await?;
+        // 使用带节点ID的请求方法
+        let response: GetProofTaskResponse = self.post_request_with_retry("v3/tasks", request_bytes, node_id).await?;
         Ok(Task::from(&response))
     }
 
@@ -553,8 +939,9 @@ impl Orchestrator for OrchestratorClient {
         };
         let request_bytes = Self::encode_request(&request);
 
-        self.post_request_no_response("v3/tasks/submit", request_bytes)
-            .await
+        // 使用带节点ID的请求方法（从task_id提取节点信息）
+        // 这里假设task_id可以作为节点的唯一标识
+        self.post_request_no_response_with_retry("v3/tasks/submit", request_bytes, task_id).await
     }
 }
 

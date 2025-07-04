@@ -48,6 +48,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use log::warn;
 use std::sync::atomic::{AtomicU64, Ordering};
+use rand;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -77,6 +78,10 @@ enum Command {
         /// Path to proxy list file
         #[arg(long = "proxy-file", value_name = "PROXY_FILE")]
         proxy_file: Option<String>,
+        
+        /// Timeout in seconds for 429 errors (will vary by ±10%)
+        #[arg(long = "timeout", value_name = "TIMEOUT")]
+        timeout: Option<u64>,
     },
     /// Register a new user
     RegisterUser {
@@ -103,7 +108,7 @@ enum Command {
         env: Option<String>,
 
         /// Delay between starting each node (seconds)
-        #[arg(long, default_value = "0.5")]
+        #[arg(long, default_value = "3")]
         start_delay: f64,
 
         /// Delay between proof submissions per node (seconds)
@@ -125,6 +130,10 @@ enum Command {
         /// Path to proxy list file
         #[arg(long = "proxy-file", value_name = "PROXY_FILE")]
         proxy_file: Option<String>,
+        
+        /// Timeout in seconds for 429 errors (will vary by ±10%)
+        #[arg(long = "timeout", value_name = "TIMEOUT")]
+        timeout: Option<u64>,
     },
 }
 
@@ -136,6 +145,8 @@ struct FixedLineDisplay {
     // 持久化的成功和失败计数
     success_count: Arc<AtomicU64>,
     failure_count: Arc<AtomicU64>,
+    // 记录启动时间
+    start_time: std::time::Instant,
 }
 
 impl FixedLineDisplay {
@@ -145,6 +156,7 @@ impl FixedLineDisplay {
             defragmenter: crate::prover::get_defragmenter(),
             success_count: Arc::new(AtomicU64::new(0)),
             failure_count: Arc::new(AtomicU64::new(0)),
+            start_time: std::time::Instant::now(),
         }
     }
 
@@ -211,8 +223,17 @@ impl FixedLineDisplay {
                 (new_total, new_active)
             });
         
+        // 计算运行时间
+        let runtime = self.start_time.elapsed();
+        let days = runtime.as_secs() / 86400;
+        let hours = (runtime.as_secs() % 86400) / 3600;
+        let minutes = (runtime.as_secs() % 3600) / 60;
+        let seconds = runtime.as_secs() % 60;
+        
         println!("📊 状态: {} 总数 | {} 活跃 | {} 成功 | {} 失败", 
                  total_nodes, active_count, successful_count, failed_count);
+        println!("⏱️ 运行时间: {}天 {}小时 {}分钟 {}秒", 
+                 days, hours, minutes, seconds);
         
         // 显示内存统计
         let stats = self.defragmenter.get_stats().await;
@@ -279,7 +300,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             headless,
             max_threads,
             proxy_file,
-        } => start(node_id, environment, config_path, headless, max_threads, proxy_file).await,
+            timeout,
+        } => {
+            let config_path = get_config_path()?;
+            start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout).await?;
+        }
         Command::Logout => {
             println!("Logging out and clearing node configuration file...");
             Config::clear_node_config(&config_path).map_err(Into::into)
@@ -302,32 +327,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
             workers_per_node,
             verbose,
             proxy_file,
+            timeout,
         } => {
             if verbose {
-                unsafe {
+                // 设置详细日志级别
                 std::env::set_var("RUST_LOG", "debug");
-                }
-                env_logger::init();
+                logging::init_logger()?;
             } else {
-                unsafe {
-                    std::env::set_var("RUST_LOG", "info");
-                }
-                env_logger::init();
+                // 设置默认日志级别
+                std::env::set_var("RUST_LOG", "info");
+                logging::init_logger()?;
             }
-            let environment = match env {
-                Some(env_str) => {
-                    // 尝试将字符串解析为环境类型
-                    match env_str.parse::<Environment>() {
-                        Ok(env) => env,
-                        Err(_) => {
-                            eprintln!("Invalid environment: {}", env_str);
-                            return Err("Invalid environment".into());
-                        }
-                    }
-                }
-                None => Environment::default(),
+
+            // 添加随机变化到启动延迟，在3-5秒之间
+            let mut rng = rand::thread_rng();
+            let randomized_delay = if start_delay < 3.0 {
+                3.0 + rand::Rng::gen_range(&mut rng, 0.0..2.0)
+            } else {
+                start_delay
             };
-            start_batch_processing(&file, environment, start_delay, proof_interval, max_concurrent, workers_per_node, proxy_file).await
+            
+            start_batch_processing(
+                &file,
+                env,
+                randomized_delay,
+                proof_interval,
+                max_concurrent,
+                workers_per_node,
+                proxy_file,
+                timeout,
+            )
+            .await?;
         }
     }
 }
@@ -341,6 +371,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 /// * `headless` - If true, runs without the terminal UI.
 /// * `max_threads` - Optional maximum number of threads to use for proving.
 /// * `proxy_file` - Path to the proxy list file.
+/// * `timeout` - Timeout in seconds for 429 errors (will vary by ±10%).
 async fn start(
     node_id: Option<u64>,
     env: Environment,
@@ -348,6 +379,7 @@ async fn start(
     headless: bool,
     max_threads: Option<u32>,
     proxy_file: Option<String>,
+    timeout: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
     let mut node_id = node_id;
     let _config = match Config::load_from_file(&config_path) {
@@ -359,6 +391,12 @@ async fn start(
             Environment::default(),
         ),
     };
+
+    // 设置429超时参数
+    if let Some(timeout_value) = timeout {
+        // 设置全局429超时参数
+        crate::consts::set_retry_timeout(timeout_value);
+    }
 
     // 创建增强型协调器客户端，传入代理文件
     let _orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(env.clone(), proxy_file.as_deref());
@@ -504,7 +542,14 @@ async fn start_batch_processing(
     max_concurrent: usize,
     workers_per_node: usize,
     proxy_file: Option<String>,
+    timeout: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
+    // 设置429超时参数
+    if let Some(timeout_value) = timeout {
+        // 设置全局429超时参数
+        crate::consts::set_retry_timeout(timeout_value);
+    }
+    
     // 加载节点列表
     let node_ids = node_list::load_node_list(file_path)?;
     if node_ids.is_empty() {
@@ -524,6 +569,11 @@ async fn start_batch_processing(
     println!("📊 节点总数: {}", node_ids.len());
     println!("🔄 最大并发: {}", actual_concurrent);
     println!("⏱️  启动延迟: {:.1}s, 证明间隔: {}s", start_delay, proof_interval);
+    if let Some(timeout_val) = timeout {
+        println!("⏰ 429错误超时: {}s (±10%)", timeout_val);
+    } else {
+        println!("⏰ 429错误超时: 默认值");
+    }
     println!("🌍 环境: {:?}", environment);
     println!("🧵 每节点工作线程: {}", workers_per_node);
     println!("🧠 内存优化: 已启用");
