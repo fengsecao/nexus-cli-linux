@@ -336,14 +336,14 @@ async fn run_memory_optimized_node(
     let rate_limit_tracker = online::NodeRateLimitTracker::new();
     
     // 更新节点状态
-    let update_status = |status: String| {
+    let update_status = move |status: String| {
         if let Some(callback) = &status_callback {
             callback(node_id, status.clone());
         }
     };
     
     // 发送事件到UI
-    let send_event = |msg: String, event_type: crate::events::EventType| {
+    let send_event = move |msg: String, event_type: crate::events::EventType| {
         let event_sender = event_sender.clone();
         tokio::spawn(async move {
             let _ = event_sender
