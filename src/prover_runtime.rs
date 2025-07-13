@@ -363,6 +363,7 @@ async fn run_memory_optimized_node(
             let next_idx = next_node_index.fetch_add(1, Ordering::SeqCst);
             if next_idx as usize >= all_nodes.len() {
                 // 已经没有更多节点可用
+                println!("\n⚠️ 节点-{}: 无更多可用节点，无法轮转 (原因: {})\n", node_id, reason);
                 return (false, None);
             }
             
@@ -390,6 +391,9 @@ async fn run_memory_optimized_node(
                     return (true, Some(status_msg));
                 }
             }
+        } else {
+            // 轮转功能未启用
+            println!("\n⚠️ 节点-{}: 轮转功能未启用或配置错误，无法轮转 (原因: {})\n", node_id, reason);
         }
         (false, None)
     }
@@ -771,19 +775,14 @@ async fn run_memory_optimized_node(
                             println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                             
-                            // 检查rotation_data是否为Some，如果是None则说明轮转功能未启用
-                            if rotation_data.is_some() {
-                                let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
-                                if should_rotate {
-                                    if let Some(msg) = status_msg {
-                                        update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
-                                    }
-                                    return; // 结束当前节点的处理
-                                } else {
-                                    println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
+                            if should_rotate {
+                                if let Some(msg) = status_msg {
+                                    update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                 }
+                                return; // 结束当前节点的处理
                             } else {
-                                println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
+                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                             }
                         } else {
                             println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
