@@ -201,7 +201,7 @@ impl EnhancedOrchestratorClient {
     }
     
     /// 缓存证明数据 - 增加缓存时间到60分钟
-    fn cache_proof(&self, task_id: &str, proof_hash: &str, proof: &[u8]) {
+    pub fn cache_proof(&self, task_id: &str, proof_hash: &str, proof: &[u8]) {
         let mut cache = self.proof_cache.lock().unwrap();
         cache.insert(task_id.to_string(), CachedProof {
             proof: proof.to_vec(),
