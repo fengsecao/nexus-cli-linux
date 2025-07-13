@@ -191,7 +191,7 @@ pub async fn start_optimized_batch_workers(
         let next_node_index = Arc::new(AtomicU64::new(actual_concurrent as u64));
         
         // 初始化活动节点队列
-        let mut active_nodes_guard = active_nodes.lock().await;
+        let mut active_nodes_guard = active_nodes.lock();
         for node_id in nodes.iter().take(actual_concurrent) {
             active_nodes_guard.push(*node_id);
         }
@@ -370,7 +370,7 @@ async fn run_memory_optimized_node(
             let next_node_id = all_nodes[next_idx as usize];
             
             // 更新活动节点列表
-            let mut active_nodes_guard = active_nodes.lock().await;
+            let mut active_nodes_guard = active_nodes.lock(); // 移除.await
             // 查找当前节点在活动列表中的位置
             if let Some(pos) = active_nodes_guard.iter().position(|&id| id == node_id) {
                 // 替换为新节点
@@ -615,7 +615,7 @@ async fn run_memory_optimized_node(
                                         consecutive_429s += 1; // 增加连续429计数
                                         
                                         // 缓存证明以便后续重试
-                                        orchestrator.cache_proof(&task.task_id, &proof_hash, proof_bytes.clone(), retry_count);
+                                        orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         
                                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
                                         update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{}, 连续429: {}次)", 
@@ -672,7 +672,7 @@ async fn run_memory_optimized_node(
                                         
                                         // 缓存证明以便后续重试
                                         if retry_count == 0 {
-                                            orchestrator.cache_proof(&task.task_id, &proof_hash, proof_bytes.clone(), retry_count);
+                                            orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         }
                                         
                                         tokio::time::sleep(Duration::from_secs(2)).await;
