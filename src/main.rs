@@ -136,7 +136,7 @@ enum Command {
         #[arg(long = "timeout", value_name = "TIMEOUT")]
         timeout: Option<u64>,
         
-        /// Enable node rotation (switch to next node after success or 2 consecutive 429 errors)
+        /// Enable node rotation (switch to next node after success or consecutive 429 error)
         #[arg(long, action = ArgAction::SetTrue)]
         rotation: bool,
     },
@@ -610,7 +610,7 @@ async fn start_batch_processing(
     println!("🧵 每节点工作线程: {}", workers_per_node);
     println!("🧠 内存优化: 已启用");
     if rotation {
-        println!("🔄 节点轮转: 已启用 (成功提交或连续429错误2次后轮转)");
+        println!("🔄 节点轮转: 已启用 (成功提交或连续429错误后立即轮转)");
     } else {
         println!("🔄 节点轮转: 已禁用");
     }

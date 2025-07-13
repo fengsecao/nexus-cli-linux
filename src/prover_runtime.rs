@@ -374,16 +374,24 @@ async fn run_memory_optimized_node(
             if let Some(pos) = active_nodes_guard.iter().position(|&id| id == node_id) {
                 // 替换为新节点
                 active_nodes_guard[pos] = next_node_id;
-            }
-            drop(active_nodes_guard);
             
-            // 返回状态消息而不是直接调用update_status
-            let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason);
-            println!("\n{}\n", status_msg); // 添加明显的控制台输出
-            return (true, Some(status_msg));
-        } else {
-            (false, None)
+                // 返回状态消息而不是直接调用update_status
+                let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason);
+                println!("\n{}\n", status_msg); // 添加明显的控制台输出
+                return (true, Some(status_msg));
+            } else {
+                // 如果当前节点不在活动列表中，仍然尝试添加新节点
+                println!("\n⚠️ 节点-{}: 未在活动列表中找到，尝试添加新节点 {}\n", node_id, next_node_id);
+                // 如果活动列表未满，添加新节点
+                if active_nodes_guard.len() < all_nodes.len() {
+                    active_nodes_guard.push(next_node_id);
+                    let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, next_node_id, reason);
+                    println!("\n{}\n", status_msg);
+                    return (true, Some(status_msg));
+                }
+            }
         }
+        (false, None)
     }
     
     update_status(format!("🚀 启动中"));
@@ -762,12 +770,20 @@ async fn run_memory_optimized_node(
                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
                             println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
-                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
-                            if should_rotate {
-                                if let Some(msg) = status_msg {
-                                    update_status(msg);
+                            
+                            // 检查rotation_data是否为Some，如果是None则说明轮转功能未启用
+                            if rotation_data.is_some() {
+                                let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
+                                if should_rotate {
+                                    if let Some(msg) = status_msg {
+                                        update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
+                                    }
+                                    return; // 结束当前节点的处理
+                                } else {
+                                    println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                 }
-                                return; // 结束当前节点的处理
+                            } else {
+                                println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                             }
                         } else {
                             println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
