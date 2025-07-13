@@ -161,6 +161,7 @@ pub async fn start_optimized_batch_workers(
     shutdown: broadcast::Receiver<()>,
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
     proxy_file: Option<String>,
+    rotation: bool,
 ) -> (mpsc::Receiver<Event>, Vec<JoinHandle<()>>) {
     // Worker事件
     let (event_sender, event_receiver) = mpsc::channel::<Event>(EVENT_QUEUE_SIZE);
@@ -179,8 +180,30 @@ pub async fn start_optimized_batch_workers(
     println!("等待初始延迟 {:.1}秒...", initial_delay);
     tokio::time::sleep(std::time::Duration::from_secs_f64(initial_delay)).await;
     
+    // 计算实际并发数（最大并发数与节点数量的较小值）
+    let actual_concurrent = nodes.len();
+    
+    // 如果启用了轮转功能，创建节点队列和活动节点跟踪器
+    let all_nodes = Arc::new(nodes.clone());
+    let active_nodes = if rotation {
+        // 创建一个共享的活动节点队列和下一个可用节点索引
+        let active_nodes = Arc::new(Mutex::new(Vec::new()));
+        let next_node_index = Arc::new(AtomicU64::new(actual_concurrent as u64));
+        
+        // 初始化活动节点队列
+        let mut active_nodes_guard = active_nodes.lock().await;
+        for node_id in nodes.iter().take(actual_concurrent) {
+            active_nodes_guard.push(*node_id);
+        }
+        drop(active_nodes_guard);
+        
+        Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone()))
+    } else {
+        None
+    };
+    
     // 按序启动各节点
-    for (index, node_id) in nodes.iter().enumerate() {
+    for (index, node_id) in nodes.iter().enumerate().take(actual_concurrent) {
         // 添加启动延迟
         if index > 0 {
             // 使用更长的延迟，特别是对于前几个节点
@@ -192,7 +215,7 @@ pub async fn start_optimized_batch_workers(
             };
             
             println!("启动节点 {} (第{}/{}个), 延迟 {:.1}秒...", 
-                    node_id, index + 1, nodes.len(), actual_delay);
+                    node_id, index + 1, actual_concurrent, actual_delay);
             tokio::time::sleep(std::time::Duration::from_secs_f64(actual_delay)).await;
         }
         
@@ -232,24 +255,35 @@ pub async fn start_optimized_batch_workers(
         } else {
             EnhancedOrchestratorClient::new(environment.clone())
         };
-    let shutdown_rx = shutdown.resubscribe();
+        let shutdown_rx = shutdown.resubscribe();
         let environment = environment.clone();
         let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
     
-    // 为每个任务克隆Arc包装的回调
-    let node_callback = match &status_callback_arc {
-        Some(callback_arc) => {
-            // 克隆Arc，不是内部的回调函数
-            let callback_arc_clone = Arc::clone(callback_arc);
-            // 创建一个新的闭包，捕获Arc克隆
-            Some(Box::new(move |node_id: u64, status: String| {
-                callback_arc_clone(node_id, status);
-            }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
-        }
-        None => None
-    };
-    
-    let event_sender_clone = event_sender.clone();
+        // 为每个任务克隆Arc包装的回调
+        let node_callback = match &status_callback_arc {
+            Some(callback_arc) => {
+                // 克隆Arc，不是内部的回调函数
+                let callback_arc_clone = Arc::clone(callback_arc);
+                // 创建一个新的闭包，捕获Arc克隆
+                Some(Box::new(move |node_id: u64, status: String| {
+                    callback_arc_clone(node_id, status);
+                }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
+            }
+            None => None
+        };
+        
+        let event_sender_clone = event_sender.clone();
+        
+        // 如果启用了轮转功能，传递活动节点跟踪器
+        let rotation_data = if rotation {
+            if let Some((active_nodes, next_node_index, all_nodes)) = &active_nodes {
+                Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         
         let handle = tokio::spawn(async move {
             run_memory_optimized_node(
@@ -261,8 +295,9 @@ pub async fn start_optimized_batch_workers(
                 environment,
                 client_id,
                 shutdown_rx,
-            node_callback,
-            event_sender_clone,
+                node_callback,
+                event_sender_clone,
+                rotation_data,
             ).await;
         });
         
@@ -284,12 +319,15 @@ async fn run_memory_optimized_node(
     mut shutdown: broadcast::Receiver<()>,
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
     event_sender: mpsc::Sender<Event>,
+    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
 ) {
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
     const MAX_TASK_RETRIES: usize = 5; // 增加到5次
     const MAX_429_RETRIES: usize = 12; // 专门针对429错误的重试次数
+    const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 2; // 连续429错误达到此数量时轮转
     let mut consecutive_failures = 0;
     let mut proof_count = 0;
+    let mut consecutive_429s = 0; // 跟踪连续429错误
     
     // 使用传入的事件发送器
     let event_sender = event_sender.clone();
@@ -313,6 +351,39 @@ async fn run_memory_optimized_node(
                 .await;
         });
     };
+    
+    // 轮转到下一个节点的函数 - 使用引用而不是移动所有权
+    async fn rotate_to_next_node(
+        node_id: u64,
+        rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
+        update_status: &dyn Fn(String),
+        reason: &str,
+    ) -> bool {
+        if let Some((active_nodes, next_node_index, all_nodes)) = rotation_data {
+            // 获取下一个可用节点ID
+            let next_idx = next_node_index.fetch_add(1, Ordering::SeqCst);
+            if next_idx as usize >= all_nodes.len() {
+                // 已经没有更多节点可用
+                return false;
+            }
+            
+            let next_node_id = all_nodes[next_idx as usize];
+            
+            // 更新活动节点列表
+            let mut active_nodes_guard = active_nodes.lock().await;
+            // 查找当前节点在活动列表中的位置
+            if let Some(pos) = active_nodes_guard.iter().position(|&id| id == node_id) {
+                // 替换为新节点
+                active_nodes_guard[pos] = next_node_id;
+            }
+            drop(active_nodes_guard);
+            
+            update_status(format!("🔄 轮转到下一个节点 (原因: {}) - 当前节点已处理完毕", reason));
+            true
+        } else {
+            false
+        }
+    }
     
     update_status(format!("🚀 启动中"));
     
@@ -354,6 +425,7 @@ async fn run_memory_optimized_node(
                 Ok(task) => {
                     // 成功获取任务，重置429计数
                     rate_limit_tracker.reset_429_count(node_id).await;
+                    consecutive_429s = 0; // 重置连续429计数
                     
                     // 获取节点成功次数
                     let success_count = rate_limit_tracker.get_success_count(node_id).await;
@@ -381,6 +453,7 @@ async fn run_memory_optimized_node(
                                     proof_count += 1;
                                     consecutive_failures = 0;
                                     success = true;
+                                    consecutive_429s = 0; // 重置连续429计数
                                     
                                     // 重置429计数
                                     rate_limit_tracker.reset_429_count(node_id).await;
@@ -391,6 +464,12 @@ async fn run_memory_optimized_node(
                                     let msg = format!("[{}] ✅ 缓存证明提交成功! 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                    
+                                    // 如果启用了轮转功能，成功提交后轮转到下一个节点
+                                    if rotate_to_next_node(node_id, &rotation_data, &update_status, "成功提交证明").await {
+                                        return; // 结束当前节点的处理
+                                    }
+                                    
                                     break;
                                 }
                                 Err(e) => {
@@ -402,9 +481,18 @@ async fn run_memory_optimized_node(
                                         
                                         // 增加节点的429计数
                                         let count = rate_limit_tracker.increment_429_count(node_id).await;
+                                        consecutive_429s += 1; // 增加连续429计数
                                         
                                         update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{}, 连续429: {}次)", 
                                             timestamp, wait_time, retry_count + 1, MAX_429_RETRIES, count));
+                                        
+                                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
+                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                                            if rotate_to_next_node(node_id, &rotation_data, &update_status, "连续429错误").await {
+                                                return; // 结束当前节点的处理
+                                            }
+                                        }
+                                        
                                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
                                         retry_count += 1;
                                         continue;
@@ -413,6 +501,7 @@ async fn run_memory_optimized_node(
                                         proof_count += 1;
                                         consecutive_failures = 0;
                                         success = true;
+                                        consecutive_429s = 0; // 重置连续429计数
                                         
                                         // 重置429计数
                                         rate_limit_tracker.reset_429_count(node_id).await;
@@ -424,10 +513,17 @@ async fn run_memory_optimized_node(
                                         update_status(msg.clone());
                                         
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                        
+                                        // 如果启用了轮转功能，成功提交后轮转到下一个节点
+                                        if rotate_to_next_node(node_id, &rotation_data, &update_status, "证明已被接受").await {
+                                            return; // 结束当前节点的处理
+                                        }
+                                        
                                         break;
                                     } else {
                                         // 重置429计数（非429错误）
                                         rate_limit_tracker.reset_429_count(node_id).await;
+                                        consecutive_429s = 0; // 重置连续429计数
                                         
                                         update_status(format!("[{}] ❌ 缓存证明提交失败: {}", timestamp, error_str));
                                         
@@ -488,6 +584,7 @@ async fn run_memory_optimized_node(
                                     proof_count += 1;
                                     consecutive_failures = 0;
                                     success = true;
+                                    consecutive_429s = 0; // 重置连续429计数
                                     
                                     // 重置429计数
                                     rate_limit_tracker.reset_429_count(node_id).await;
@@ -497,30 +594,47 @@ async fn run_memory_optimized_node(
                                     
                                     let msg = format!("[{}] ✅ 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
+                                    
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                    
+                                    // 如果启用了轮转功能，成功提交后轮转到下一个节点
+                                    if rotate_to_next_node(node_id, &rotation_data, &update_status, "成功提交证明").await {
+                                        return; // 结束当前节点的处理
+                                    }
+                                    
                                     break;
                                 }
                                 Err(e) => {
                                     let error_str = e.to_string();
                                     if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
-                                        // 速率限制错误 - 使用随机等待时间
+                                        // 速率限制错误
                                         rate_limited = true;
-                                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
                                         
                                         // 增加节点的429计数
                                         let count = rate_limit_tracker.increment_429_count(node_id).await;
+                                        consecutive_429s += 1; // 增加连续429计数
                                         
-                                        // 获取节点成功次数
-                                        let success_count = rate_limit_tracker.get_success_count(node_id).await;
+                                        // 缓存证明以便后续重试
+                                        orchestrator.cache_proof(&task.task_id, &proof_hash, proof_bytes.clone(), retry_count);
                                         
-                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (连续429: {}次, 成功: {}次)", 
-                                            timestamp, wait_time, count, success_count));
+                                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
+                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{}, 连续429: {}次)", 
+                                            timestamp, wait_time, retry_count + 1, MAX_SUBMISSION_RETRIES, count));
+                                        
+                                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
+                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                                            if rotate_to_next_node(node_id, &rotation_data, &update_status, "连续429错误").await {
+                                                return; // 结束当前节点的处理
+                                            }
+                                        }
+                                        
                                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
                                         // 证明已经被提交，视为成功
                                         proof_count += 1;
                                         consecutive_failures = 0;
                                         success = true;
+                                        consecutive_429s = 0; // 重置连续429计数
                                         
                                         // 重置429计数
                                         rate_limit_tracker.reset_429_count(node_id).await;
@@ -532,105 +646,129 @@ async fn run_memory_optimized_node(
                                         update_status(msg.clone());
                                         
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                        
+                                        // 如果启用了轮转功能，成功提交后轮转到下一个节点
+                                        if rotate_to_next_node(node_id, &rotation_data, &update_status, "证明已被接受").await {
+                                            return; // 结束当前节点的处理
+                                        }
+                                        
                                         break;
                                     } else {
-                                            // 重置429计数（非429错误）
-                                            rate_limit_tracker.reset_429_count(node_id).await;
-                                            
-                                            update_status(format!("[{}] ❌ 提交失败 (重试 {}/{}): {}", 
-                                                timestamp, retry_count + 1, MAX_SUBMISSION_RETRIES, error_str));
+                                        // 其他错误
+                                        consecutive_failures += 1;
+                                        consecutive_429s = 0; // 重置连续429计数
+                                        
+                                        // 重置429计数
+                                        rate_limit_tracker.reset_429_count(node_id).await;
+                                        
+                                        update_status(format!("[{}] ❌ 证明提交失败: {} (重试 {}/{})", 
+                                            timestamp, error_str, retry_count + 1, MAX_SUBMISSION_RETRIES));
                                         
                                         // 检查是否为404错误（任务未找到），如果是则不再重试
                                         if error_str.contains("404") || error_str.contains("NotFoundError") || error_str.contains("Task not found") {
                                             update_status(format!("[{}] 🔍 任务已不存在 (404)，停止重试并获取新任务", timestamp));
-                                            success = false; // 设置为false以获取新任务
                                             break; // 立即退出重试循环
+                                        }
+                                        
+                                        // 缓存证明以便后续重试
+                                        if retry_count == 0 {
+                                            orchestrator.cache_proof(&task.task_id, &proof_hash, proof_bytes.clone(), retry_count);
                                         }
                                         
                                         tokio::time::sleep(Duration::from_secs(2)).await;
                                     }
-                                        retry_count += 1;
-                                    }
+                                    retry_count += 1;
                                 }
                             }
+                            }
                             
-                            // 如果成功提交或达到重试上限但仍是速率限制，则继续下一个循环
-                            if success || (retry_count >= MAX_SUBMISSION_RETRIES && rate_limited) {
-                                if !success && rate_limited {
-                                    update_status(format!("[{}] ⚠️ 提交重试次数已达上限，等待一段时间后再尝试", timestamp));
-                                    tokio::time::sleep(Duration::from_secs(60)).await; // 长时间等待
+                            if success || retry_count >= MAX_SUBMISSION_RETRIES {
+                                if !success {
+                                    // 如果是由于速率限制而失败，等待更长时间
+                                    if rate_limited {
+                                        update_status(format!("[{}] ⚠️ 速率限制重试次数已达上限，等待一段时间后再尝试", timestamp));
+                                        tokio::time::sleep(Duration::from_secs(60)).await;
+                                    } else {
+                                        update_status(format!("[{}] ⚠️ 提交重试次数已达上限，等待一段时间后再尝试", timestamp));
+                                        tokio::time::sleep(Duration::from_secs(5)).await;
+                                    }
                                 }
                                 break;
                             }
-                            
-                            // 如果所有重试都失败，则增加尝试计数
-                            if !success {
-                                    attempt += 1;
-                            }
                         }
                         Err(e) => {
+                            // 证明生成失败
+                            consecutive_failures += 1;
+                            consecutive_429s = 0; // 重置连续429计数
+                            
+                            // 重置429计数
+                            rate_limit_tracker.reset_429_count(node_id).await;
+                            
                             update_status(format!("[{}] ❌ 证明生成失败: {}", timestamp, e));
                             tokio::time::sleep(Duration::from_secs(2)).await;
-                            attempt += 1;
                         }
                     }
+                    
+                    // 无论成功与否，都退出尝试循环
+                    break;
                 }
                 Err(e) => {
                     let error_str = e.to_string();
                     if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
-                        // 速率限制错误 - 使用随机等待时间
-                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                        
-                        // 增加节点的429计数
+                        // 速率限制错误
                         let count = rate_limit_tracker.increment_429_count(node_id).await;
+                        consecutive_429s += 1; // 增加连续429计数
                         
-                        // 获取节点成功次数
-                        let success_count = rate_limit_tracker.get_success_count(node_id).await;
+                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
+                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (尝试 {}/{}, 连续429: {}次)", 
+                            timestamp, wait_time, attempt, MAX_TASK_RETRIES, count));
                         
-                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (连续429: {}次, 成功: {}次)", 
-                            timestamp, wait_time, count, success_count));
+                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
+                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                            if rotate_to_next_node(node_id, &rotation_data, &update_status, "连续429错误").await {
+                                return; // 结束当前节点的处理
+                            }
+                        }
+                        
                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
-                    } else {
+                    } else if error_str.contains("404") || error_str.contains("NOT_FOUND") {
+                        // 404错误 - 无可用任务
+                        consecutive_429s = 0; // 重置连续429计数
+                        
                         // 重置429计数
                         rate_limit_tracker.reset_429_count(node_id).await;
                         
-                        // 获取节点成功次数
-                        let success_count = rate_limit_tracker.get_success_count(node_id).await;
+                        update_status(format!("[{}] 🔍 无可用任务 (404) (尝试 {}/{})", 
+                            timestamp, attempt, MAX_TASK_RETRIES));
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    } else {
+                        // 其他错误
+                        consecutive_failures += 1;
+                        consecutive_429s = 0; // 重置连续429计数
                         
-                        update_status(format!("[{}] ❌ 获取任务失败: {} (成功: {}次)", timestamp, error_str, success_count));
+                        // 重置429计数
+                        rate_limit_tracker.reset_429_count(node_id).await;
+                        
+                        update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
+                            timestamp, error_str, attempt, MAX_TASK_RETRIES));
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                     attempt += 1;
                 }
             }
-            
-            // 检查关闭信号
-            if shutdown.try_recv().is_ok() {
-                update_status("已停止".to_string());
-                return;
-            }
         }
         
-        if success {
-            // 发送分析事件
-            let _ = crate::analytics::track(
-                "cli_proof_node_batch_v3".to_string(),
-                serde_json::json!({
-                    "node_id": node_id,
-                    "proof_count": proof_count,
-                }),
-                &environment,
-                client_id.clone(),
-            ).await;
-            
-            // 等待指定的证明间隔
-            tokio::time::sleep(Duration::from_secs(proof_interval)).await;
-        } else {
-            consecutive_failures += 1;
-            update_status(format!("[{}] ⚠️ 所有尝试均失败 ({}/∞)", timestamp, consecutive_failures));
-            
-            // 失败后等待时间比正常证明间隔长一些
-            tokio::time::sleep(Duration::from_secs((proof_interval + 5).min(15))).await;
+        // 如果所有尝试都失败，等待一段时间后再试
+        if !success && attempt > MAX_TASK_RETRIES {
+            update_status(format!("[{}] ⚠️ 获取任务失败，等待后重试...", timestamp));
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+        
+        // 如果启用了证明间隔，等待指定时间
+        if proof_interval > 0 {
+            let wait_time = proof_interval + (rand::random::<u64>() % 2); // 添加0-1秒的随机变化
+            update_status(format!("[{}] ⏱️ 等待 {}s 后继续...", timestamp, wait_time));
+            tokio::time::sleep(Duration::from_secs(wait_time)).await;
         }
     }
 }

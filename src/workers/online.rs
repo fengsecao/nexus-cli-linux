@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use nexus_sdk::stwo::seq::Proof;
+use chrono;
 
 /// 节点速率限制跟踪器，用于记录每个节点的连续429计数
 #[derive(Debug, Clone, Default)]
@@ -472,7 +473,9 @@ async fn handle_fetch_error(
                 let wait_seconds = state.backoff_duration.as_secs();
                 
                 (
-                    format!("🚫 速率限制 (429) - 等待 {}s - 成功{}次 - 等待{}次", wait_seconds, success_count, count),
+                    format!("[{}:{}] 🚫 速率限制 (429) - 等待 {}s - 成功{}次 - 等待{}次", 
+                            chrono::Local::now().format("%H:%M:%S"),
+                            wait_seconds, success_count, count),
                     crate::events::EventType::Warning,
                     LogLevel::Warn,
                 )
@@ -485,7 +488,9 @@ async fn handle_fetch_error(
                 rate_limit_tracker.reset_429_count(*node_id).await;
                 
                 (
-                    format!("No tasks available (404) (成功: {}次)", success_count),
+                    format!("[{}] 无可用任务 (404) (成功: {}次)", 
+                            chrono::Local::now().format("%H:%M:%S"), 
+                            success_count),
                     crate::events::EventType::Status,
                     LogLevel::Info,
                 )
@@ -498,7 +503,9 @@ async fn handle_fetch_error(
                 rate_limit_tracker.reset_429_count(*node_id).await;
                 
                 (
-                    format!("HTTP error {}: {} (成功: {}次)", status, message, success_count),
+                    format!("[{}] HTTP错误 {}: {} (成功: {}次)", 
+                            chrono::Local::now().format("%H:%M:%S"),
+                            status, message, success_count),
                     crate::events::EventType::Error,
                     LogLevel::Error,
                 )
@@ -513,7 +520,9 @@ async fn handle_fetch_error(
             rate_limit_tracker.reset_429_count(*node_id).await;
             
             (
-                format!("Network error: {} (成功: {}次)", error, success_count),
+                format!("[{}] 网络错误: {} (成功: {}次)", 
+                        chrono::Local::now().format("%H:%M:%S"),
+                        error, success_count),
                 crate::events::EventType::Error,
                 LogLevel::Error,
             )

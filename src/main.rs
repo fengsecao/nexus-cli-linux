@@ -135,6 +135,10 @@ enum Command {
         /// Timeout in seconds for 429 errors (will vary by ±10%)
         #[arg(long = "timeout", value_name = "TIMEOUT")]
         timeout: Option<u64>,
+        
+        /// Enable node rotation (switch to next node after success or 2 consecutive 429 errors)
+        #[arg(long, action = ArgAction::SetTrue)]
+        rotation: bool,
     },
 }
 
@@ -171,7 +175,12 @@ impl FixedLineDisplay {
         
         let needs_update = {
             let lines = self.node_lines.read().await;
-            lines.get(&node_id) != Some(&status)
+            // 对于429错误，始终更新显示
+            if status.contains("速率限制") || status.contains("429") {
+                true
+            } else {
+                lines.get(&node_id) != Some(&status)
+            }
         };
         
         if needs_update {
@@ -329,6 +338,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             verbose,
             proxy_file,
             timeout,
+            rotation,
         } => {
             if verbose {
                 // 设置详细日志级别
@@ -376,6 +386,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 workers_per_node,
                 proxy_file,
                 timeout,
+                rotation,
             )
             .await
         }
@@ -563,6 +574,7 @@ async fn start_batch_processing(
     workers_per_node: usize,
     proxy_file: Option<String>,
     timeout: Option<u64>,
+    rotation: bool,
 ) -> Result<(), Box<dyn Error>> {
     // 设置429超时参数
     if let Some(timeout_value) = timeout {
@@ -597,6 +609,11 @@ async fn start_batch_processing(
     println!("🌍 环境: {:?}", environment);
     println!("🧵 每节点工作线程: {}", workers_per_node);
     println!("🧠 内存优化: 已启用");
+    if rotation {
+        println!("🔄 节点轮转: 已启用 (成功提交或连续429错误2次后轮转)");
+    } else {
+        println!("🔄 节点轮转: 已禁用");
+    }
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
@@ -629,6 +646,7 @@ async fn start_batch_processing(
         shutdown_sender.subscribe(),
         Some(status_callback),
         proxy_file,
+        rotation,
     ).await;
     
     // 创建消费事件的任务
