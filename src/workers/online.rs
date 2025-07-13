@@ -55,7 +55,7 @@ impl NodeRateLimitTracker {
         let mut counts = self.node_429_counts.lock().await;
         counts.insert(node_id, 0);
     }
-    
+
     /// 获取指定节点的当前429计数
     pub async fn get_429_count(&self, node_id: u64) -> u32 {
         let counts = self.node_429_counts.lock().await;
@@ -145,7 +145,7 @@ impl TaskFetchState {
     pub fn reset_429_count(&mut self) {
         self.consecutive_429s = 0;
     }
-    
+
     // 获取当前429连续计数
     pub fn get_429_count(&self) -> u32 {
         self.consecutive_429s
@@ -901,8 +901,8 @@ async fn handle_submission_error(
                 (
                     format!("HTTP error {} for task {}: {} (成功: {}次)", status, task.task_id, message, success_count),
                     LogLevel::Error,
-                )
-            }
+            )
+        }
         }
         _ => {
             // 重置429计数

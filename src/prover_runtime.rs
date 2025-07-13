@@ -324,7 +324,7 @@ async fn run_memory_optimized_node(
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
     const MAX_TASK_RETRIES: usize = 5; // 增加到5次
     const MAX_429_RETRIES: usize = 12; // 专门针对429错误的重试次数
-    const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 2; // 连续429错误达到此数量时轮转
+    const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 1; // 连续429错误达到此数量时轮转（改为1）
     let mut _consecutive_failures = 0; // 改为_consecutive_failures
     let mut proof_count = 0;
     let mut consecutive_429s = 0; // 跟踪连续429错误
@@ -378,7 +378,8 @@ async fn run_memory_optimized_node(
             drop(active_nodes_guard);
             
             // 返回状态消息而不是直接调用update_status
-            let status_msg = format!("🔄 轮转到下一个节点 (原因: {}) - 当前节点已处理完毕", reason);
+            let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason);
+            println!("\n{}\n", status_msg); // 添加明显的控制台输出
             return (true, Some(status_msg));
         } else {
             (false, None)
@@ -492,6 +493,8 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                                            println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
+                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
@@ -499,6 +502,9 @@ async fn run_memory_optimized_node(
                                                 }
                                                 return; // 结束当前节点的处理
                                             }
+                                        } else {
+                                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
+                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                                         }
                                         
                                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
@@ -639,6 +645,8 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                                            println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
+                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
@@ -646,6 +654,9 @@ async fn run_memory_optimized_node(
                                                 }
                                                 return; // 结束当前节点的处理
                                             }
+                                        } else {
+                                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
+                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                                         }
                                         
                                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
@@ -749,6 +760,8 @@ async fn run_memory_optimized_node(
                         
                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                            println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
+                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
@@ -756,6 +769,9 @@ async fn run_memory_optimized_node(
                                 }
                                 return; // 结束当前节点的处理
                             }
+                        } else {
+                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
+                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                         }
                         
                         tokio::time::sleep(Duration::from_secs(wait_time)).await;

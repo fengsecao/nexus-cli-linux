@@ -179,7 +179,7 @@ impl FixedLineDisplay {
             if status.contains("速率限制") || status.contains("429") {
                 true
             } else {
-                lines.get(&node_id) != Some(&status)
+            lines.get(&node_id) != Some(&status)
             }
         };
         
@@ -343,7 +343,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if verbose {
                 // 设置详细日志级别
                 unsafe {
-                    std::env::set_var("RUST_LOG", "debug");
+                std::env::set_var("RUST_LOG", "debug");
                 }
                 env_logger::init();
             } else {
