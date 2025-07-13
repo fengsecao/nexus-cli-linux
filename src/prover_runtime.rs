@@ -325,7 +325,7 @@ async fn run_memory_optimized_node(
     const MAX_TASK_RETRIES: usize = 5; // 增加到5次
     const MAX_429_RETRIES: usize = 12; // 专门针对429错误的重试次数
     const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 2; // 连续429错误达到此数量时轮转
-    let mut consecutive_failures = 0;
+    let mut _consecutive_failures = 0; // 改为_consecutive_failures
     let mut proof_count = 0;
     let mut consecutive_429s = 0; // 跟踪连续429错误
     
@@ -356,7 +356,7 @@ async fn run_memory_optimized_node(
     async fn rotate_to_next_node(
         node_id: u64,
         rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
-        update_status: &dyn Fn(String),
+        update_status_fn: impl Fn(String) + Send + 'static,
         reason: &str,
     ) -> bool {
         if let Some((active_nodes, next_node_index, all_nodes)) = rotation_data {
@@ -378,7 +378,7 @@ async fn run_memory_optimized_node(
             }
             drop(active_nodes_guard);
             
-            update_status(format!("🔄 轮转到下一个节点 (原因: {}) - 当前节点已处理完毕", reason));
+            update_status_fn(format!("🔄 轮转到下一个节点 (原因: {}) - 当前节点已处理完毕", reason));
             true
         } else {
             false
@@ -451,7 +451,7 @@ async fn run_memory_optimized_node(
                                 Ok(_) => {
                                     // 成功提交证明
                                     proof_count += 1;
-                                    consecutive_failures = 0;
+                                    _consecutive_failures = 0;
                                     success = true;
                                     consecutive_429s = 0; // 重置连续429计数
                                     
@@ -466,7 +466,8 @@ async fn run_memory_optimized_node(
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    if rotate_to_next_node(node_id, &rotation_data, &update_status, "成功提交证明").await {
+                                    let update_status_clone = update_status.clone();
+                                    if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "成功提交证明").await {
                                         return; // 结束当前节点的处理
                                     }
                                     
@@ -488,7 +489,8 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
-                                            if rotate_to_next_node(node_id, &rotation_data, &update_status, "连续429错误").await {
+                                            let update_status_clone = update_status.clone();
+                                            if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "连续429错误").await {
                                                 return; // 结束当前节点的处理
                                             }
                                         }
@@ -499,7 +501,7 @@ async fn run_memory_optimized_node(
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
                                         // 证明已经被提交，视为成功
                                         proof_count += 1;
-                                        consecutive_failures = 0;
+                                        _consecutive_failures = 0;
                                         success = true;
                                         consecutive_429s = 0; // 重置连续429计数
                                         
@@ -515,7 +517,8 @@ async fn run_memory_optimized_node(
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                        if rotate_to_next_node(node_id, &rotation_data, &update_status, "证明已被接受").await {
+                                        let update_status_clone = update_status.clone();
+                                        if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "证明已被接受").await {
                                             return; // 结束当前节点的处理
                                         }
                                         
@@ -582,7 +585,7 @@ async fn run_memory_optimized_node(
                                 Ok(_) => {
                                     // 成功提交证明
                                     proof_count += 1;
-                                    consecutive_failures = 0;
+                                    _consecutive_failures = 0;
                                     success = true;
                                     consecutive_429s = 0; // 重置连续429计数
                                     
@@ -598,7 +601,8 @@ async fn run_memory_optimized_node(
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    if rotate_to_next_node(node_id, &rotation_data, &update_status, "成功提交证明").await {
+                                    let update_status_clone = update_status.clone();
+                                    if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "成功提交证明").await {
                                         return; // 结束当前节点的处理
                                     }
                                     
@@ -623,7 +627,8 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
-                                            if rotate_to_next_node(node_id, &rotation_data, &update_status, "连续429错误").await {
+                                            let update_status_clone = update_status.clone();
+                                            if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "连续429错误").await {
                                                 return; // 结束当前节点的处理
                                             }
                                         }
@@ -632,7 +637,7 @@ async fn run_memory_optimized_node(
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
                                         // 证明已经被提交，视为成功
                                         proof_count += 1;
-                                        consecutive_failures = 0;
+                                        _consecutive_failures = 0;
                                         success = true;
                                         consecutive_429s = 0; // 重置连续429计数
                                         
@@ -648,14 +653,15 @@ async fn run_memory_optimized_node(
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                        if rotate_to_next_node(node_id, &rotation_data, &update_status, "证明已被接受").await {
+                                        let update_status_clone = update_status.clone();
+                                        if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "证明已被接受").await {
                                             return; // 结束当前节点的处理
                                         }
                                         
                                         break;
                                     } else {
                                         // 其他错误
-                                        consecutive_failures += 1;
+                                        _consecutive_failures += 1;
                                         consecutive_429s = 0; // 重置连续429计数
                                         
                                         // 重置429计数
@@ -698,7 +704,7 @@ async fn run_memory_optimized_node(
                         }
                         Err(e) => {
                             // 证明生成失败
-                            consecutive_failures += 1;
+                            _consecutive_failures += 1;
                             consecutive_429s = 0; // 重置连续429计数
                             
                             // 重置429计数
@@ -725,7 +731,8 @@ async fn run_memory_optimized_node(
                         
                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
-                            if rotate_to_next_node(node_id, &rotation_data, &update_status, "连续429错误").await {
+                            let update_status_clone = update_status.clone();
+                            if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "连续429错误").await {
                                 return; // 结束当前节点的处理
                             }
                         }
@@ -743,7 +750,7 @@ async fn run_memory_optimized_node(
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     } else {
                         // 其他错误
-                        consecutive_failures += 1;
+                        _consecutive_failures += 1;
                         consecutive_429s = 0; // 重置连续429计数
                         
                         // 重置429计数
