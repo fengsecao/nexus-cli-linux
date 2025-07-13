@@ -352,19 +352,18 @@ async fn run_memory_optimized_node(
         });
     };
     
-    // 轮转到下一个节点的函数 - 使用引用而不是移动所有权
+    // 轮转到下一个节点的函数 - 直接在当前函数内实现，避免传递闭包
     async fn rotate_to_next_node(
         node_id: u64,
         rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
-        update_status_fn: impl Fn(String) + Send + 'static,
         reason: &str,
-    ) -> bool {
+    ) -> (bool, Option<String>) {
         if let Some((active_nodes, next_node_index, all_nodes)) = rotation_data {
             // 获取下一个可用节点ID
             let next_idx = next_node_index.fetch_add(1, Ordering::SeqCst);
             if next_idx as usize >= all_nodes.len() {
                 // 已经没有更多节点可用
-                return false;
+                return (false, None);
             }
             
             let next_node_id = all_nodes[next_idx as usize];
@@ -378,10 +377,11 @@ async fn run_memory_optimized_node(
             }
             drop(active_nodes_guard);
             
-            update_status_fn(format!("🔄 轮转到下一个节点 (原因: {}) - 当前节点已处理完毕", reason));
-            true
+            // 返回状态消息而不是直接调用update_status
+            let status_msg = format!("🔄 轮转到下一个节点 (原因: {}) - 当前节点已处理完毕", reason);
+            return (true, Some(status_msg));
         } else {
-            false
+            (false, None)
         }
     }
     
@@ -466,8 +466,11 @@ async fn run_memory_optimized_node(
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    let update_status_clone = update_status.clone();
-                                    if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "成功提交证明").await {
+                                    let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明").await;
+                                    if should_rotate {
+                                        if let Some(msg) = status_msg {
+                                            update_status(msg);
+                                        }
                                         return; // 结束当前节点的处理
                                     }
                                     
@@ -489,8 +492,11 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
-                                            let update_status_clone = update_status.clone();
-                                            if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "连续429错误").await {
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
+                                            if should_rotate {
+                                                if let Some(msg) = status_msg {
+                                                    update_status(msg);
+                                                }
                                                 return; // 结束当前节点的处理
                                             }
                                         }
@@ -517,8 +523,11 @@ async fn run_memory_optimized_node(
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                        let update_status_clone = update_status.clone();
-                                        if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "证明已被接受").await {
+                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受").await;
+                                        if should_rotate {
+                                            if let Some(msg) = status_msg {
+                                                update_status(msg);
+                                            }
                                             return; // 结束当前节点的处理
                                         }
                                         
@@ -601,8 +610,11 @@ async fn run_memory_optimized_node(
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    let update_status_clone = update_status.clone();
-                                    if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "成功提交证明").await {
+                                    let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明").await;
+                                    if should_rotate {
+                                        if let Some(msg) = status_msg {
+                                            update_status(msg);
+                                        }
                                         return; // 结束当前节点的处理
                                     }
                                     
@@ -627,8 +639,11 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
-                                            let update_status_clone = update_status.clone();
-                                            if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "连续429错误").await {
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
+                                            if should_rotate {
+                                                if let Some(msg) = status_msg {
+                                                    update_status(msg);
+                                                }
                                                 return; // 结束当前节点的处理
                                             }
                                         }
@@ -653,8 +668,11 @@ async fn run_memory_optimized_node(
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                        let update_status_clone = update_status.clone();
-                                        if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "证明已被接受").await {
+                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受").await;
+                                        if should_rotate {
+                                            if let Some(msg) = status_msg {
+                                                update_status(msg);
+                                            }
                                             return; // 结束当前节点的处理
                                         }
                                         
@@ -731,8 +749,11 @@ async fn run_memory_optimized_node(
                         
                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
-                            let update_status_clone = update_status.clone();
-                            if rotate_to_next_node(node_id, &rotation_data, update_status_clone, "连续429错误").await {
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
+                            if should_rotate {
+                                if let Some(msg) = status_msg {
+                                    update_status(msg);
+                                }
                                 return; // 结束当前节点的处理
                             }
                         }
