@@ -235,6 +235,7 @@ pub async fn start_optimized_batch_workers(
             
             println!("🔄 初始活动节点队列: {:?}", *active_nodes_guard);
             println!("🔄 下一个节点索引: {}", next_node_index.load(std::sync::atomic::Ordering::SeqCst));
+            println!("🔄 最大并发数: {}, 总节点数: {}", actual_concurrent, nodes.len());
         } // 锁在这里释放
         
         Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone(), all_nodes_started.clone(), node_indices.clone(), actual_concurrent))
@@ -694,6 +695,12 @@ async fn rotate_to_next_node(
                     // 如果当前节点不在活动列表中，仍然尝试添加新节点
                     println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
                     
+                    // 确保活动节点数量不超过max_concurrent
+                    if active_nodes_guard.len() >= *max_concurrent {
+                        println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 不添加新节点", node_id, *max_concurrent);
+                        return (false, Some(format!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 不添加新节点", node_id, *max_concurrent)));
+                    }
+                    
                     // 如果活动列表未满，添加新节点
                     if active_nodes_guard.len() < all_nodes.len() {
                         active_nodes_guard.push(final_next_node_id);
@@ -1009,6 +1016,9 @@ async fn run_memory_optimized_node(
                                         if let Some(msg) = status_msg {
                                             update_status(msg);
                                         }
+                                        // 发送一个显式的停止消息，确保节点真正停止
+                                        let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                        println!("🛑 节点-{}: 轮转后显式停止", node_id);
                                         return; // 结束当前节点的处理
                                     }
                                     
@@ -1037,6 +1047,9 @@ async fn run_memory_optimized_node(
                                                 if let Some(msg) = status_msg {
                                                     update_status(msg);
                                                 }
+                                                // 发送一个显式的停止消息，确保节点真正停止
+                                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                                println!("🛑 节点-{}: 轮转后显式停止", node_id);
                                                 return; // 结束当前节点的处理
                                             }
                                         } else {
@@ -1161,11 +1174,12 @@ async fn run_memory_optimized_node(
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                     let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
                                     if should_rotate {
-                                        println!("🔍 节点-{}: 轮转结果: should_rotate=true, status_msg={:?}", node_id, status_msg);
-                                        println!("🔍 节点-{}: 轮转成功，结束当前节点处理", node_id);
                                         if let Some(msg) = status_msg {
                                             update_status(msg);
                                         }
+                                        // 发送一个显式的停止消息，确保节点真正停止
+                                        let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                        println!("🛑 节点-{}: 轮转后显式停止", node_id);
                                         return; // 结束当前节点的处理
                                     } else {
                                         println!("🔍 节点-{}: 轮转结果: should_rotate=false", node_id);
@@ -1199,6 +1213,9 @@ async fn run_memory_optimized_node(
                                                 if let Some(msg) = status_msg {
                                                     update_status(msg);
                                                 }
+                                                // 发送一个显式的停止消息，确保节点真正停止
+                                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                                println!("🛑 节点-{}: 轮转后显式停止", node_id);
                                                 return; // 结束当前节点的处理
                                             }
                                         } else {
