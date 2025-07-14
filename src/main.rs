@@ -180,7 +180,7 @@ impl FixedLineDisplay {
             if status.contains("速率限制") || status.contains("429") {
                 true
             } else {
-                lines.get(&node_id) != Some(&status)
+            lines.get(&node_id) != Some(&status)
             }
         };
         
@@ -248,11 +248,11 @@ impl FixedLineDisplay {
         let memory_percentage = (memory_info.0 as f64 / memory_info.1 as f64) * 100.0;
         
         println!("🧠 内存: {:.1}% ({} MB / {} MB) | 清理次数: {} | 释放: {} KB", 
-               memory_percentage, 
+                memory_percentage, 
                memory_info.0 / 1024 / 1024,  
                memory_info.1 / 1024 / 1024,
-               stats.cleanups_performed,
-               stats.bytes_freed / 1024);
+                stats.cleanups_performed,
+                stats.bytes_freed / 1024);
         
         println!("───────────────────────────────────────────");
         

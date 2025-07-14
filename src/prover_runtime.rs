@@ -197,6 +197,10 @@ pub async fn start_optimized_batch_workers(
         println!("🔄 启用节点轮转功能 - 总节点数: {}", nodes.len());
         // 创建一个共享的活动节点队列和下一个可用节点索引
         let active_nodes = Arc::new(Mutex::new(Vec::new()));
+        
+        // 创建一个标志，表示所有初始节点是否已启动
+        let all_nodes_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        
         // 初始化下一个节点索引为实际并发数，这样第一个轮转的节点会从并发数之后开始
         let next_node_index = Arc::new(AtomicU64::new(actual_concurrent as u64));
         
@@ -216,7 +220,7 @@ pub async fn start_optimized_batch_workers(
             println!("🔄 下一个节点索引: {}", next_node_index.load(Ordering::SeqCst));
         } // 锁在这里释放
         
-        Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone()))
+        Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone(), all_nodes_started.clone()))
     } else {
         println!("⚠️ 节点轮转功能未启用");
         None
@@ -224,7 +228,7 @@ pub async fn start_optimized_batch_workers(
     
     // 启动节点管理器
     if rotation {
-        if let Some((active_nodes_clone, _next_node_index_clone, _all_nodes_clone)) = rotation_data.clone() {
+        if let Some((active_nodes_clone, _next_node_index_clone, _all_nodes_clone, all_nodes_started_clone)) = rotation_data.clone() {
             let active_threads_for_manager = active_threads.clone();
             let environment_for_manager = environment.clone();
             let proxy_file_for_manager = proxy_file.clone();
@@ -258,6 +262,40 @@ pub async fn start_optimized_batch_workers(
             });
             
             join_handles.push(manager_handle);
+            
+            // 创建一个任务来监控所有初始节点是否已启动
+            let active_threads_monitor = active_threads.clone();
+            let all_nodes_started_monitor = all_nodes_started_clone.clone();
+            
+            tokio::spawn(async move {
+                loop {
+                    // 检查所有初始节点是否已启动
+                    let all_started = {
+                        let active_threads_guard = active_threads_monitor.lock();
+                        let mut all_started = true;
+                        
+                        // 检查每个活动节点是否已启动
+                        for (_, &started) in active_threads_guard.iter() {
+                            if !started {
+                                all_started = false;
+                                break;
+                            }
+                        }
+                        
+                        all_started
+                    };
+                    
+                    if all_started {
+                        // 设置所有节点已启动标志
+                        all_nodes_started_monitor.store(true, std::sync::atomic::Ordering::SeqCst);
+                        println!("🚀 所有初始节点已启动，可以开始轮转");
+                        break;
+                    }
+                    
+                    // 等待一段时间后再次检查
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            });
         }
     }
     
@@ -336,7 +374,7 @@ async fn node_manager(
     event_sender: mpsc::Sender<Event>,
     mut shutdown: broadcast::Receiver<()>,
     mut node_rx: mpsc::Receiver<NodeManagerCommand>,
-    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
+    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>)>,
 ) {
     println!("🔄 节点管理器启动");
     
@@ -559,6 +597,138 @@ async fn get_nodes_to_start(
     to_start
 }
 
+// 轮转到下一个节点的函数
+async fn rotate_to_next_node(
+    node_id: u64,
+    rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>)>,
+    reason: &str,
+    node_tx: &mpsc::Sender<NodeManagerCommand>,
+) -> (bool, Option<String>) {
+    println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
+    
+    if let Some((active_nodes, next_node_index, all_nodes, all_nodes_started)) = rotation_data {
+        // 检查所有初始节点是否已启动
+        if !all_nodes_started.load(std::sync::atomic::Ordering::SeqCst) {
+            println!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id);
+            return (false, Some(format!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id)));
+        }
+        
+        // 获取当前活跃节点列表并打印
+        {
+            let active_nodes_guard = active_nodes.lock();
+            println!("📋 节点-{}: 轮转前活动节点列表: {:?}", node_id, *active_nodes_guard);
+        }
+        
+        // 获取下一个节点索引并递增
+        let current_next_idx = next_node_index.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let next_idx = current_next_idx % all_nodes.len() as u64;
+        
+        // 获取下一个节点ID
+        let next_node_id = all_nodes[next_idx as usize];
+        
+        println!("📊 节点-{}: 当前节点索引: {}, 总节点数: {}", node_id, next_idx, all_nodes.len());
+        println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, next_node_id, next_idx);
+        
+        // 查找当前节点在活动列表中的位置，并更新节点 - 使用单独的作用域包围锁
+        let pos_opt = {
+            let mut active_nodes_guard = active_nodes.lock();
+            println!("📋 节点-{}: 当前活动节点列表: {:?}", node_id, *active_nodes_guard);
+            
+            // 查找当前节点在活动列表中的位置
+            let pos = active_nodes_guard.iter().position(|&id| id == node_id);
+            
+            if let Some(pos) = pos {
+                println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
+                // 替换为新节点
+                active_nodes_guard[pos] = next_node_id;
+                println!("✅ 节点-{}: 已替换为节点-{}", node_id, next_node_id);
+                Some(pos)
+            } else {
+                // 如果当前节点不在活动列表中，仍然尝试添加新节点
+                println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
+                
+                // 如果活动列表未满，添加新节点
+                if active_nodes_guard.len() < all_nodes.len() {
+                    active_nodes_guard.push(next_node_id);
+                    println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, next_node_id);
+                    None
+                } else {
+                    println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id, next_node_id);
+                    return (false, None);
+                }
+            }
+        }; // 锁在这里释放
+        
+        // 通知节点管理器当前节点已停止 - 在锁释放后进行
+        println!("📣 节点-{}: 正在通知节点管理器节点停止", node_id);
+        
+        // 添加重试机制，确保消息能够发送成功
+        let mut retry_count = 0;
+        let max_retries = 3;
+        let mut success = false;
+        
+        while retry_count < max_retries && !success {
+            // 确保消息发送成功 - 使用超时机制
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(2), 
+                node_tx.send(NodeManagerCommand::NodeStopped(node_id))
+            ).await {
+                Ok(Ok(_)) => {
+                    println!("📣 节点-{}: 已成功通知节点管理器节点停止", node_id);
+                    success = true;
+                    break;
+                },
+                Ok(Err(e)) => {
+                    retry_count += 1;
+                    println!("⚠️ 节点-{}: 通知节点管理器失败 (尝试 {}/{}): {}", node_id, retry_count, max_retries, e);
+                    
+                    if retry_count >= max_retries {
+                        println!("⚠️ 节点-{}: 通知节点管理器失败，达到最大重试次数", node_id);
+                        // 即使通知失败，我们仍然认为轮转成功
+                        println!("⚠️ 节点-{}: 通知失败，但活动节点列表已更新，继续轮转", node_id);
+                    } else {
+                        // 短暂等待后重试
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                },
+                Err(_) => {
+                    retry_count += 1;
+                    println!("⚠️ 节点-{}: 通知节点管理器超时 (尝试 {}/{})", node_id, retry_count, max_retries);
+                    
+                    if retry_count >= max_retries {
+                        println!("⚠️ 节点-{}: 通知节点管理器超时，达到最大重试次数", node_id);
+                        // 即使通知失败，我们仍然认为轮转成功
+                        println!("⚠️ 节点-{}: 通知超时，但活动节点列表已更新，继续轮转", node_id);
+                    } else {
+                        // 短暂等待后重试
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                },
+            }
+        }
+        
+        // 即使通知失败，我们仍然认为轮转成功，因为活动节点列表已更新
+        // 根据之前的查找结果生成状态消息
+        let status_msg = if pos_opt.is_some() {
+            format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason)
+        } else {
+            format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, next_node_id, reason)
+        };
+        
+        println!("\n{}\n", status_msg); // 添加明显的控制台输出
+        
+        // 等待一小段时间，确保节点管理器有时间处理消息
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        
+        return (true, Some(status_msg));
+    } else {
+        // 轮转功能未启用
+        println!("\n⚠️ 节点-{}: 轮转功能未启用或配置错误，无法轮转 (原因: {})\n", node_id, reason);
+    }
+    println!("❌ 节点-{}: 轮转失败", node_id);
+    (false, None)
+}
+
 // 启动单个节点工作线程
 async fn start_node_worker(
     node_id: u64,
@@ -569,7 +739,7 @@ async fn start_node_worker(
     status_callback_arc: Option<Arc<Box<dyn Fn(u64, String) + Send + Sync + 'static>>>,
     event_sender: mpsc::Sender<Event>,
     shutdown: broadcast::Receiver<()>,
-    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
+    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>)>,
     active_threads: Arc<Mutex<HashMap<u64, bool>>>,
     node_tx: mpsc::Sender<NodeManagerCommand>,
 ) -> JoinHandle<()> {
@@ -659,7 +829,7 @@ async fn run_memory_optimized_node(
     mut shutdown: broadcast::Receiver<()>,
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
     event_sender: mpsc::Sender<Event>,
-    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
+    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>)>,
     _active_threads: Arc<Mutex<HashMap<u64, bool>>>,
     node_tx: mpsc::Sender<NodeManagerCommand>,
 ) {
@@ -694,133 +864,10 @@ async fn run_memory_optimized_node(
         });
     };
     
-    // 轮转到下一个节点的函数 - 直接在当前函数内实现，避免传递闭包
-    async fn rotate_to_next_node(
-        node_id: u64,
-        rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
-        reason: &str,
-        node_tx: &mpsc::Sender<NodeManagerCommand>,
-    ) -> (bool, Option<String>) {
-        println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
-        
-        if let Some((active_nodes, next_node_index, all_nodes)) = rotation_data {
-            // 获取当前活跃节点列表并打印
-            {
-                let active_nodes_guard = active_nodes.lock();
-                println!("📋 节点-{}: 轮转前活动节点列表: {:?}", node_id, *active_nodes_guard);
-            }
-            
-            // 获取下一个节点索引并递增
-            let current_next_idx = next_node_index.fetch_add(1, Ordering::SeqCst);
-            let next_idx = current_next_idx % all_nodes.len() as u64;
-            
-            // 获取下一个节点ID
-            let next_node_id = all_nodes[next_idx as usize];
-            
-            println!("📊 节点-{}: 当前节点索引: {}, 总节点数: {}", node_id, next_idx, all_nodes.len());
-            println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, next_node_id, next_idx);
-            
-            // 查找当前节点在活动列表中的位置，并更新节点 - 使用单独的作用域包围锁
-            let pos_opt = {
-                let mut active_nodes_guard = active_nodes.lock();
-                println!("📋 节点-{}: 当前活动节点列表: {:?}", node_id, *active_nodes_guard);
-                
-                // 查找当前节点在活动列表中的位置
-                let pos = active_nodes_guard.iter().position(|&id| id == node_id);
-                
-                if let Some(pos) = pos {
-                    println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
-                    // 替换为新节点
-                    active_nodes_guard[pos] = next_node_id;
-                    println!("✅ 节点-{}: 已替换为节点-{}", node_id, next_node_id);
-                    Some(pos)
-                } else {
-                    // 如果当前节点不在活动列表中，仍然尝试添加新节点
-                    println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
-                    
-                    // 如果活动列表未满，添加新节点
-                    if active_nodes_guard.len() < all_nodes.len() {
-                        active_nodes_guard.push(next_node_id);
-                        println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, next_node_id);
-                        None
-                    } else {
-                        println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id);
-                        return (false, None);
-                    }
-                }
-            }; // 锁在这里释放
-            
-            // 通知节点管理器当前节点已停止 - 在锁释放后进行
-            println!("📣 节点-{}: 正在通知节点管理器节点停止", node_id);
-            
-            // 添加重试机制，确保消息能够发送成功
-            let mut retry_count = 0;
-            let max_retries = 3;
-            let mut success = false;
-            
-            while retry_count < max_retries && !success {
-                // 确保消息发送成功 - 使用超时机制
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(2), 
-                    node_tx.send(NodeManagerCommand::NodeStopped(node_id))
-                ).await {
-                    Ok(Ok(_)) => {
-                        println!("📣 节点-{}: 已成功通知节点管理器节点停止", node_id);
-                        success = true;
-                        break;
-                    },
-                    Ok(Err(e)) => {
-                        retry_count += 1;
-                        println!("⚠️ 节点-{}: 通知节点管理器失败 (尝试 {}/{}): {}", node_id, retry_count, max_retries, e);
-                        
-                        if retry_count >= max_retries {
-                            println!("⚠️ 节点-{}: 通知节点管理器失败，达到最大重试次数", node_id);
-                            // 即使通知失败，我们仍然认为轮转成功
-                            println!("⚠️ 节点-{}: 通知失败，但活动节点列表已更新，继续轮转", node_id);
-                        } else {
-                            // 短暂等待后重试
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        }
-                    },
-                    Err(_) => {
-                        retry_count += 1;
-                        println!("⚠️ 节点-{}: 通知节点管理器超时 (尝试 {}/{})", node_id, retry_count, max_retries);
-                        
-                        if retry_count >= max_retries {
-                            println!("⚠️ 节点-{}: 通知节点管理器超时，达到最大重试次数", node_id);
-                            // 即使通知失败，我们仍然认为轮转成功
-                            println!("⚠️ 节点-{}: 通知超时，但活动节点列表已更新，继续轮转", node_id);
-                        } else {
-                            // 短暂等待后重试
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        }
-                    },
-                }
-            }
-            
-            // 即使通知失败，我们仍然认为轮转成功，因为活动节点列表已更新
-            // 根据之前的查找结果生成状态消息
-            let status_msg = if pos_opt.is_some() {
-                format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason)
-            } else {
-                format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, next_node_id, reason)
-            };
-            
-            println!("\n{}\n", status_msg); // 添加明显的控制台输出
-            
-            // 等待一小段时间，确保节点管理器有时间处理消息
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            
-            return (true, Some(status_msg));
-        } else {
-            // 轮转功能未启用
-            println!("\n⚠️ 节点-{}: 轮转功能未启用或配置错误，无法轮转 (原因: {})\n", node_id, reason);
-        }
-        println!("❌ 节点-{}: 轮转失败", node_id);
-        (false, None)
-    }
-    
     update_status(format!("🚀 启动中"));
+    
+    // 通知节点管理器节点已启动
+    let _ = node_tx.send(NodeManagerCommand::NodeStarted(node_id)).await;
     
     loop {
         // 首先检查关闭信号
