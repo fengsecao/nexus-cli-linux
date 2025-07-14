@@ -185,33 +185,33 @@ pub async fn start_optimized_batch_workers(
     let actual_concurrent = num_workers_per_node.min(nodes.len());
     println!("🧮 设置的并发数: {}, 实际并发数: {}", num_workers_per_node, actual_concurrent);
     
-    // 如果启用了轮转功能，创建节点队列和活动节点跟踪器
-    let all_nodes = Arc::new(nodes.clone());
-    
     // 创建一个跟踪活跃线程的映射
     let active_threads = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
     
     // 创建一个用于节点管理器和工作线程之间通信的通道
     let (node_tx, node_rx) = mpsc::channel::<NodeManagerCommand>(100);
     
-    let active_nodes = if rotation {
+    // 如果启用了轮转功能，创建节点队列和活动节点跟踪器
+    let all_nodes = Arc::new(nodes.clone());
+    let rotation_data = if rotation {
         println!("🔄 启用节点轮转功能 - 总节点数: {}", nodes.len());
         // 创建一个共享的活动节点队列和下一个可用节点索引
         let active_nodes = Arc::new(Mutex::new(Vec::new()));
         let next_node_index = Arc::new(AtomicU64::new(actual_concurrent as u64));
         
         // 初始化活动节点队列
-        let mut active_nodes_guard = active_nodes.lock();
-        for node_id in nodes.iter().take(actual_concurrent) {
-            active_nodes_guard.push(*node_id);
-            println!("🔄 添加节点-{} 到活动节点队列", node_id);
-            
-            // 标记节点为未启动
-            let mut active_threads_guard = active_threads.lock();
-            active_threads_guard.insert(*node_id, false);
-        }
-        println!("🔄 初始活动节点队列: {:?}", *active_nodes_guard);
-        drop(active_nodes_guard);
+        {
+            let mut active_nodes_guard = active_nodes.lock();
+            for node_id in nodes.iter().take(actual_concurrent) {
+                active_nodes_guard.push(*node_id);
+                println!("🔄 添加节点-{} 到活动节点队列", node_id);
+                
+                // 标记节点为未启动
+                let mut active_threads_guard = active_threads.lock();
+                active_threads_guard.insert(*node_id, false);
+            }
+            println!("🔄 初始活动节点队列: {:?}", *active_nodes_guard);
+        } // 锁在这里释放
         
         Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone()))
     } else {
@@ -221,8 +221,7 @@ pub async fn start_optimized_batch_workers(
     
     // 启动节点管理器
     if rotation {
-        if let Some((active_nodes_clone, _, _)) = &active_nodes {
-            let active_nodes_for_manager = active_nodes_clone.clone();
+        if let Some((active_nodes_clone, next_node_index_clone, all_nodes_clone)) = rotation_data.clone() {
             let active_threads_for_manager = active_threads.clone();
             let environment_for_manager = environment.clone();
             let proxy_file_for_manager = proxy_file.clone();
@@ -230,11 +229,12 @@ pub async fn start_optimized_batch_workers(
             let event_sender_for_manager = event_sender.clone();
             let shutdown_for_manager = shutdown.resubscribe();
             let node_rx_for_manager = node_rx;
+            let rotation_data_for_manager = rotation_data.clone();
             
             println!("🔄 启动节点管理器线程");
             let manager_handle = tokio::spawn(async move {
                 node_manager(
-                    active_nodes_for_manager,
+                    active_nodes_clone,
                     active_threads_for_manager,
                     environment_for_manager,
                     proxy_file_for_manager,
@@ -244,7 +244,7 @@ pub async fn start_optimized_batch_workers(
                     event_sender_for_manager,
                     shutdown_for_manager,
                     node_rx_for_manager,
-                    active_nodes.clone(),
+                    rotation_data_for_manager,
                 ).await;
             });
             
@@ -294,7 +294,7 @@ pub async fn start_optimized_batch_workers(
             status_callback_arc.clone(),
             event_sender.clone(),
             shutdown.resubscribe(),
-            active_nodes.clone(),
+            rotation_data.clone(),
             active_threads.clone(),
             node_tx.clone(),
         ).await;
@@ -338,13 +338,19 @@ async fn node_manager(
                 match cmd {
                     Some(NodeManagerCommand::NodeStarted(node_id)) => {
                         println!("✅ 节点管理器: 节点-{} 已启动", node_id);
-                        let mut active_threads_guard = active_threads.lock();
-                        active_threads_guard.insert(node_id, true);
+                        // 在单独作用域内更新状态，避免跨await持有锁
+                        {
+                            let mut active_threads_guard = active_threads.lock();
+                            active_threads_guard.insert(node_id, true);
+                        }
                     }
                     Some(NodeManagerCommand::NodeStopped(node_id)) => {
                         println!("🛑 节点管理器: 节点-{} 已停止", node_id);
-                        let mut active_threads_guard = active_threads.lock();
-                        active_threads_guard.insert(node_id, false);
+                        // 在单独作用域内更新状态，避免跨await持有锁
+                        {
+                            let mut active_threads_guard = active_threads.lock();
+                            active_threads_guard.insert(node_id, false);
+                        }
                         
                         // 检查是否需要启动新节点
                         check_and_start_new_nodes(
@@ -398,39 +404,48 @@ async fn check_and_start_new_nodes(
     shutdown: &mut broadcast::Receiver<()>,
     rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
 ) {
-    // 获取活动节点列表
-    let active_nodes_guard = active_nodes.lock();
-    let active_threads_guard = active_threads.lock();
-    
-    // 检查每个活动节点，如果没有运行则启动它
-    for &node_id in active_nodes_guard.iter() {
-        let is_running = active_threads_guard.get(&node_id).copied().unwrap_or(false);
-        if !is_running {
-            println!("🔄 节点管理器: 发现未运行的节点-{}，准备启动", node_id);
-            
-            // 创建新的通信通道
-            let (node_tx, _) = mpsc::channel::<NodeManagerCommand>(10);
-            
-            // 启动新节点
-            let handle = start_node_worker(
-                node_id,
-                environment.clone(),
-                proxy_file.clone(),
-                num_workers_per_node,
-                proof_interval,
-                status_callback_arc.clone(),
-                event_sender.clone(),
-                shutdown.resubscribe(),
-                rotation_data.clone(),
-                active_threads.clone(),
-                node_tx,
-            ).await;
-            
-            // 这里不需要存储handle，因为我们只关心节点是否在运行
-            tokio::spawn(async move {
-                let _ = handle.await;
-            });
+    // 获取需要启动的节点列表
+    let nodes_to_start = {
+        let active_nodes_guard = active_nodes.lock();
+        let active_threads_guard = active_threads.lock();
+        
+        // 检查每个活动节点，找出没有运行的节点
+        let mut to_start = Vec::new();
+        for &node_id in active_nodes_guard.iter() {
+            let is_running = active_threads_guard.get(&node_id).copied().unwrap_or(false);
+            if !is_running {
+                to_start.push(node_id);
+            }
         }
+        to_start
+    }; // 锁在这里释放
+    
+    // 为每个未运行的节点启动线程
+    for node_id in nodes_to_start {
+        println!("🔄 节点管理器: 发现未运行的节点-{}，准备启动", node_id);
+        
+        // 创建新的通信通道
+        let (node_tx, _) = mpsc::channel::<NodeManagerCommand>(10);
+        
+        // 启动新节点
+        let handle = start_node_worker(
+            node_id,
+            environment.clone(),
+            proxy_file.clone(),
+            num_workers_per_node,
+            proof_interval,
+            status_callback_arc.clone(),
+            event_sender.clone(),
+            shutdown.resubscribe(),
+            rotation_data.clone(),
+            active_threads.clone(),
+            node_tx,
+        ).await;
+        
+        // 这里不需要存储handle，因为我们只关心节点是否在运行
+        tokio::spawn(async move {
+            let _ = handle.await;
+        });
     }
 }
 
@@ -487,17 +502,19 @@ async fn start_node_worker(
     
     let event_sender_clone = event_sender.clone();
     let node_tx_clone = node_tx.clone();
+    let active_threads_clone = active_threads.clone();
     
     // 启动节点工作线程
     let handle = tokio::spawn(async move {
-        // 通知节点管理器节点已启动
-        let _ = node_tx_clone.send(NodeManagerCommand::NodeStarted(node_id)).await;
-        
-        // 更新活动线程状态
+        // 在单独的作用域中更新活动线程状态，避免跨await持有锁
         {
-            let mut active_threads_guard = active_threads.lock();
+            // 通知节点管理器节点已启动
+            let _ = node_tx_clone.send(NodeManagerCommand::NodeStarted(node_id)).await;
+            
+            // 更新活动线程状态
+            let mut active_threads_guard = active_threads_clone.lock();
             active_threads_guard.insert(node_id, true);
-        }
+        } // 锁在这里释放
         
         // 运行节点
         run_memory_optimized_node(
@@ -512,7 +529,7 @@ async fn start_node_worker(
             node_callback,
             event_sender_clone,
             rotation_data,
-            active_threads.clone(),
+            active_threads_clone,
             node_tx_clone,
         ).await;
     });
@@ -533,7 +550,7 @@ async fn run_memory_optimized_node(
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
     event_sender: mpsc::Sender<Event>,
     rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
-    active_threads: Arc<Mutex<HashMap<u64, bool>>>,
+    _active_threads: Arc<Mutex<HashMap<u64, bool>>>,
     node_tx: mpsc::Sender<NodeManagerCommand>,
 ) {
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
@@ -590,44 +607,49 @@ async fn run_memory_optimized_node(
             let next_node_id = all_nodes[next_idx as usize];
             println!("🔄 节点-{}: 将轮转到节点-{}", node_id, next_node_id);
             
-            // 更新活动节点列表
-            let mut active_nodes_guard = active_nodes.lock(); // 移除.await
-            println!("📋 节点-{}: 当前活动节点列表: {:?}", node_id, *active_nodes_guard);
-            
-            // 查找当前节点在活动列表中的位置
-            if let Some(pos) = active_nodes_guard.iter().position(|&id| id == node_id) {
-                println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
-                // 替换为新节点
-                active_nodes_guard[pos] = next_node_id;
-                println!("✅ 节点-{}: 已替换为节点-{}", node_id, next_node_id);
-            
-                // 通知节点管理器当前节点已停止
-                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                println!("📣 节点-{}: 已通知节点管理器节点停止", node_id);
+            // 查找当前节点在活动列表中的位置，并更新节点 - 使用单独的作用域包围锁
+            let pos_opt = {
+                let mut active_nodes_guard = active_nodes.lock();
+                println!("📋 节点-{}: 当前活动节点列表: {:?}", node_id, *active_nodes_guard);
                 
-                // 返回状态消息而不是直接调用update_status
-                let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason);
-                println!("\n{}\n", status_msg); // 添加明显的控制台输出
-                return (true, Some(status_msg));
-            } else {
-                // 如果当前节点不在活动列表中，仍然尝试添加新节点
-                println!("\n⚠️ 节点-{}: 未在活动列表中找到，尝试添加新节点 {}\n", node_id, next_node_id);
-                // 如果活动列表未满，添加新节点
-                if active_nodes_guard.len() < all_nodes.len() {
-                    active_nodes_guard.push(next_node_id);
-                    println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, next_node_id);
-                    
-                    // 通知节点管理器当前节点已停止
-                    let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                    println!("📣 节点-{}: 已通知节点管理器节点停止", node_id);
-                    
-                    let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, next_node_id, reason);
-                    println!("\n{}\n", status_msg);
-                    return (true, Some(status_msg));
+                // 查找当前节点在活动列表中的位置
+                let pos = active_nodes_guard.iter().position(|&id| id == node_id);
+                
+                if let Some(pos) = pos {
+                    println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
+                    // 替换为新节点
+                    active_nodes_guard[pos] = next_node_id;
+                    println!("✅ 节点-{}: 已替换为节点-{}", node_id, next_node_id);
+                    Some(pos)
                 } else {
-                    println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id);
+                    // 如果当前节点不在活动列表中，仍然尝试添加新节点
+                    println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
+                    
+                    // 如果活动列表未满，添加新节点
+                    if active_nodes_guard.len() < all_nodes.len() {
+                        active_nodes_guard.push(next_node_id);
+                        println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, next_node_id);
+                        None
+                    } else {
+                        println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id);
+                        return (false, None);
+                    }
                 }
-            }
+            }; // 锁在这里释放
+            
+            // 通知节点管理器当前节点已停止 - 在锁释放后进行
+            let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+            println!("📣 节点-{}: 已通知节点管理器节点停止", node_id);
+            
+            // 根据之前的查找结果生成状态消息
+            let status_msg = if pos_opt.is_some() {
+                format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason)
+            } else {
+                format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, next_node_id, reason)
+            };
+            
+            println!("\n{}\n", status_msg); // 添加明显的控制台输出
+            return (true, Some(status_msg));
         } else {
             // 轮转功能未启用
             println!("\n⚠️ 节点-{}: 轮转功能未启用或配置错误，无法轮转 (原因: {})\n", node_id, reason);
