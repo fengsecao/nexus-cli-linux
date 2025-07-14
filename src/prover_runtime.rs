@@ -392,7 +392,7 @@ async fn node_manager(
     
     // 添加一个定期检查标志，避免过于频繁的检查
     let mut last_check_time = std::time::Instant::now();
-    let check_interval = std::time::Duration::from_secs(5);
+    let check_interval = std::time::Duration::from_secs(1); // 减少检查间隔为1秒
     
     // 创建一个节点启动队列，用于记录需要启动的节点
     let mut nodes_to_start = Vec::new();
@@ -458,7 +458,7 @@ async fn node_manager(
                         });
                         
                         // 添加一个短暂的延迟，避免同时启动太多节点
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
                 },
                 NodeManagerCommand::NodeStarted(node_id) => {
@@ -507,7 +507,7 @@ async fn node_manager(
                 });
                 
                 // 添加一个短暂的延迟，避免同时启动太多节点
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
         
@@ -561,7 +561,7 @@ async fn node_manager(
                         }
                         
                         // 短暂休眠，避免CPU占用过高
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
             }
@@ -618,7 +618,7 @@ async fn rotate_to_next_node(
 ) -> (bool, Option<String>) {
     println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
     
-    if let Some((active_nodes, next_node_index, all_nodes, all_nodes_started, node_indices, max_concurrent)) = rotation_data {
+    if let Some((active_nodes, _next_node_index, all_nodes, all_nodes_started, node_indices, max_concurrent)) = rotation_data {
         // 检查所有初始节点是否已启动
         if !all_nodes_started.load(std::sync::atomic::Ordering::SeqCst) {
             println!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id);
@@ -705,7 +705,7 @@ async fn rotate_to_next_node(
                             println!("⚠️ 节点-{}: 通知失败，但活动节点列表已更新，继续轮转", node_id);
                         } else {
                             // 短暂等待后重试
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     },
                     Err(_) => {
@@ -718,7 +718,7 @@ async fn rotate_to_next_node(
                             println!("⚠️ 节点-{}: 通知超时，但活动节点列表已更新，继续轮转", node_id);
                         } else {
                             // 短暂等待后重试
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         }
                     },
                 }
@@ -735,7 +735,7 @@ async fn rotate_to_next_node(
             println!("\n{}\n", status_msg); // 添加明显的控制台输出
             
             // 等待一小段时间，确保节点管理器有时间处理消息
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             
             return (true, Some(status_msg));
         } else {
@@ -1326,7 +1326,7 @@ async fn run_memory_optimized_node(
         // 如果所有尝试都失败，等待一段时间后再试
         if !_success && attempt > MAX_TASK_RETRIES {
             update_status(format!("[{}] ⚠️ 获取任务失败，等待后重试...", timestamp));
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
         
         // 如果启用了证明间隔，等待指定时间
