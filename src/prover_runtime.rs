@@ -355,6 +355,8 @@ async fn node_manager(
     let callback_clone = status_callback_arc.clone();
     let event_sender_clone = event_sender.clone();
     let rotation_clone = rotation_data.clone();
+    let global_tx_clone = global_tx.clone(); // 为闭包创建一个克隆
+    let shutdown_clone = shutdown.resubscribe(); // 为闭包创建一个克隆
     
     // 启动一个后台任务来处理全局通信通道的消息
     tokio::spawn(async move {
@@ -378,8 +380,8 @@ async fn node_manager(
                     for node_id in new_nodes {
                         println!("🌐 全局通信: 准备启动节点-{}", node_id);
                         
-                        // 使用全局通信通道
-                        let node_tx = global_tx.clone();
+                        // 使用全局通信通道的克隆
+                        let node_tx = global_tx_clone.clone();
                         
                         // 启动新节点
                         let handle = start_node_worker(
@@ -390,7 +392,7 @@ async fn node_manager(
                             proof_interval,
                             callback_clone.clone(),
                             event_sender_clone.clone(),
-                            shutdown.resubscribe(),
+                            shutdown_clone.resubscribe(), // 使用克隆的shutdown
                             rotation_clone.clone(),
                             active_threads_clone.clone(),
                             node_tx,
