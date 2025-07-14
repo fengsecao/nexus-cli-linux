@@ -26,6 +26,7 @@ use crate::orchestrator_client_enhanced::EnhancedOrchestratorClient;
 use sha3::Digest;
 use postcard;
 use std::sync::Arc;
+use std::collections::HashMap;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -181,11 +182,20 @@ pub async fn start_optimized_batch_workers(
     tokio::time::sleep(std::time::Duration::from_secs_f64(initial_delay)).await;
     
     // 计算实际并发数（最大并发数与节点数量的较小值）
-    let actual_concurrent = nodes.len();
+    let actual_concurrent = num_workers_per_node.min(nodes.len());
+    println!("🧮 设置的并发数: {}, 实际并发数: {}", num_workers_per_node, actual_concurrent);
     
     // 如果启用了轮转功能，创建节点队列和活动节点跟踪器
     let all_nodes = Arc::new(nodes.clone());
+    
+    // 创建一个跟踪活跃线程的映射
+    let active_threads = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
+    
+    // 创建一个用于节点管理器和工作线程之间通信的通道
+    let (node_tx, node_rx) = mpsc::channel::<NodeManagerCommand>(100);
+    
     let active_nodes = if rotation {
+        println!("🔄 启用节点轮转功能 - 总节点数: {}", nodes.len());
         // 创建一个共享的活动节点队列和下一个可用节点索引
         let active_nodes = Arc::new(Mutex::new(Vec::new()));
         let next_node_index = Arc::new(AtomicU64::new(actual_concurrent as u64));
@@ -194,13 +204,53 @@ pub async fn start_optimized_batch_workers(
         let mut active_nodes_guard = active_nodes.lock();
         for node_id in nodes.iter().take(actual_concurrent) {
             active_nodes_guard.push(*node_id);
+            println!("🔄 添加节点-{} 到活动节点队列", node_id);
+            
+            // 标记节点为未启动
+            let mut active_threads_guard = active_threads.lock();
+            active_threads_guard.insert(*node_id, false);
         }
+        println!("🔄 初始活动节点队列: {:?}", *active_nodes_guard);
         drop(active_nodes_guard);
         
         Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone()))
     } else {
+        println!("⚠️ 节点轮转功能未启用");
         None
     };
+    
+    // 启动节点管理器
+    if rotation {
+        if let Some((active_nodes_clone, _, _)) = &active_nodes {
+            let active_nodes_for_manager = active_nodes_clone.clone();
+            let active_threads_for_manager = active_threads.clone();
+            let environment_for_manager = environment.clone();
+            let proxy_file_for_manager = proxy_file.clone();
+            let status_callback_for_manager = status_callback_arc.clone();
+            let event_sender_for_manager = event_sender.clone();
+            let shutdown_for_manager = shutdown.resubscribe();
+            let node_rx_for_manager = node_rx;
+            
+            println!("🔄 启动节点管理器线程");
+            let manager_handle = tokio::spawn(async move {
+                node_manager(
+                    active_nodes_for_manager,
+                    active_threads_for_manager,
+                    environment_for_manager,
+                    proxy_file_for_manager,
+                    num_workers_per_node,
+                    proof_interval,
+                    status_callback_for_manager,
+                    event_sender_for_manager,
+                    shutdown_for_manager,
+                    node_rx_for_manager,
+                    active_nodes.clone(),
+                ).await;
+            });
+            
+            join_handles.push(manager_handle);
+        }
+    }
     
     // 按序启动各节点
     for (index, node_id) in nodes.iter().enumerate().take(actual_concurrent) {
@@ -235,76 +285,239 @@ pub async fn start_optimized_batch_workers(
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         
-        // 获取密钥
-        let signing_key = match crate::key_manager::load_or_generate_signing_key() {
-            Ok(key) => key,
-            Err(e) => {
-                warn!("节点 {} 加载签名密钥失败: {}", node_id, e);
-                // 使用Arc包装的回调
-                if let Some(callback_arc) = &status_callback_arc {
-                    callback_arc(*node_id, format!("加载密钥失败: {}", e));
-                }
-                continue;
-            }
-        };
-        
-        let node_id = *node_id;
-        // 使用增强版客户端
-        let enhanced_orchestrator = if let Some(ref proxy_file) = proxy_file {
-            EnhancedOrchestratorClient::new_with_proxy(environment.clone(), Some(proxy_file.as_str()))
-        } else {
-            EnhancedOrchestratorClient::new(environment.clone())
-        };
-        let shutdown_rx = shutdown.resubscribe();
-        let environment = environment.clone();
-        let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
-    
-        // 为每个任务克隆Arc包装的回调
-        let node_callback = match &status_callback_arc {
-            Some(callback_arc) => {
-                // 克隆Arc，不是内部的回调函数
-                let callback_arc_clone = Arc::clone(callback_arc);
-                // 创建一个新的闭包，捕获Arc克隆
-                Some(Box::new(move |node_id: u64, status: String| {
-                    callback_arc_clone(node_id, status);
-                }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
-            }
-            None => None
-        };
-        
-        let event_sender_clone = event_sender.clone();
-        
-        // 如果启用了轮转功能，传递活动节点跟踪器
-        let rotation_data = if rotation {
-            if let Some((active_nodes, next_node_index, all_nodes)) = &active_nodes {
-                Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone()))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        
-        let handle = tokio::spawn(async move {
-            run_memory_optimized_node(
-                node_id,
-                signing_key,
-                enhanced_orchestrator,
-                num_workers_per_node,
-                proof_interval,
-                environment,
-                client_id,
-                shutdown_rx,
-                node_callback,
-                event_sender_clone,
-                rotation_data,
-            ).await;
-        });
+        let handle = start_node_worker(
+            *node_id,
+            environment.clone(),
+            proxy_file.clone(),
+            num_workers_per_node,
+            proof_interval,
+            status_callback_arc.clone(),
+            event_sender.clone(),
+            shutdown.resubscribe(),
+            active_nodes.clone(),
+            active_threads.clone(),
+            node_tx.clone(),
+        ).await;
         
         join_handles.push(handle);
     }
     
     (event_receiver, join_handles)
+}
+
+// 节点管理器命令枚举
+#[derive(Debug)]
+enum NodeManagerCommand {
+    NodeStarted(u64),
+    NodeStopped(u64),
+}
+
+// 节点管理器函数
+async fn node_manager(
+    active_nodes: Arc<Mutex<Vec<u64>>>,
+    active_threads: Arc<Mutex<HashMap<u64, bool>>>,
+    environment: Environment,
+    proxy_file: Option<String>,
+    num_workers_per_node: usize,
+    proof_interval: u64,
+    status_callback_arc: Option<Arc<Box<dyn Fn(u64, String) + Send + Sync + 'static>>>,
+    event_sender: mpsc::Sender<Event>,
+    mut shutdown: broadcast::Receiver<()>,
+    mut node_rx: mpsc::Receiver<NodeManagerCommand>,
+    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
+) {
+    println!("🔄 节点管理器启动");
+    
+    loop {
+        tokio::select! {
+            _ = shutdown.recv() => {
+                println!("🛑 节点管理器收到关闭信号，正在退出");
+                break;
+            }
+            cmd = node_rx.recv() => {
+                match cmd {
+                    Some(NodeManagerCommand::NodeStarted(node_id)) => {
+                        println!("✅ 节点管理器: 节点-{} 已启动", node_id);
+                        let mut active_threads_guard = active_threads.lock();
+                        active_threads_guard.insert(node_id, true);
+                    }
+                    Some(NodeManagerCommand::NodeStopped(node_id)) => {
+                        println!("🛑 节点管理器: 节点-{} 已停止", node_id);
+                        let mut active_threads_guard = active_threads.lock();
+                        active_threads_guard.insert(node_id, false);
+                        
+                        // 检查是否需要启动新节点
+                        check_and_start_new_nodes(
+                            &active_nodes,
+                            &active_threads,
+                            &environment,
+                            &proxy_file,
+                            num_workers_per_node,
+                            proof_interval,
+                            &status_callback_arc,
+                            &event_sender,
+                            &mut shutdown,
+                            rotation_data.clone(),
+                        ).await;
+                    }
+                    None => {
+                        println!("⚠️ 节点管理器: 通信通道已关闭，退出");
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                // 定期检查是否有需要启动的新节点
+                check_and_start_new_nodes(
+                    &active_nodes,
+                    &active_threads,
+                    &environment,
+                    &proxy_file,
+                    num_workers_per_node,
+                    proof_interval,
+                    &status_callback_arc,
+                    &event_sender,
+                    &mut shutdown,
+                    rotation_data.clone(),
+                ).await;
+            }
+        }
+    }
+}
+
+// 检查并启动新节点
+async fn check_and_start_new_nodes(
+    active_nodes: &Arc<Mutex<Vec<u64>>>,
+    active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
+    environment: &Environment,
+    proxy_file: &Option<String>,
+    num_workers_per_node: usize,
+    proof_interval: u64,
+    status_callback_arc: &Option<Arc<Box<dyn Fn(u64, String) + Send + Sync + 'static>>>,
+    event_sender: &mpsc::Sender<Event>,
+    shutdown: &mut broadcast::Receiver<()>,
+    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
+) {
+    // 获取活动节点列表
+    let active_nodes_guard = active_nodes.lock();
+    let active_threads_guard = active_threads.lock();
+    
+    // 检查每个活动节点，如果没有运行则启动它
+    for &node_id in active_nodes_guard.iter() {
+        let is_running = active_threads_guard.get(&node_id).copied().unwrap_or(false);
+        if !is_running {
+            println!("🔄 节点管理器: 发现未运行的节点-{}，准备启动", node_id);
+            
+            // 创建新的通信通道
+            let (node_tx, _) = mpsc::channel::<NodeManagerCommand>(10);
+            
+            // 启动新节点
+            let handle = start_node_worker(
+                node_id,
+                environment.clone(),
+                proxy_file.clone(),
+                num_workers_per_node,
+                proof_interval,
+                status_callback_arc.clone(),
+                event_sender.clone(),
+                shutdown.resubscribe(),
+                rotation_data.clone(),
+                active_threads.clone(),
+                node_tx,
+            ).await;
+            
+            // 这里不需要存储handle，因为我们只关心节点是否在运行
+            tokio::spawn(async move {
+                let _ = handle.await;
+            });
+        }
+    }
+}
+
+// 启动单个节点工作线程
+async fn start_node_worker(
+    node_id: u64,
+    environment: Environment,
+    proxy_file: Option<String>,
+    num_workers_per_node: usize,
+    proof_interval: u64,
+    status_callback_arc: Option<Arc<Box<dyn Fn(u64, String) + Send + Sync + 'static>>>,
+    event_sender: mpsc::Sender<Event>,
+    shutdown: broadcast::Receiver<()>,
+    rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
+    active_threads: Arc<Mutex<HashMap<u64, bool>>>,
+    node_tx: mpsc::Sender<NodeManagerCommand>,
+) -> JoinHandle<()> {
+    // 获取密钥
+    let signing_key = match crate::key_manager::load_or_generate_signing_key() {
+        Ok(key) => key,
+        Err(e) => {
+            warn!("节点 {} 加载签名密钥失败: {}", node_id, e);
+            // 使用Arc包装的回调
+            if let Some(callback_arc) = &status_callback_arc {
+                callback_arc(node_id, format!("加载密钥失败: {}", e));
+            }
+            
+            // 返回一个已完成的JoinHandle
+            return tokio::spawn(async {});
+        }
+    };
+    
+    // 使用增强版客户端
+    let enhanced_orchestrator = if let Some(ref proxy_file) = proxy_file {
+        EnhancedOrchestratorClient::new_with_proxy(environment.clone(), Some(proxy_file.as_str()))
+    } else {
+        EnhancedOrchestratorClient::new(environment.clone())
+    };
+    
+    let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
+
+    // 为每个任务克隆Arc包装的回调
+    let node_callback = match &status_callback_arc {
+        Some(callback_arc) => {
+            // 克隆Arc，不是内部的回调函数
+            let callback_arc_clone = Arc::clone(callback_arc);
+            // 创建一个新的闭包，捕获Arc克隆
+            Some(Box::new(move |node_id: u64, status: String| {
+                callback_arc_clone(node_id, status);
+            }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
+        }
+        None => None
+    };
+    
+    let event_sender_clone = event_sender.clone();
+    let node_tx_clone = node_tx.clone();
+    
+    // 启动节点工作线程
+    let handle = tokio::spawn(async move {
+        // 通知节点管理器节点已启动
+        let _ = node_tx_clone.send(NodeManagerCommand::NodeStarted(node_id)).await;
+        
+        // 更新活动线程状态
+        {
+            let mut active_threads_guard = active_threads.lock();
+            active_threads_guard.insert(node_id, true);
+        }
+        
+        // 运行节点
+        run_memory_optimized_node(
+            node_id,
+            signing_key,
+            enhanced_orchestrator,
+            num_workers_per_node,
+            proof_interval,
+            environment,
+            client_id,
+            shutdown,
+            node_callback,
+            event_sender_clone,
+            rotation_data,
+            active_threads.clone(),
+            node_tx_clone,
+        ).await;
+    });
+    
+    handle
 }
 
 /// 内存优化的单节点运行函数 - 包含429错误处理和错误恢复功能
@@ -320,6 +533,8 @@ async fn run_memory_optimized_node(
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
     event_sender: mpsc::Sender<Event>,
     rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
+    active_threads: Arc<Mutex<HashMap<u64, bool>>>,
+    node_tx: mpsc::Sender<NodeManagerCommand>,
 ) {
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
     const MAX_TASK_RETRIES: usize = 5; // 增加到5次
@@ -357,10 +572,15 @@ async fn run_memory_optimized_node(
         node_id: u64,
         rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>)>,
         reason: &str,
+        node_tx: &mpsc::Sender<NodeManagerCommand>,
     ) -> (bool, Option<String>) {
+        println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
+        
         if let Some((active_nodes, next_node_index, all_nodes)) = rotation_data {
             // 获取下一个可用节点ID
             let next_idx = next_node_index.fetch_add(1, Ordering::SeqCst);
+            println!("📊 节点-{}: 当前节点索引: {}, 总节点数: {}", node_id, next_idx, all_nodes.len());
+            
             if next_idx as usize >= all_nodes.len() {
                 // 已经没有更多节点可用
                 println!("\n⚠️ 节点-{}: 无更多可用节点，无法轮转 (原因: {})\n", node_id, reason);
@@ -368,14 +588,23 @@ async fn run_memory_optimized_node(
             }
             
             let next_node_id = all_nodes[next_idx as usize];
+            println!("🔄 节点-{}: 将轮转到节点-{}", node_id, next_node_id);
             
             // 更新活动节点列表
             let mut active_nodes_guard = active_nodes.lock(); // 移除.await
+            println!("📋 节点-{}: 当前活动节点列表: {:?}", node_id, *active_nodes_guard);
+            
             // 查找当前节点在活动列表中的位置
             if let Some(pos) = active_nodes_guard.iter().position(|&id| id == node_id) {
+                println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
                 // 替换为新节点
                 active_nodes_guard[pos] = next_node_id;
+                println!("✅ 节点-{}: 已替换为节点-{}", node_id, next_node_id);
             
+                // 通知节点管理器当前节点已停止
+                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                println!("📣 节点-{}: 已通知节点管理器节点停止", node_id);
+                
                 // 返回状态消息而不是直接调用update_status
                 let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason);
                 println!("\n{}\n", status_msg); // 添加明显的控制台输出
@@ -386,15 +615,24 @@ async fn run_memory_optimized_node(
                 // 如果活动列表未满，添加新节点
                 if active_nodes_guard.len() < all_nodes.len() {
                     active_nodes_guard.push(next_node_id);
+                    println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, next_node_id);
+                    
+                    // 通知节点管理器当前节点已停止
+                    let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                    println!("📣 节点-{}: 已通知节点管理器节点停止", node_id);
+                    
                     let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, next_node_id, reason);
                     println!("\n{}\n", status_msg);
                     return (true, Some(status_msg));
+                } else {
+                    println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id);
                 }
             }
         } else {
             // 轮转功能未启用
             println!("\n⚠️ 节点-{}: 轮转功能未启用或配置错误，无法轮转 (原因: {})\n", node_id, reason);
         }
+        println!("❌ 节点-{}: 轮转失败", node_id);
         (false, None)
     }
     
@@ -404,6 +642,8 @@ async fn run_memory_optimized_node(
         // 首先检查关闭信号
         if shutdown.try_recv().is_ok() {
             update_status("已停止".to_string());
+            // 通知节点管理器当前节点已停止
+            let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
             break;
         }
         
@@ -479,7 +719,7 @@ async fn run_memory_optimized_node(
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明").await;
+                                    let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
                                     if should_rotate {
                                         if let Some(msg) = status_msg {
                                             update_status(msg);
@@ -507,7 +747,7 @@ async fn run_memory_optimized_node(
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
                                             println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(msg);
@@ -541,7 +781,7 @@ async fn run_memory_optimized_node(
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受").await;
+                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
                                         if should_rotate {
                                             if let Some(msg) = status_msg {
                                                 update_status(msg);
@@ -628,12 +868,19 @@ async fn run_memory_optimized_node(
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明").await;
+                                    println!("\n🔍 节点-{}: 证明提交成功，准备轮转...", node_id);
+                                    println!("🔍 节点-{}: rotation_data是否存在: {}", node_id, rotation_data.is_some());
+                                    let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
+                                    println!("🔍 节点-{}: 轮转结果: should_rotate={}, status_msg={:?}", 
+                                            node_id, should_rotate, status_msg);
                                     if should_rotate {
                                         if let Some(msg) = status_msg {
                                             update_status(msg);
                                         }
+                                        println!("🔍 节点-{}: 轮转成功，结束当前节点处理", node_id);
                                         return; // 结束当前节点的处理
+                                    } else {
+                                        println!("🔍 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                     }
                                     
                                     break;
@@ -659,7 +906,7 @@ async fn run_memory_optimized_node(
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
                                             println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(msg);
@@ -691,7 +938,7 @@ async fn run_memory_optimized_node(
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受").await;
+                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
                                         if should_rotate {
                                             if let Some(msg) = status_msg {
                                                 update_status(msg);
@@ -775,7 +1022,7 @@ async fn run_memory_optimized_node(
                             println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                             
-                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误").await;
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
