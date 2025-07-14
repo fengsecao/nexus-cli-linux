@@ -654,9 +654,21 @@ async fn rotate_to_next_node(
             let next_idx = (node_idx + *max_concurrent) % all_nodes.len();
             let next_node_id = all_nodes[next_idx];
             
+            // 确保不会轮转到自己
+            let final_next_idx = if next_node_id == node_id && all_nodes.len() > 1 {
+                // 如果轮转到自己且有其他节点可用，则选择下一个节点
+                let alternative_idx = (next_idx + 1) % all_nodes.len();
+                println!("⚠️ 节点-{}: 避免轮转到自己，改为使用索引 {}", node_id, alternative_idx);
+                alternative_idx
+            } else {
+                next_idx
+            };
+            
+            let final_next_node_id = all_nodes[final_next_idx];
+            
             println!("📊 节点-{}: 当前索引: {}, 下一个索引: {}, 总节点数: {}", 
-                    node_id, node_idx, next_idx, all_nodes.len());
-            println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, next_node_id, next_idx);
+                    node_id, node_idx, final_next_idx, all_nodes.len());
+            println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, final_next_node_id, final_next_idx);
             
             // 获取当前活跃节点列表并打印
             {
@@ -675,8 +687,8 @@ async fn rotate_to_next_node(
                 if let Some(pos) = pos {
                     println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
                     // 替换为新节点
-                    active_nodes_guard[pos] = next_node_id;
-                    println!("✅ 节点-{}: 已替换为节点-{}", node_id, next_node_id);
+                    active_nodes_guard[pos] = final_next_node_id;
+                    println!("✅ 节点-{}: 已替换为节点-{}", node_id, final_next_node_id);
                     Some(pos)
                 } else {
                     // 如果当前节点不在活动列表中，仍然尝试添加新节点
@@ -684,8 +696,8 @@ async fn rotate_to_next_node(
                     
                     // 如果活动列表未满，添加新节点
                     if active_nodes_guard.len() < all_nodes.len() {
-                        active_nodes_guard.push(next_node_id);
-                        println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, next_node_id);
+                        active_nodes_guard.push(final_next_node_id);
+                        println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, final_next_node_id);
                         None
                     } else {
                         println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id);
@@ -745,9 +757,9 @@ async fn rotate_to_next_node(
             // 即使通知失败，我们仍然认为轮转成功，因为活动节点列表已更新
             // 根据之前的查找结果生成状态消息
             let status_msg = if pos_opt.is_some() {
-                format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, next_node_id, reason)
+                format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason)
             } else {
-                format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, next_node_id, reason)
+                format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, final_next_node_id, reason)
             };
             
             println!("\n{}\n", status_msg); // 添加明显的控制台输出

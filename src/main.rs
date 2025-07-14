@@ -619,8 +619,9 @@ async fn start_batch_processing(
     // 创建批处理工作器
     let (shutdown_sender, _) = broadcast::channel(1);
     
-    // 限制当前批次大小
-    let current_batch: Vec<_> = node_ids.into_iter().take(actual_concurrent).collect();
+    // 使用所有节点，而不仅仅是前actual_concurrent个
+    // let current_batch: Vec<_> = node_ids.into_iter().take(actual_concurrent).collect();
+    let all_nodes = node_ids; // 使用所有加载的节点
     
     // 创建状态回调
     let display_clone = display.clone();
@@ -633,7 +634,7 @@ async fn start_batch_processing(
     
     // 启动优化的批处理工作器
     let (mut event_receiver, join_handles) = crate::prover_runtime::start_optimized_batch_workers(
-        current_batch,
+        all_nodes, // 传递所有节点，而不是current_batch
         orchestrator.client.clone(),
         workers_per_node,
         start_delay,
