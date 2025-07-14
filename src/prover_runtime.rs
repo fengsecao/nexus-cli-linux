@@ -653,7 +653,7 @@ async fn rotate_to_next_node(
                     println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, next_node_id);
                     None
                 } else {
-                    println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id, next_node_id);
+                    println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id);
                     return (false, None);
                 }
             }
@@ -665,9 +665,9 @@ async fn rotate_to_next_node(
         // 添加重试机制，确保消息能够发送成功
         let mut retry_count = 0;
         let max_retries = 3;
-        let mut success = false;
         
-        while retry_count < max_retries && !success {
+        // 不再需要success变量，直接基于重试次数控制循环
+        while retry_count < max_retries {
             // 确保消息发送成功 - 使用超时机制
             match tokio::time::timeout(
                 std::time::Duration::from_secs(2), 
@@ -675,7 +675,7 @@ async fn rotate_to_next_node(
             ).await {
                 Ok(Ok(_)) => {
                     println!("📣 节点-{}: 已成功通知节点管理器节点停止", node_id);
-                    success = true;
+                    // 成功发送消息，直接退出循环
                     break;
                 },
                 Ok(Err(e)) => {
@@ -888,7 +888,7 @@ async fn run_memory_optimized_node(
         // 获取内存碎片整理器状态
         let defragmenter = get_defragmenter();
         if defragmenter.should_defragment().await {
-            update_status("🧹 执行内存碎片整理...".to_string());
+            update_status(format!("🧹 执行内存碎片整理..."));
             let result = defragmenter.defragment().await;
             update_status(format!("内存: {:.1}% → {:.1}% (释放 {:.1}%)",
                              result.memory_before * 100.0,
