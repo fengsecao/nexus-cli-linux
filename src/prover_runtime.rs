@@ -197,11 +197,13 @@ pub async fn start_optimized_batch_workers(
         println!("🔄 启用节点轮转功能 - 总节点数: {}", nodes.len());
         // 创建一个共享的活动节点队列和下一个可用节点索引
         let active_nodes = Arc::new(Mutex::new(Vec::new()));
+        // 初始化下一个节点索引为实际并发数，这样第一个轮转的节点会从并发数之后开始
         let next_node_index = Arc::new(AtomicU64::new(actual_concurrent as u64));
         
         // 初始化活动节点队列
         {
             let mut active_nodes_guard = active_nodes.lock();
+            // 只添加前actual_concurrent个节点到活动队列
             for node_id in nodes.iter().take(actual_concurrent) {
                 active_nodes_guard.push(*node_id);
                 println!("🔄 添加节点-{} 到活动节点队列", node_id);
@@ -211,6 +213,7 @@ pub async fn start_optimized_batch_workers(
                 active_threads_guard.insert(*node_id, false);
             }
             println!("🔄 初始活动节点队列: {:?}", *active_nodes_guard);
+            println!("🔄 下一个节点索引: {}", next_node_index.load(Ordering::SeqCst));
         } // 锁在这里释放
         
         Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone()))
@@ -701,12 +704,21 @@ async fn run_memory_optimized_node(
         println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
         
         if let Some((active_nodes, next_node_index, all_nodes)) = rotation_data {
-            // 获取下一个可用节点ID - 只增加1，不跳过
-            let next_idx = next_node_index.fetch_add(1, Ordering::SeqCst) % all_nodes.len() as u64;
-            println!("📊 节点-{}: 当前节点索引: {}, 总节点数: {}", node_id, next_idx, all_nodes.len());
+            // 获取当前活跃节点列表
+            let active_nodes_list = {
+                let active_nodes_guard = active_nodes.lock();
+                active_nodes_guard.clone()
+            };
             
+            // 获取下一个节点索引并递增
+            let current_next_idx = next_node_index.fetch_add(1, Ordering::SeqCst);
+            let next_idx = current_next_idx % all_nodes.len() as u64;
+            
+            // 获取下一个节点ID
             let next_node_id = all_nodes[next_idx as usize];
-            println!("🔄 节点-{}: 将轮转到节点-{}", node_id, next_node_id);
+            
+            println!("📊 节点-{}: 当前节点索引: {}, 总节点数: {}", node_id, next_idx, all_nodes.len());
+            println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, next_node_id, next_idx);
             
             // 查找当前节点在活动列表中的位置，并更新节点 - 使用单独的作用域包围锁
             let pos_opt = {
