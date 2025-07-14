@@ -450,79 +450,87 @@ async fn node_manager(
         while let Some(cmd) = global_rx.recv().await {
             match cmd {
                 NodeManagerCommand::NodeStopped(node_id) => {
-                    println!("🌐 全局通信: 节点-{} 已停止", node_id);
+                    println!("🛑 节点管理器: 节点-{} 已停止", node_id);
                     // 在单独作用域内更新状态，避免跨await持有锁
                     {
                         let mut active_threads_guard = active_threads_clone.lock();
                         active_threads_guard.insert(node_id, false);
                     }
                     
+                    // 同时发送到全局通道
+                    let _ = global_tx_clone.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                    
                     // 立即检查是否有新节点需要启动
-                    println!("🌐 全局通信: 节点-{} 已停止，检查是否需要启动新节点", node_id);
+                    println!("🔄 节点管理器: 节点-{} 已停止，准备启动新节点", node_id);
                     
                     // 获取需要启动的节点列表
                     let new_nodes = get_nodes_to_start(&active_nodes_clone, &active_threads_clone).await;
                     
-                    // 检查当前活动节点数量
-                    let current_active_count = {
-                        let active_threads_guard = active_threads_clone.lock();
-                        let mut count = 0;
-                        for (_, &active) in active_threads_guard.iter() {
-                            if active {
-                                count += 1;
-                            }
-                        }
-                        count
-                    };
+                    // 将新节点添加到启动队列
+                    nodes_to_start.extend(new_nodes);
                     
-                    // 只有当活动节点数量低于最大并发数时才启动新节点
-                    if current_active_count < max_concurrent {
-                        // 计算可以启动的节点数量
-                        let nodes_to_start_count = (max_concurrent - current_active_count).min(new_nodes.len());
-                        
-                        if nodes_to_start_count > 0 {
-                            println!("🌐 全局通信: 当前活动节点数量: {}, 最大并发数: {}, 将启动 {} 个新节点", 
-                                    current_active_count, max_concurrent, nodes_to_start_count);
-                            
-                            // 只启动需要的节点数量
-                            for node_id in new_nodes.iter().take(nodes_to_start_count) {
-                                println!("🌐 全局通信: 准备启动节点-{}", node_id);
-                                
-                                // 使用全局通信通道的克隆
-                                let node_tx = global_tx_clone.clone();
-                                
-                                // 启动新节点
-                                let handle = start_node_worker(
-                                    *node_id,
-                                    env_clone.clone(),
-                                    proxy_clone.clone(),
-                                    num_workers_per_node,
-                                    proof_interval,
-                                    callback_clone.clone(),
-                                    event_sender_clone.clone(),
-                                    shutdown_clone.resubscribe(), // 使用克隆的shutdown
-                                    rotation_clone.clone(),
-                                    active_threads_clone.clone(),
-                                    node_tx,
-                                ).await;
-                                
-                                // 这里不需要存储handle，因为我们只关心节点是否在运行
-                                tokio::spawn(async move {
-                                    let _ = handle.await;
-                                    println!("⚠️ 节点工作线程已完成");
-                                });
-                                
-                                // 添加一个短暂的延迟，避免同时启动太多节点
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    // 立即尝试启动新节点，不等待下一次循环
+                    if !nodes_to_start.is_empty() {
+                        // 检查当前活动节点数量
+                        let current_active_count = {
+                            let active_threads_guard = active_threads_clone.lock();
+                            let mut count = 0;
+                            for (_, &active) in active_threads_guard.iter() {
+                                if active {
+                                    count += 1;
+                                }
                             }
-                        } else {
-                            println!("🌐 全局通信: 当前活动节点数量: {}, 最大并发数: {}, 无需启动新节点", 
-                                    current_active_count, max_concurrent);
+                            count
+                        };
+                        
+                        // 只有当活动节点数量低于最大并发数时才启动新节点
+                        if current_active_count < max_concurrent {
+                            // 计算可以启动的节点数量
+                            let nodes_to_start_count = (max_concurrent - current_active_count).min(nodes_to_start.len());
+                            
+                            if nodes_to_start_count > 0 {
+                                println!("🔄 节点管理器: 当前活动节点数量: {}, 最大并发数: {}, 将立即启动 {} 个新节点", 
+                                        current_active_count, max_concurrent, nodes_to_start_count);
+                                
+                                // 只启动需要的节点数量
+                                let nodes_to_launch: Vec<u64> = nodes_to_start.drain(..nodes_to_start_count).collect();
+                                
+                                for node_id in nodes_to_launch {
+                                    println!("🔄 节点管理器: 立即启动节点-{}", node_id);
+                                    
+                                    // 使用全局通信通道
+                                    let node_tx = global_tx_clone.clone();
+                                    
+                                    // 启动新节点
+                                    let handle = start_node_worker(
+                                        node_id,
+                                        env_clone.clone(),
+                                        proxy_clone.clone(),
+                                        num_workers_per_node,
+                                        proof_interval,
+                                        callback_clone.clone(),
+                                        event_sender_clone.clone(),
+                                        shutdown_clone.resubscribe(), // 使用克隆的shutdown
+                                        rotation_clone.clone(),
+                                        active_threads_clone.clone(),
+                                        node_tx,
+                                    ).await;
+                                    
+                                    // 这里不需要存储handle，因为我们只关心节点是否在运行
+                                    tokio::spawn(async move {
+                                        let _ = handle.await;
+                                        println!("⚠️ 节点工作线程已完成");
+                                    });
+                                    
+                                    // 添加一个短暂的延迟，避免同时启动太多节点
+                                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                }
+                            }
                         }
-                    } else {
-                        println!("🌐 全局通信: 当前活动节点数量: {} 已达到或超过最大并发数: {}, 不启动新节点", 
-                                current_active_count, max_concurrent);
                     }
+                    
+                    // 更新最后检查时间
+                    last_check_time = std::time::Instant::now();
                 },
                 NodeManagerCommand::NodeStarted(node_id) => {
                     println!("🌐 全局通信: 节点-{} 已启动", node_id);
@@ -642,6 +650,66 @@ async fn node_manager(
                         
                         // 将新节点添加到启动队列
                         nodes_to_start.extend(new_nodes);
+                        
+                        // 立即尝试启动新节点，不等待下一次循环
+                        if !nodes_to_start.is_empty() {
+                            // 检查当前活动节点数量
+                            let current_active_count = {
+                                let active_threads_guard = active_threads.lock();
+                                let mut count = 0;
+                                for (_, &active) in active_threads_guard.iter() {
+                                    if active {
+                                        count += 1;
+                                    }
+                                }
+                                count
+                            };
+                            
+                            // 只有当活动节点数量低于最大并发数时才启动新节点
+                            if current_active_count < max_concurrent {
+                                // 计算可以启动的节点数量
+                                let nodes_to_start_count = (max_concurrent - current_active_count).min(nodes_to_start.len());
+                                
+                                if nodes_to_start_count > 0 {
+                                    println!("🔄 节点管理器: 当前活动节点数量: {}, 最大并发数: {}, 将立即启动 {} 个新节点", 
+                                            current_active_count, max_concurrent, nodes_to_start_count);
+                                    
+                                    // 只启动需要的节点数量
+                                    let nodes_to_launch: Vec<u64> = nodes_to_start.drain(..nodes_to_start_count).collect();
+                                    
+                                    for node_id in nodes_to_launch {
+                                        println!("�� 节点管理器: 立即启动节点-{}", node_id);
+                                        
+                                        // 使用全局通信通道
+                                        let node_tx = global_tx.clone();
+                                        
+                                        // 启动新节点
+                                        let handle = start_node_worker(
+                                            node_id,
+                                            environment.clone(),
+                                            proxy_file.clone(),
+                                            num_workers_per_node,
+                                            proof_interval,
+                                            status_callback_arc.clone(),
+                                            event_sender.clone(),
+                                            shutdown.resubscribe(),
+                                            rotation_data.clone(),
+                                            active_threads.clone(),
+                                            node_tx,
+                                        ).await;
+                                        
+                                        // 这里不需要存储handle，因为我们只关心节点是否在运行
+                                        tokio::spawn(async move {
+                                            let _ = handle.await;
+                                            println!("⚠️ 节点工作线程已完成");
+                                        });
+                                        
+                                        // 添加一个短暂的延迟，避免同时启动太多节点
+                                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                    }
+                                }
+                            }
+                        }
                         
                         // 更新最后检查时间
                         last_check_time = std::time::Instant::now();
@@ -787,8 +855,8 @@ async fn rotate_to_next_node(
         };
         
         if let Some(node_idx) = node_idx_opt {
-            // 计算下一个节点的索引：当前索引 + max_concurrent，如果超出范围则循环
-            let next_idx = (node_idx + *max_concurrent) % all_nodes.len();
+            // 计算下一个节点的索引：当前索引 + 1，如果超出范围则循环
+            let next_idx = (node_idx + 1) % all_nodes.len();
             let next_node_id = all_nodes[next_idx];
             
             // 确保不会轮转到自己
@@ -832,26 +900,33 @@ async fn rotate_to_next_node(
                     // 如果当前节点不在活动列表中，仍然尝试添加新节点
                     println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
                     
-                    // 确保活动节点数量不超过max_concurrent
-                    if active_nodes_guard.len() >= *max_concurrent {
-                        println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 不添加新节点", node_id, *max_concurrent);
-                        return (false, Some(format!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 不添加新节点", node_id, *max_concurrent)));
-                    }
-                    
                     // 检查新节点是否已经在活动列表中
                     if active_nodes_guard.contains(&final_next_node_id) {
                         println!("⚠️ 节点-{}: 新节点-{} 已经在活动列表中，不重复添加", node_id, final_next_node_id);
-                        return (false, Some(format!("⚠️ 节点-{}: 新节点-{} 已经在活动列表中，不重复添加", node_id, final_next_node_id)));
+                        return (true, Some(format!("⚠️ 节点-{}: 新节点-{} 已经在活动列表中，不重复添加", node_id, final_next_node_id)));
                     }
                     
-                    // 如果活动列表未满，添加新节点
-                    if active_nodes_guard.len() < all_nodes.len() {
+                    // 确保活动节点数量不超过max_concurrent
+                    if active_nodes_guard.len() >= *max_concurrent {
+                        // 移除第一个节点，然后添加新节点
+                        println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 移除第一个节点并添加新节点", node_id, *max_concurrent);
+                        if !active_nodes_guard.is_empty() {
+                            let removed_node = active_nodes_guard.remove(0);
+                            println!("✅ 节点-{}: 已移除节点-{}", node_id, removed_node);
+                        }
                         active_nodes_guard.push(final_next_node_id);
                         println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, final_next_node_id);
                         None
                     } else {
-                        println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id);
-                        return (false, None);
+                        // 如果活动列表未满，添加新节点
+                        if active_nodes_guard.len() < all_nodes.len() {
+                            active_nodes_guard.push(final_next_node_id);
+                            println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, final_next_node_id);
+                            None
+                        } else {
+                            println!("⚠️ 节点-{}: 活动列表已满，无法添加新节点", node_id);
+                            return (false, None);
+                        }
                     }
                 }
             }; // 锁在这里释放
@@ -1047,7 +1122,7 @@ async fn run_memory_optimized_node(
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
     const MAX_TASK_RETRIES: usize = 5; // 增加到5次
     const MAX_429_RETRIES: usize = 12; // 专门针对429错误的重试次数
-    const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 1; // 连续429错误达到此数量时轮转（改为1）
+    const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 0; // 连续429错误达到此数量时轮转（改为0，确保立即轮转）
     let mut _consecutive_failures = 0; // 改为_consecutive_failures
     let mut proof_count = 0;
     let mut consecutive_429s = 0; // 跟踪连续429错误
@@ -1173,20 +1248,27 @@ async fn run_memory_optimized_node(
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
-                                    if should_rotate {
-                                        if let Some(msg) = status_msg {
-                                            update_status(msg);
+                                    if rotation_data.is_some() {
+                                        println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
+                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
+                                        if should_rotate {
+                                            if let Some(msg) = status_msg {
+                                                update_status(msg);
+                                            }
+                                            // 发送一个显式的停止消息，确保节点真正停止
+                                            let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                            println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                            
+                                            // 设置停止标志
+                                            should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                            
+                                            // 强制退出当前节点的处理循环
+                                            return;
+                                        } else {
+                                            println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                         }
-                                        // 发送一个显式的停止消息，确保节点真正停止
-                                        let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                        println!("🛑 节点-{}: 轮转后显式停止", node_id);
-                                        
-                                        // 设置停止标志
-                                        should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
-                                        
-                                        // 强制退出当前节点的处理循环
-                                        return;
+                                    } else {
+                                        println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                                     }
                                     
                                     break;
@@ -1206,13 +1288,15 @@ async fn run_memory_optimized_node(
                                             timestamp, wait_time, retry_count + 1, MAX_429_RETRIES, count));
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
                                             println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                                            
+                                            println!("🔄 节点-{}: 429错误，触发轮转", node_id);
                                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
-                                                    update_status(msg);
+                                                    update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                                 }
                                                 // 发送一个显式的停止消息，确保节点真正停止
                                                 let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
@@ -1223,10 +1307,12 @@ async fn run_memory_optimized_node(
                                                 
                                                 // 强制退出当前节点的处理循环
                                                 return;
+                                            } else {
+                                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                             }
                                         } else {
-                                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
+                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
                                         }
                                         
                                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
@@ -1252,12 +1338,19 @@ async fn run_memory_optimized_node(
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
-                                        if should_rotate {
-                                            if let Some(msg) = status_msg {
-                                                update_status(msg);
+                                        if rotation_data.is_some() {
+                                            println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
+                                            if should_rotate {
+                                                if let Some(msg) = status_msg {
+                                                    update_status(msg);
+                                                }
+                                                return; // 结束当前节点的处理
+                                            } else {
+                                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                             }
-                                            return; // 结束当前节点的处理
+                                        } else {
+                                            println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                                         }
                                         
                                         break;
@@ -1344,22 +1437,27 @@ async fn run_memory_optimized_node(
                                     println!("🔍 节点-{}: rotation_data是否存在: {}\n", node_id, rotation_data.is_some());
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
-                                    if should_rotate {
-                                        if let Some(msg) = status_msg {
-                                            update_status(msg);
+                                    if rotation_data.is_some() {
+                                        println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
+                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
+                                        if should_rotate {
+                                            if let Some(msg) = status_msg {
+                                                update_status(msg);
+                                            }
+                                            // 发送一个显式的停止消息，确保节点真正停止
+                                            let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                            println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                            
+                                            // 设置停止标志
+                                            should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                            
+                                            // 强制退出当前节点的处理循环
+                                            return;
+                                        } else {
+                                            println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                         }
-                                        // 发送一个显式的停止消息，确保节点真正停止
-                                        let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                        println!("🛑 节点-{}: 轮转后显式停止", node_id);
-                                        
-                                        // 设置停止标志
-                                        should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
-                                        
-                                        // 强制退出当前节点的处理循环
-                                        return;
                                     } else {
-                                        println!("🔍 节点-{}: 轮转结果: should_rotate=false", node_id);
+                                        println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                                     }
                                     
                                     break;
@@ -1382,13 +1480,15 @@ async fn run_memory_optimized_node(
                                             timestamp, wait_time, retry_count + 1, MAX_SUBMISSION_RETRIES, count));
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
                                             println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                                            
+                                            println!("🔄 节点-{}: 429错误，触发轮转", node_id);
                                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
-                                                    update_status(msg);
+                                                    update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                                 }
                                                 // 发送一个显式的停止消息，确保节点真正停止
                                                 let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
@@ -1399,10 +1499,12 @@ async fn run_memory_optimized_node(
                                                 
                                                 // 强制退出当前节点的处理循环
                                                 return;
+                                            } else {
+                                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                             }
                                         } else {
-                                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
+                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
                                         }
                                         
                                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
@@ -1426,12 +1528,19 @@ async fn run_memory_optimized_node(
                                         send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
-                                        if should_rotate {
-                                            if let Some(msg) = status_msg {
-                                                update_status(msg);
+                                        if rotation_data.is_some() {
+                                            println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
+                                            if should_rotate {
+                                                if let Some(msg) = status_msg {
+                                                    update_status(msg);
+                                                }
+                                                return; // 结束当前节点的处理
+                                            } else {
+                                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                             }
-                                            return; // 结束当前节点的处理
+                                        } else {
+                                            println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                                         }
                                         
                                         break;
@@ -1506,22 +1615,31 @@ async fn run_memory_optimized_node(
                             timestamp, wait_time, attempt, MAX_TASK_RETRIES, count));
                         
                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION {
+                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
                             println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                             
+                            println!("🔄 节点-{}: 429错误，触发轮转", node_id);
                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                 }
-                                return; // 结束当前节点的处理
+                                // 发送一个显式的停止消息，确保节点真正停止
+                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                
+                                // 设置停止标志
+                                should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                
+                                // 强制退出当前节点的处理循环
+                                return;
                             } else {
                                 println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                             }
                         } else {
-                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
-                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
+                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
                         }
                         
                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
