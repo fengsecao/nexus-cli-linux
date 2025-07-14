@@ -704,11 +704,11 @@ async fn run_memory_optimized_node(
         println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
         
         if let Some((active_nodes, next_node_index, all_nodes)) = rotation_data {
-            // 获取当前活跃节点列表
-            let active_nodes_list = {
+            // 获取当前活跃节点列表并打印
+            {
                 let active_nodes_guard = active_nodes.lock();
-                active_nodes_guard.clone()
-            };
+                println!("📋 节点-{}: 轮转前活动节点列表: {:?}", node_id, *active_nodes_guard);
+            }
             
             // 获取下一个节点索引并递增
             let current_next_idx = next_node_index.fetch_add(1, Ordering::SeqCst);
@@ -756,9 +756,9 @@ async fn run_memory_optimized_node(
             // 添加重试机制，确保消息能够发送成功
             let mut retry_count = 0;
             let max_retries = 3;
-            let mut notification_sent = false;
+            let mut success = false;
             
-            while retry_count < max_retries && !notification_sent {
+            while retry_count < max_retries && !success {
                 // 确保消息发送成功 - 使用超时机制
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(2), 
@@ -766,7 +766,7 @@ async fn run_memory_optimized_node(
                 ).await {
                     Ok(Ok(_)) => {
                         println!("📣 节点-{}: 已成功通知节点管理器节点停止", node_id);
-                        notification_sent = true;
+                        success = true;
                         break;
                     },
                     Ok(Err(e)) => {
