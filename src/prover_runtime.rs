@@ -16,7 +16,7 @@ use ed25519_dalek::SigningKey;
 use nexus_sdk::stwo::seq::Proof;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
 use std::time::Duration;
 use parking_lot::Mutex;
 use once_cell::sync::Lazy;
@@ -188,6 +188,14 @@ pub async fn start_optimized_batch_workers(
     
     // 创建一个跟踪活跃线程的映射
     let active_threads = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
+    
+    // 初始化所有节点为未启动状态
+    {
+        let mut active_threads_guard = active_threads.lock();
+        for &node_id in &nodes {
+            active_threads_guard.insert(node_id, false);
+        }
+    }
     
     // 创建一个用于节点管理器和工作线程之间通信的通道
     let (node_tx, node_rx) = mpsc::channel::<NodeManagerCommand>(100);
@@ -407,6 +415,15 @@ async fn node_manager(
 ) {
     println!("🔄 节点管理器启动");
     
+    // 获取最大并发数
+    let max_concurrent = if let Some((_, _, _, _, _, max_concurrent)) = &rotation_data {
+        *max_concurrent
+    } else {
+        10 // 默认值
+    };
+    
+    println!("🔄 节点管理器: 最大并发数设置为 {}", max_concurrent);
+    
     // 添加一个定期检查标志，避免过于频繁的检查
     let mut last_check_time = std::time::Instant::now();
     let check_interval = std::time::Duration::from_secs(1); // 减少检查间隔为1秒
@@ -446,36 +463,59 @@ async fn node_manager(
                     // 获取需要启动的节点列表
                     let new_nodes = get_nodes_to_start(&active_nodes_clone, &active_threads_clone).await;
                     
-                    // 为每个待启动节点创建新的工作线程
-                    for node_id in new_nodes {
-                        println!("🌐 全局通信: 准备启动节点-{}", node_id);
+                    // 检查当前活动节点数量
+                    let current_active_count = {
+                        let active_threads_guard = active_threads_clone.lock();
+                        active_threads_guard.iter().filter(|(_, &active)| active).count()
+                    };
+                    
+                    // 只有当活动节点数量低于最大并发数时才启动新节点
+                    if current_active_count < max_concurrent {
+                        // 计算可以启动的节点数量
+                        let nodes_to_start_count = (max_concurrent - current_active_count).min(new_nodes.len());
                         
-                        // 使用全局通信通道的克隆
-                        let node_tx = global_tx_clone.clone();
-                        
-                        // 启动新节点
-                        let handle = start_node_worker(
-                            node_id,
-                            env_clone.clone(),
-                            proxy_clone.clone(),
-                            num_workers_per_node,
-                            proof_interval,
-                            callback_clone.clone(),
-                            event_sender_clone.clone(),
-                            shutdown_clone.resubscribe(), // 使用克隆的shutdown
-                            rotation_clone.clone(),
-                            active_threads_clone.clone(),
-                            node_tx,
-                        ).await;
-                        
-                        // 这里不需要存储handle，因为我们只关心节点是否在运行
-                        tokio::spawn(async move {
-                            let _ = handle.await;
-                            println!("⚠️ 节点工作线程已完成");
-                        });
-                        
-                        // 添加一个短暂的延迟，避免同时启动太多节点
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        if nodes_to_start_count > 0 {
+                            println!("🌐 全局通信: 当前活动节点数量: {}, 最大并发数: {}, 将启动 {} 个新节点", 
+                                    current_active_count, max_concurrent, nodes_to_start_count);
+                            
+                            // 只启动需要的节点数量
+                            for node_id in new_nodes.iter().take(nodes_to_start_count) {
+                                println!("🌐 全局通信: 准备启动节点-{}", node_id);
+                                
+                                // 使用全局通信通道的克隆
+                                let node_tx = global_tx_clone.clone();
+                                
+                                // 启动新节点
+                                let handle = start_node_worker(
+                                    *node_id,
+                                    env_clone.clone(),
+                                    proxy_clone.clone(),
+                                    num_workers_per_node,
+                                    proof_interval,
+                                    callback_clone.clone(),
+                                    event_sender_clone.clone(),
+                                    shutdown_clone.resubscribe(), // 使用克隆的shutdown
+                                    rotation_clone.clone(),
+                                    active_threads_clone.clone(),
+                                    node_tx,
+                                ).await;
+                                
+                                // 这里不需要存储handle，因为我们只关心节点是否在运行
+                                tokio::spawn(async move {
+                                    let _ = handle.await;
+                                    println!("⚠️ 节点工作线程已完成");
+                                });
+                                
+                                // 添加一个短暂的延迟，避免同时启动太多节点
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                        } else {
+                            println!("🌐 全局通信: 当前活动节点数量: {}, 最大并发数: {}, 无需启动新节点", 
+                                    current_active_count, max_concurrent);
+                        }
+                    } else {
+                        println!("🌐 全局通信: 当前活动节点数量: {} 已达到或超过最大并发数: {}, 不启动新节点", 
+                                current_active_count, max_concurrent);
                     }
                 },
                 NodeManagerCommand::NodeStarted(node_id) => {
@@ -493,38 +533,63 @@ async fn node_manager(
     loop {
         // 首先检查是否有需要启动的节点
         if !nodes_to_start.is_empty() {
-            println!("🔄 节点管理器: 发现 {} 个待启动节点，立即启动", nodes_to_start.len());
+            // 检查当前活动节点数量
+            let current_active_count = {
+                let active_threads_guard = active_threads.lock();
+                active_threads_guard.iter().filter(|(_, &active)| active).count()
+            };
             
-            // 为每个待启动节点创建新的工作线程
-            for node_id in nodes_to_start.drain(..) {
-                println!("🔄 节点管理器: 准备启动节点-{}", node_id);
+            // 只有当活动节点数量低于最大并发数时才启动新节点
+            if current_active_count < max_concurrent {
+                // 计算可以启动的节点数量
+                let nodes_to_start_count = (max_concurrent - current_active_count).min(nodes_to_start.len());
                 
-                // 使用全局通信通道
-                let node_tx = global_tx.clone();
-                
-                // 启动新节点
-                let handle = start_node_worker(
-                    node_id,
-                    environment.clone(),
-                    proxy_file.clone(),
-                    num_workers_per_node,
-                    proof_interval,
-                    status_callback_arc.clone(),
-                    event_sender.clone(),
-                    shutdown.resubscribe(),
-                    rotation_data.clone(),
-                    active_threads.clone(),
-                    node_tx,
-                ).await;
-                
-                // 这里不需要存储handle，因为我们只关心节点是否在运行
-                tokio::spawn(async move {
-                    let _ = handle.await;
-                    println!("⚠️ 节点工作线程已完成");
-                });
-                
-                // 添加一个短暂的延迟，避免同时启动太多节点
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if nodes_to_start_count > 0 {
+                    println!("🔄 节点管理器: 当前活动节点数量: {}, 最大并发数: {}, 将启动 {} 个新节点", 
+                            current_active_count, max_concurrent, nodes_to_start_count);
+                    
+                    // 只启动需要的节点数量
+                    let nodes_to_launch: Vec<u64> = nodes_to_start.drain(..nodes_to_start_count).collect();
+                    
+                    for node_id in nodes_to_launch {
+                        println!("🔄 节点管理器: 准备启动节点-{}", node_id);
+                        
+                        // 使用全局通信通道
+                        let node_tx = global_tx.clone();
+                        
+                        // 启动新节点
+                        let handle = start_node_worker(
+                            node_id,
+                            environment.clone(),
+                            proxy_file.clone(),
+                            num_workers_per_node,
+                            proof_interval,
+                            status_callback_arc.clone(),
+                            event_sender.clone(),
+                            shutdown.resubscribe(),
+                            rotation_data.clone(),
+                            active_threads.clone(),
+                            node_tx,
+                        ).await;
+                        
+                        // 这里不需要存储handle，因为我们只关心节点是否在运行
+                        tokio::spawn(async move {
+                            let _ = handle.await;
+                            println!("⚠️ 节点工作线程已完成");
+                        });
+                        
+                        // 添加一个短暂的延迟，避免同时启动太多节点
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                } else {
+                    println!("🔄 节点管理器: 当前活动节点数量: {}, 最大并发数: {}, 无需启动新节点", 
+                            current_active_count, max_concurrent);
+                    nodes_to_start.clear(); // 清空启动队列
+                }
+            } else {
+                println!("🔄 节点管理器: 当前活动节点数量: {} 已达到或超过最大并发数: {}, 不启动新节点", 
+                        current_active_count, max_concurrent);
+                nodes_to_start.clear(); // 清空启动队列
             }
         }
         
@@ -585,14 +650,58 @@ async fn node_manager(
             _ = tokio::time::sleep(check_interval) => {
                 // 定期检查是否有需要启动的新节点，但不要太频繁
                 if last_check_time.elapsed() >= check_interval {
-                    // 获取需要启动的节点列表（不输出日志）
+                    // 检查当前活动节点数量
+                    let current_active_count = {
+                        let active_threads_guard = active_threads.lock();
+                        active_threads_guard.iter().filter(|(_, &active)| active).count()
+                    };
+                    
+                    // 检查活动节点列表
+                    let active_nodes_count = {
+                        let active_nodes_guard = active_nodes.lock();
+                        let count = active_nodes_guard.len();
+                        
+                        // 如果活动节点列表长度超过最大并发数，进行修正
+                        if count > max_concurrent {
+                            println!("⚠️ 节点管理器: 活动节点列表长度 ({}) 超过最大并发数 ({}), 进行修正", 
+                                    count, max_concurrent);
+                            
+                            // 在这里不修改，因为我们还持有锁
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    
+                    // 如果需要修正活动节点列表
+                    if active_nodes_count {
+                        let mut active_nodes_guard = active_nodes.lock();
+                        // 保留前max_concurrent个节点
+                        if active_nodes_guard.len() > max_concurrent {
+                            active_nodes_guard.truncate(max_concurrent);
+                            println!("✅ 节点管理器: 活动节点列表已修正为 {} 个节点", active_nodes_guard.len());
+                        }
+                    }
+                    
+                    // 输出当前状态
+                    println!("🔄 节点管理器: 定期检查 - 活动线程数: {}, 最大并发数: {}", 
+                            current_active_count, max_concurrent);
+                    
+                    // 获取需要启动的节点列表
                     let new_nodes = get_nodes_to_start(&active_nodes, &active_threads).await;
                     
-                    // 只有在有新节点需要启动时才输出日志
-                    if !new_nodes.is_empty() {
-                        println!("🔄 节点管理器: 发现 {} 个需要启动的新节点", new_nodes.len());
-                        // 将新节点添加到启动队列
-                        nodes_to_start.extend(new_nodes);
+                    // 只有在有新节点需要启动且活动节点数量低于最大并发数时才添加到启动队列
+                    if !new_nodes.is_empty() && current_active_count < max_concurrent {
+                        // 计算可以启动的节点数量
+                        let nodes_to_start_count = (max_concurrent - current_active_count).min(new_nodes.len());
+                        
+                        if nodes_to_start_count > 0 {
+                            println!("🔄 节点管理器: 发现 {} 个需要启动的新节点，将启动 {} 个", 
+                                    new_nodes.len(), nodes_to_start_count);
+                            
+                            // 只添加需要的节点数量
+                            nodes_to_start.extend(new_nodes.iter().take(nodes_to_start_count).cloned());
+                        }
                     }
                     
                     // 更新最后检查时间
@@ -621,8 +730,12 @@ async fn get_nodes_to_start(
         }
     }
     
+    // 计算当前活动节点数量
+    let active_count = active_threads_guard.iter().filter(|(_, &active)| active).count();
+    
     if !to_start.is_empty() {
         println!("🔄 节点管理器: 发现 {} 个未运行的节点需要启动: {:?}", to_start.len(), to_start);
+        println!("🔄 节点管理器: 当前活动节点数量: {}", active_count);
     }
     
     to_start
@@ -675,6 +788,7 @@ async fn rotate_to_next_node(
             {
                 let active_nodes_guard = active_nodes.lock();
                 println!("📋 节点-{}: 轮转前活动节点列表: {:?}", node_id, *active_nodes_guard);
+                println!("📋 节点-{}: 活动节点数量: {}, 最大并发数: {}", node_id, active_nodes_guard.len(), *max_concurrent);
             }
             
             // 查找当前节点在活动列表中的位置，并更新节点
@@ -699,6 +813,12 @@ async fn rotate_to_next_node(
                     if active_nodes_guard.len() >= *max_concurrent {
                         println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 不添加新节点", node_id, *max_concurrent);
                         return (false, Some(format!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 不添加新节点", node_id, *max_concurrent)));
+                    }
+                    
+                    // 检查新节点是否已经在活动列表中
+                    if active_nodes_guard.contains(&final_next_node_id) {
+                        println!("⚠️ 节点-{}: 新节点-{} 已经在活动列表中，不重复添加", node_id, final_next_node_id);
+                        return (false, Some(format!("⚠️ 节点-{}: 新节点-{} 已经在活动列表中，不重复添加", node_id, final_next_node_id)));
                     }
                     
                     // 如果活动列表未满，添加新节点
@@ -891,6 +1011,16 @@ async fn run_memory_optimized_node(
     _active_threads: Arc<Mutex<HashMap<u64, bool>>>,
     node_tx: mpsc::Sender<NodeManagerCommand>,
 ) {
+    // 创建一个停止标志，用于强制退出循环
+    let should_stop = Arc::new(AtomicBool::new(false));
+    let should_stop_clone = should_stop.clone();
+    
+    // 创建一个任务来监听停止信号
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        should_stop_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+    
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
     const MAX_TASK_RETRIES: usize = 5; // 增加到5次
     const MAX_429_RETRIES: usize = 12; // 专门针对429错误的重试次数
@@ -928,6 +1058,15 @@ async fn run_memory_optimized_node(
     let _ = node_tx.send(NodeManagerCommand::NodeStarted(node_id)).await;
     
     loop {
+        // 检查停止标志
+        if should_stop.load(std::sync::atomic::Ordering::SeqCst) {
+            update_status("🛑 收到停止信号，正在停止...".to_string());
+            // 通知节点管理器当前节点已停止
+            let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+            println!("🛑 节点-{}: 强制停止", node_id);
+            break;
+        }
+        
         // 首先检查关闭信号
         if shutdown.try_recv().is_ok() {
             update_status("已停止".to_string());
@@ -1019,7 +1158,12 @@ async fn run_memory_optimized_node(
                                         // 发送一个显式的停止消息，确保节点真正停止
                                         let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
                                         println!("🛑 节点-{}: 轮转后显式停止", node_id);
-                                        return; // 结束当前节点的处理
+                                        
+                                        // 设置停止标志
+                                        should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        
+                                        // 强制退出当前节点的处理循环
+                                        return;
                                     }
                                     
                                     break;
@@ -1050,7 +1194,12 @@ async fn run_memory_optimized_node(
                                                 // 发送一个显式的停止消息，确保节点真正停止
                                                 let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
                                                 println!("🛑 节点-{}: 轮转后显式停止", node_id);
-                                                return; // 结束当前节点的处理
+                                                
+                                                // 设置停止标志
+                                                should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                
+                                                // 强制退出当前节点的处理循环
+                                                return;
                                             }
                                         } else {
                                             println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
@@ -1180,7 +1329,12 @@ async fn run_memory_optimized_node(
                                         // 发送一个显式的停止消息，确保节点真正停止
                                         let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
                                         println!("🛑 节点-{}: 轮转后显式停止", node_id);
-                                        return; // 结束当前节点的处理
+                                        
+                                        // 设置停止标志
+                                        should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        
+                                        // 强制退出当前节点的处理循环
+                                        return;
                                     } else {
                                         println!("🔍 节点-{}: 轮转结果: should_rotate=false", node_id);
                                     }
@@ -1216,7 +1370,12 @@ async fn run_memory_optimized_node(
                                                 // 发送一个显式的停止消息，确保节点真正停止
                                                 let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
                                                 println!("🛑 节点-{}: 轮转后显式停止", node_id);
-                                                return; // 结束当前节点的处理
+                                                
+                                                // 设置停止标志
+                                                should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                
+                                                // 强制退出当前节点的处理循环
+                                                return;
                                             }
                                         } else {
                                             println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次)", 
