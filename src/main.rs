@@ -163,10 +163,13 @@ impl FixedLineDisplay {
 
     async fn update_node_status(&self, node_id: u64, status: String) {
         // 检查是否是成功或失败状态，并更新计数
-        if status.contains("证明提交成功") || status.contains("✅ 证明 #") || status.contains("完成 (成功:") {
+        // 只在明确的证明提交成功时计数，避免重复计数
+        if status.contains("证明提交成功") || status.contains("✅ 证明 #") && !status.contains("轮转") {
             self.success_count.fetch_add(1, Ordering::Relaxed);
+            println!("📈 增加成功计数: 当前成功总数: {}", self.success_count.load(Ordering::Relaxed));
         } else if status.contains("失败") || status.contains("错误") {
             self.failure_count.fetch_add(1, Ordering::Relaxed);
+            println!("📉 增加失败计数: 当前失败总数: {}", self.failure_count.load(Ordering::Relaxed));
         }
         
         let needs_update = {

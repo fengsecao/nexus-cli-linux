@@ -345,7 +345,78 @@ async fn node_manager(
     let mut nodes_to_start = Vec::new();
     
     // 创建一个全局通信通道，用于节点间通信
-    let (global_tx, _) = mpsc::channel::<NodeManagerCommand>(100); // 增大缓冲区大小
+    let (global_tx, mut global_rx) = mpsc::channel::<NodeManagerCommand>(100); // 增大缓冲区大小
+    
+    // 创建一个任务来处理全局通信通道的消息
+    let active_threads_clone = active_threads.clone();
+    let active_nodes_clone = active_nodes.clone();
+    let env_clone = environment.clone();
+    let proxy_clone = proxy_file.clone();
+    let callback_clone = status_callback_arc.clone();
+    let event_sender_clone = event_sender.clone();
+    let rotation_clone = rotation_data.clone();
+    
+    // 启动一个后台任务来处理全局通信通道的消息
+    tokio::spawn(async move {
+        while let Some(cmd) = global_rx.recv().await {
+            match cmd {
+                NodeManagerCommand::NodeStopped(node_id) => {
+                    println!("🌐 全局通信: 节点-{} 已停止", node_id);
+                    // 在单独作用域内更新状态，避免跨await持有锁
+                    {
+                        let mut active_threads_guard = active_threads_clone.lock();
+                        active_threads_guard.insert(node_id, false);
+                    }
+                    
+                    // 立即检查是否有新节点需要启动
+                    println!("🌐 全局通信: 节点-{} 已停止，检查是否需要启动新节点", node_id);
+                    
+                    // 获取需要启动的节点列表
+                    let new_nodes = get_nodes_to_start(&active_nodes_clone, &active_threads_clone).await;
+                    
+                    // 为每个待启动节点创建新的工作线程
+                    for node_id in new_nodes {
+                        println!("🌐 全局通信: 准备启动节点-{}", node_id);
+                        
+                        // 使用全局通信通道
+                        let node_tx = global_tx.clone();
+                        
+                        // 启动新节点
+                        let handle = start_node_worker(
+                            node_id,
+                            env_clone.clone(),
+                            proxy_clone.clone(),
+                            num_workers_per_node,
+                            proof_interval,
+                            callback_clone.clone(),
+                            event_sender_clone.clone(),
+                            shutdown.resubscribe(),
+                            rotation_clone.clone(),
+                            active_threads_clone.clone(),
+                            node_tx,
+                        ).await;
+                        
+                        // 这里不需要存储handle，因为我们只关心节点是否在运行
+                        tokio::spawn(async move {
+                            let _ = handle.await;
+                            println!("⚠️ 节点工作线程已完成");
+                        });
+                        
+                        // 添加一个短暂的延迟，避免同时启动太多节点
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                },
+                NodeManagerCommand::NodeStarted(node_id) => {
+                    println!("🌐 全局通信: 节点-{} 已启动", node_id);
+                    // 在单独作用域内更新状态，避免跨await持有锁
+                    {
+                        let mut active_threads_guard = active_threads_clone.lock();
+                        active_threads_guard.insert(node_id, true);
+                    }
+                }
+            }
+        }
+    });
     
     loop {
         // 首先检查是否有需要启动的节点
@@ -399,6 +470,9 @@ async fn node_manager(
                             let mut active_threads_guard = active_threads.lock();
                             active_threads_guard.insert(node_id, true);
                         }
+                        
+                        // 同时发送到全局通道
+                        let _ = global_tx.send(NodeManagerCommand::NodeStarted(node_id)).await;
                     }
                     Some(NodeManagerCommand::NodeStopped(node_id)) => {
                         println!("🛑 节点管理器: 节点-{} 已停止", node_id);
@@ -407,6 +481,9 @@ async fn node_manager(
                             let mut active_threads_guard = active_threads.lock();
                             active_threads_guard.insert(node_id, false);
                         }
+                        
+                        // 同时发送到全局通道
+                        let _ = global_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
                         
                         // 立即检查是否有新节点需要启动
                         println!("🔄 节点管理器: 节点-{} 已停止，检查是否需要启动新节点", node_id);
@@ -421,8 +498,8 @@ async fn node_manager(
                         last_check_time = std::time::Instant::now();
                     }
                     None => {
-                        println!("⚠️ 节点管理器: 通信通道已关闭，退出");
-                        break;
+                        println!("⚠️ 节点管理器: 通信通道已关闭，但全局通道仍然可用");
+                        // 不要退出，继续使用全局通道
                     }
                 }
             }
@@ -615,15 +692,9 @@ async fn run_memory_optimized_node(
         println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
         
         if let Some((active_nodes, next_node_index, all_nodes)) = rotation_data {
-            // 获取下一个可用节点ID
-            let next_idx = next_node_index.fetch_add(1, Ordering::SeqCst);
+            // 获取下一个可用节点ID - 只增加1，不跳过
+            let next_idx = next_node_index.fetch_add(1, Ordering::SeqCst) % all_nodes.len() as u64;
             println!("📊 节点-{}: 当前节点索引: {}, 总节点数: {}", node_id, next_idx, all_nodes.len());
-            
-            if next_idx as usize >= all_nodes.len() {
-                // 已经没有更多节点可用
-                println!("\n⚠️ 节点-{}: 无更多可用节点，无法轮转 (原因: {})\n", node_id, reason);
-                return (false, None);
-            }
             
             let next_node_id = all_nodes[next_idx as usize];
             println!("🔄 节点-{}: 将轮转到节点-{}", node_id, next_node_id);
@@ -664,9 +735,9 @@ async fn run_memory_optimized_node(
             // 添加重试机制，确保消息能够发送成功
             let mut retry_count = 0;
             let max_retries = 3;
-            let mut success = false;
+            let _success = false; // 移除可变性，使用下划线前缀标记
             
-            while retry_count < max_retries && !success {
+            while retry_count < max_retries {
                 // 确保消息发送成功 - 使用超时机制
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(2), 
@@ -807,6 +878,7 @@ async fn run_memory_optimized_node(
                                     let msg = format!("[{}] ✅ 缓存证明提交成功! 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
                                     
+                                    // 确保使用正确的事件类型记录成功
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
@@ -958,6 +1030,7 @@ async fn run_memory_optimized_node(
                                     let msg = format!("[{}] ✅ 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
                                     
+                                    // 确保使用正确的事件类型记录成功
                                     send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
                                     
                                     println!("\n🔍 节点-{}: 证明提交成功，准备轮转...", node_id);
