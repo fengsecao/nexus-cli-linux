@@ -831,7 +831,7 @@ async fn handle_submission_success(
                     "Proof submitted successfully for task {} (成功: {}次)",
                     task.task_id, success_count
                 ),
-                crate::events::EventType::Success,
+                crate::events::EventType::ProofSubmitted, // 使用ProofSubmitted事件类型，确保正确计数
             ))
             .await;
     } else {
@@ -842,7 +842,7 @@ async fn handle_submission_success(
                     "Proof submitted successfully for task {}",
                     task.task_id
                 ),
-                crate::events::EventType::Success,
+                crate::events::EventType::ProofSubmitted, // 使用ProofSubmitted事件类型，确保正确计数
             ))
             .await;
     }
