@@ -821,8 +821,8 @@ async fn handle_submission_success(
     if let Ok(node_id) = node_id_str.parse::<u64>() {
         rate_limit_tracker.reset_429_count(node_id).await;
         
-        // 增加成功计数
-        let success_count = rate_limit_tracker.increment_success_count(node_id).await;
+        // 获取成功计数（不再增加计数，避免重复计数）
+        let success_count = rate_limit_tracker.get_success_count(node_id).await;
         
         // Log the success
         let _ = event_sender

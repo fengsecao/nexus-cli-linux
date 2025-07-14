@@ -212,10 +212,14 @@ pub async fn start_optimized_batch_workers(
             let mut active_nodes_guard = active_nodes.lock();
             let mut node_indices_guard = node_indices.lock();
             
+            // 确保使用前actual_concurrent个节点（按照索引顺序）
+            let mut sorted_nodes: Vec<(usize, u64)> = nodes.iter().enumerate().map(|(idx, &id)| (idx, id)).collect();
+            sorted_nodes.sort_by_key(|(idx, _)| *idx);
+            
             // 只添加前actual_concurrent个节点到活动队列
-            for (idx, node_id) in nodes.iter().enumerate().take(actual_concurrent) {
+            for (idx, node_id) in sorted_nodes.iter().take(actual_concurrent) {
                 active_nodes_guard.push(*node_id);
-                node_indices_guard.insert(*node_id, idx);
+                node_indices_guard.insert(*node_id, *idx);
                 println!("🔄 添加节点-{} 到活动节点队列 (索引: {})", node_id, idx);
                 
                 // 标记节点为未启动
@@ -224,8 +228,8 @@ pub async fn start_optimized_batch_workers(
             }
             
             // 初始化剩余节点的索引映射
-            for (idx, node_id) in nodes.iter().enumerate().skip(actual_concurrent) {
-                node_indices_guard.insert(*node_id, idx);
+            for (idx, node_id) in sorted_nodes.iter().skip(actual_concurrent) {
+                node_indices_guard.insert(*node_id, *idx);
             }
             
             println!("🔄 初始活动节点队列: {:?}", *active_nodes_guard);
@@ -314,8 +318,19 @@ pub async fn start_optimized_batch_workers(
     // 创建节点管理器通信通道的克隆，用于节点通信
     let node_tx_for_nodes = node_tx.clone();
 
+    // 获取活动节点列表
+    let active_nodes_list = if let Some((active_nodes, _, _, _, _, _)) = &rotation_data {
+        let active_nodes_guard = active_nodes.lock();
+        active_nodes_guard.clone()
+    } else {
+        // 如果未启用轮转，则使用前actual_concurrent个节点
+        nodes.iter().take(actual_concurrent).copied().collect()
+    };
+    
+    println!("🔄 准备按顺序启动以下节点: {:?}", active_nodes_list);
+
     // 按序启动各节点
-    for (index, node_id) in nodes.iter().enumerate().take(actual_concurrent) {
+    for (index, node_id) in active_nodes_list.iter().enumerate() {
         // 添加启动延迟
         if index > 0 {
             // 使用更长的延迟，特别是对于前几个节点
@@ -541,7 +556,7 @@ async fn node_manager(
                         let _ = global_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
                         
                         // 立即检查是否有新节点需要启动
-                        println!("🔄 节点管理器: 节点-{} 已停止，检查是否需要启动新节点", node_id);
+                        println!("🔄 节点管理器: 节点-{} 已停止，准备启动新节点", node_id);
                         
                         // 获取需要启动的节点列表
                         let new_nodes = get_nodes_to_start(&active_nodes, &active_threads).await;
@@ -568,13 +583,15 @@ async fn node_manager(
             _ = tokio::time::sleep(check_interval) => {
                 // 定期检查是否有需要启动的新节点，但不要太频繁
                 if last_check_time.elapsed() >= check_interval {
-                    println!("🔄 节点管理器: 定期检查是否有需要启动的新节点");
-                    
-                    // 获取需要启动的节点列表
+                    // 获取需要启动的节点列表（不输出日志）
                     let new_nodes = get_nodes_to_start(&active_nodes, &active_threads).await;
                     
-                    // 将新节点添加到启动队列
-                    nodes_to_start.extend(new_nodes);
+                    // 只有在有新节点需要启动时才输出日志
+                    if !new_nodes.is_empty() {
+                        println!("🔄 节点管理器: 发现 {} 个需要启动的新节点", new_nodes.len());
+                        // 将新节点添加到启动队列
+                        nodes_to_start.extend(new_nodes);
+                    }
                     
                     // 更新最后检查时间
                     last_check_time = std::time::Instant::now();
