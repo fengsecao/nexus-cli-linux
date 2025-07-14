@@ -255,8 +255,8 @@ pub fn render_dashboard(f: &mut Frame, state: &DashboardState) {
     f.render_widget(log_widget, body_chunks[1]);
 
     // Footer
-    let footer = Paragraph::new("[Q] Quit")
-        .alignment(Alignment::Center) // ← Horizontally center the text
+    let footer = Paragraph::new("")  // 移除了 "[Q] Quit" 文本
+        .alignment(Alignment::Center)
         .style(
             Style::default()
                 .fg(Color::Cyan)

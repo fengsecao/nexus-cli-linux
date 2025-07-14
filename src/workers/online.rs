@@ -57,6 +57,7 @@ impl NodeRateLimitTracker {
     }
 
     /// 获取指定节点的当前429计数
+    #[allow(dead_code)]
     pub async fn get_429_count(&self, node_id: u64) -> u32 {
         let counts = self.node_429_counts.lock().await;
         *counts.get(&node_id).unwrap_or(&0)
@@ -147,6 +148,7 @@ impl TaskFetchState {
     }
 
     // 获取当前429连续计数
+    #[allow(dead_code)]
     pub fn get_429_count(&self) -> u32 {
         self.consecutive_429s
     }

@@ -50,6 +50,8 @@ use log::warn;
 use std::sync::atomic::{AtomicU64, Ordering};
 use rand;
 use env_logger;
+use std::time::Duration;
+use chrono::Local;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -233,17 +235,13 @@ impl FixedLineDisplay {
                 (new_total, new_active)
             });
         
-        // 计算运行时间
-        let runtime = self.start_time.elapsed();
-        let days = runtime.as_secs() / 86400;
-        let hours = (runtime.as_secs() % 86400) / 3600;
-        let minutes = (runtime.as_secs() % 3600) / 60;
-        let seconds = runtime.as_secs() % 60;
-        
         println!("📊 状态: {} 总数 | {} 活跃 | {} 成功 | {} 失败", 
                  total_nodes, active_count, successful_count, failed_count);
         println!("⏱️ 运行时间: {}天 {}小时 {}分钟 {}秒", 
-                 days, hours, minutes, seconds);
+                 self.start_time.elapsed().as_secs() / 86400,
+                 (self.start_time.elapsed().as_secs() % 86400) / 3600,
+                 (self.start_time.elapsed().as_secs() % 3600) / 60,
+                 self.start_time.elapsed().as_secs() % 60);
         
         // 显示内存统计
         let stats = self.defragmenter.get_stats().await;
@@ -251,11 +249,11 @@ impl FixedLineDisplay {
         let memory_percentage = (memory_info.0 as f64 / memory_info.1 as f64) * 100.0;
         
         println!("🧠 内存: {:.1}% ({} MB / {} MB) | 清理次数: {} | 释放: {} KB", 
-                memory_percentage, 
-                memory_info.0 / 1000,  // 转为MB并保留3位小数
-                memory_info.1 / 1000,
-                stats.cleanups_performed,
-                stats.bytes_freed / 1024);
+               memory_percentage, 
+               memory_info.0 / 1024 / 1024,  
+               memory_info.1 / 1024 / 1024,
+               stats.cleanups_performed,
+               stats.bytes_freed / 1024);
         
         println!("───────────────────────────────────────────");
         
@@ -268,7 +266,6 @@ impl FixedLineDisplay {
         }
         
         println!("───────────────────────────────────────────");
-        println!("💡 按 Ctrl+C 停止所有挖矿节点");
         
         // 归还缓存字符串
         self.defragmenter.return_string(time_str).await;

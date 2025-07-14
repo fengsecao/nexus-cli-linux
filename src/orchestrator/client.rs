@@ -188,7 +188,7 @@ impl ProxyManager {
     pub fn next_proxy(&self) -> Option<ProxyInfo> {
         let proxies = self.proxies.lock().unwrap();
         if proxies.is_empty() {
-            warn!("代理列表为空");
+            // 不输出警告，因为这可能是正常情况（用户选择不使用代理）
             return None;
         }
 
@@ -197,6 +197,7 @@ impl ProxyManager {
         let selected = proxies.choose(&mut rng).cloned();
         
         if selected.is_none() {
+            // 只有在代理列表不为空但无法选择代理时才输出警告
             warn!("无法从代理列表中选择代理");
         }
         
@@ -300,21 +301,20 @@ impl OrchestratorClient {
 
     /// 获取或分配节点的代理
     fn get_or_assign_proxy(&self, node_id: &str) -> Option<ProxyInfo> {
-        // 先尝试获取已分配的代理
+        // 首先尝试获取已分配的代理
         if let Some(proxy) = self.node_proxy_state.get_proxy(node_id) {
-            info!("节点 {} 使用已分配的代理: {} ({})", node_id, proxy.url, proxy.country);
             return Some(proxy);
         }
         
-        // 如果没有分配过代理，随机分配一个
-        if let Some(proxy) = self.proxy_manager.next_proxy() {
-            info!("为节点 {} 分配新代理: {} ({})", node_id, proxy.url, proxy.country);
-            self.node_proxy_state.set_proxy(node_id, proxy.clone());
-            return Some(proxy);
+        // 如果没有已分配的代理，尝试分配一个新的
+        if let Some(new_proxy) = self.proxy_manager.next_proxy() {
+            info!("节点 {} 分配新代理: {} ({})", node_id, new_proxy.url, new_proxy.country);
+            self.node_proxy_state.set_proxy(node_id, new_proxy.clone());
+            Some(new_proxy)
+        } else {
+            // 没有可用代理，使用直连（无需警告）
+            None
         }
-        
-        warn!("无法为节点 {} 分配代理", node_id);
-        None
     }
     
     /// 为节点更换代理
@@ -364,19 +364,15 @@ impl OrchestratorClient {
             .expect("Failed to create HTTP client")
     }
 
-    /// 创建带有代理的HTTP客户端（基于节点ID）
+    /// 根据节点ID创建带有代理的客户端
     async fn create_client_with_node_proxy(&self, node_id: &str) -> Client {
-        // 尝试获取或分配代理
         if let Some(proxy_info) = self.get_or_assign_proxy(node_id) {
-            return self.create_client_with_proxy_info(&proxy_info).await;
+            // 有代理配置，使用代理
+            self.create_client_with_proxy_info(&proxy_info).await
+        } else {
+            // 无代理配置，使用默认客户端
+            self.get_default_client().await
         }
-        
-        // 如果没有可用代理，使用默认客户端
-        info!("节点 {} 没有可用代理，使用默认连接", node_id);
-        ClientBuilder::new()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("Failed to create HTTP client")
     }
 
     /// 检查是否是需要重试的错误（如429或网络错误）
