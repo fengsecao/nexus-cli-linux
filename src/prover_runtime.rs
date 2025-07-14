@@ -466,7 +466,13 @@ async fn node_manager(
                     // 检查当前活动节点数量
                     let current_active_count = {
                         let active_threads_guard = active_threads_clone.lock();
-                        active_threads_guard.iter().filter(|(_, &active)| active).count()
+                        let mut count = 0;
+                        for (_, &active) in active_threads_guard.iter() {
+                            if active {
+                                count += 1;
+                            }
+                        }
+                        count
                     };
                     
                     // 只有当活动节点数量低于最大并发数时才启动新节点
@@ -536,7 +542,13 @@ async fn node_manager(
             // 检查当前活动节点数量
             let current_active_count = {
                 let active_threads_guard = active_threads.lock();
-                active_threads_guard.iter().filter(|(_, &active)| active).count()
+                let mut count = 0;
+                for (_, &active) in active_threads_guard.iter() {
+                    if active {
+                        count += 1;
+                    }
+                }
+                count
             };
             
             // 只有当活动节点数量低于最大并发数时才启动新节点
@@ -653,7 +665,13 @@ async fn node_manager(
                     // 检查当前活动节点数量
                     let current_active_count = {
                         let active_threads_guard = active_threads.lock();
-                        active_threads_guard.iter().filter(|(_, &active)| active).count()
+                        let mut count = 0;
+                        for (_, &active) in active_threads_guard.iter() {
+                            if active {
+                                count += 1;
+                            }
+                        }
+                        count
                     };
                     
                     // 检查活动节点列表
@@ -731,7 +749,12 @@ async fn get_nodes_to_start(
     }
     
     // 计算当前活动节点数量
-    let active_count = active_threads_guard.iter().filter(|(_, &active)| active).count();
+    let mut active_count = 0;
+    for (_, &active) in active_threads_guard.iter() {
+        if active {
+            active_count += 1;
+        }
+    }
     
     if !to_start.is_empty() {
         println!("🔄 节点管理器: 发现 {} 个未运行的节点需要启动: {:?}", to_start.len(), to_start);
