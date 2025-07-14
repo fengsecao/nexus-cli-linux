@@ -643,6 +643,7 @@ async fn start_batch_processing(
         Some(status_callback),
         proxy_file,
         rotation,
+        max_concurrent, // 添加max_concurrent参数
     ).await;
     
     // 创建消费事件的任务

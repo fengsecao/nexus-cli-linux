@@ -163,6 +163,7 @@ pub async fn start_optimized_batch_workers(
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
     proxy_file: Option<String>,
     rotation: bool,
+    max_concurrent: usize, // 添加max_concurrent参数
 ) -> (mpsc::Receiver<Event>, Vec<JoinHandle<()>>) {
     // Worker事件
     let (event_sender, event_receiver) = mpsc::channel::<Event>(EVENT_QUEUE_SIZE);
@@ -182,8 +183,8 @@ pub async fn start_optimized_batch_workers(
     tokio::time::sleep(std::time::Duration::from_secs_f64(initial_delay)).await;
     
     // 计算实际并发数（最大并发数与节点数量的较小值）
-    let actual_concurrent = num_workers_per_node.min(nodes.len());
-    println!("🧮 设置的并发数: {}, 实际并发数: {}", num_workers_per_node, actual_concurrent);
+    let actual_concurrent = max_concurrent.min(nodes.len());
+    println!("🧮 设置的并发数: {}, 实际并发数: {}", max_concurrent, actual_concurrent);
     
     // 创建一个跟踪活跃线程的映射
     let active_threads = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
