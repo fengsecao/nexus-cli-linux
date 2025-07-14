@@ -500,8 +500,15 @@ async fn node_manager(
                         last_check_time = std::time::Instant::now();
                     }
                     None => {
-                        println!("⚠️ 节点管理器: 通信通道已关闭，但全局通道仍然可用");
-                        // 不要退出，继续使用全局通道
+                        // 只在第一次检测到通道关闭时输出警告，然后退出循环
+                        static CHANNEL_CLOSED_WARNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        
+                        if !CHANNEL_CLOSED_WARNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                            println!("⚠️ 节点管理器: 主通信通道已关闭，切换到全局通道");
+                        }
+                        
+                        // 短暂休眠，避免CPU占用过高
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                 }
             }
@@ -737,9 +744,9 @@ async fn run_memory_optimized_node(
             // 添加重试机制，确保消息能够发送成功
             let mut retry_count = 0;
             let max_retries = 3;
-            let _success = false; // 移除可变性，使用下划线前缀标记
+            let mut notification_sent = false;
             
-            while retry_count < max_retries {
+            while retry_count < max_retries && !notification_sent {
                 // 确保消息发送成功 - 使用超时机制
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(2), 
@@ -747,8 +754,7 @@ async fn run_memory_optimized_node(
                 ).await {
                     Ok(Ok(_)) => {
                         println!("📣 节点-{}: 已成功通知节点管理器节点停止", node_id);
-                        // 移除可变性，使用下划线前缀标记
-                        let _success = true;
+                        notification_sent = true;
                         break;
                     },
                     Ok(Err(e)) => {
@@ -757,6 +763,8 @@ async fn run_memory_optimized_node(
                         
                         if retry_count >= max_retries {
                             println!("⚠️ 节点-{}: 通知节点管理器失败，达到最大重试次数", node_id);
+                            // 即使通知失败，我们仍然认为轮转成功
+                            println!("⚠️ 节点-{}: 通知失败，但活动节点列表已更新，继续轮转", node_id);
                         } else {
                             // 短暂等待后重试
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -768,6 +776,8 @@ async fn run_memory_optimized_node(
                         
                         if retry_count >= max_retries {
                             println!("⚠️ 节点-{}: 通知节点管理器超时，达到最大重试次数", node_id);
+                            // 即使通知失败，我们仍然认为轮转成功
+                            println!("⚠️ 节点-{}: 通知超时，但活动节点列表已更新，继续轮转", node_id);
                         } else {
                             // 短暂等待后重试
                             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
