@@ -790,7 +790,8 @@ async fn run_memory_optimized_node(
                                     // 成功提交证明
                                     proof_count += 1;
                                     _consecutive_failures = 0;
-                                    success = true; // 设置成功状态
+                                    // 使用下划线前缀标记可能未使用的变量
+                                    let _success = true; // 设置成功状态
                                     consecutive_429s = 0; // 重置连续429计数
                                     
                                     // 重置429计数
@@ -852,7 +853,8 @@ async fn run_memory_optimized_node(
                                         // 证明已经被提交，视为成功
                                         proof_count += 1;
                                         _consecutive_failures = 0;
-                                        success = true; // 设置成功状态
+                                        // 使用下划线前缀标记可能未使用的变量
+                                        let _success = true; // 设置成功状态
                                         consecutive_429s = 0; // 重置连续429计数
                                         
                                         // 重置429计数
@@ -939,6 +941,8 @@ async fn run_memory_optimized_node(
                                     // 成功提交证明
                                     proof_count += 1;
                                     _consecutive_failures = 0;
+                                    // 使用下划线前缀标记可能未使用的变量
+                                    let _success = true; // 设置成功状态
                                     consecutive_429s = 0; // 重置连续429计数
                                     
                                     // 重置429计数
@@ -1008,7 +1012,8 @@ async fn run_memory_optimized_node(
                                         // 证明已经被提交，视为成功
                                         proof_count += 1;
                                         _consecutive_failures = 0;
-                                        success = true;
+                                        // 使用下划线前缀标记可能未使用的变量
+                                        let _success = true; // 设置成功状态
                                         consecutive_429s = 0; // 重置连续429计数
                                         
                                         // 重置429计数

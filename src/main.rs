@@ -41,13 +41,11 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use std::{error::Error, io};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::sync::Arc;
 use std::collections::HashMap;
 use log::warn;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-use std::time::Duration;
 use chrono::Local;
 
 #[derive(Parser)]
@@ -178,7 +176,7 @@ impl FixedLineDisplay {
             if status.contains("速率限制") || status.contains("429") {
                 true
             } else {
-            lines.get(&node_id) != Some(&status)
+                lines.get(&node_id) != Some(&status)
             }
         };
         
