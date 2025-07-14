@@ -46,7 +46,6 @@ use std::collections::HashMap;
 use log::warn;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-use chrono::Local;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -164,7 +163,7 @@ impl FixedLineDisplay {
 
     async fn update_node_status(&self, node_id: u64, status: String) {
         // 检查是否是成功或失败状态，并更新计数
-        if status.contains("成功") || status.contains("提交证明成功") {
+        if status.contains("证明提交成功") || status.contains("✅ 证明 #") || status.contains("完成 (成功:") {
             self.success_count.fetch_add(1, Ordering::Relaxed);
         } else if status.contains("失败") || status.contains("错误") {
             self.failure_count.fetch_add(1, Ordering::Relaxed);

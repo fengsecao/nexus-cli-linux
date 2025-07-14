@@ -344,6 +344,9 @@ async fn node_manager(
     // 创建一个节点启动队列，用于记录需要启动的节点
     let mut nodes_to_start = Vec::new();
     
+    // 创建一个全局通信通道，用于节点间通信
+    let (global_tx, _) = mpsc::channel::<NodeManagerCommand>(100); // 增大缓冲区大小
+    
     loop {
         // 首先检查是否有需要启动的节点
         if !nodes_to_start.is_empty() {
@@ -353,8 +356,8 @@ async fn node_manager(
             for node_id in nodes_to_start.drain(..) {
                 println!("🔄 节点管理器: 准备启动节点-{}", node_id);
                 
-                // 创建新的通信通道
-                let (node_tx, _) = mpsc::channel::<NodeManagerCommand>(10);
+                // 使用全局通信通道
+                let node_tx = global_tx.clone();
                 
                 // 启动新节点
                 let handle = start_node_worker(
@@ -671,7 +674,8 @@ async fn run_memory_optimized_node(
                 ).await {
                     Ok(Ok(_)) => {
                         println!("📣 节点-{}: 已成功通知节点管理器节点停止", node_id);
-                        success = true;
+                        // 移除可变性，使用下划线前缀标记
+                        let _success = true;
                         break;
                     },
                     Ok(Err(e)) => {
@@ -752,7 +756,7 @@ async fn run_memory_optimized_node(
         
         let timestamp = get_timestamp_efficient();
         let mut attempt = 1;
-        let mut success = false;
+        let _success = false; // 移除可变性，使用下划线前缀标记
         
         // 尝试获取任务并生成证明
         while attempt <= MAX_TASK_RETRIES {
@@ -905,8 +909,8 @@ async fn run_memory_optimized_node(
                         }
                         
                         // 如果成功提交或达到429重试上限但仍是速率限制，则继续下一个循环
-                        if success || (retry_count >= MAX_429_RETRIES && rate_limited) {
-                            if !success && rate_limited {
+                        if _success || (retry_count >= MAX_429_RETRIES && rate_limited) {
+                            if !_success && rate_limited {
                                 update_status(format!("[{}] ⚠️ 429重试次数已达上限，等待一段时间后再尝试", timestamp));
                                 tokio::time::sleep(Duration::from_secs(60)).await; // 长时间等待
                             }
@@ -954,22 +958,22 @@ async fn run_memory_optimized_node(
                                     let msg = format!("[{}] ✅ 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
                                     
-                                    send_event(format!("Proof #{} submitted successfully", proof_count), crate::events::EventType::ProofSubmitted);
+                                    send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                    
+                                    println!("\n🔍 节点-{}: 证明提交成功，准备轮转...", node_id);
+                                    println!("🔍 节点-{}: rotation_data是否存在: {}\n", node_id, rotation_data.is_some());
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
-                                    println!("\n🔍 节点-{}: 证明提交成功，准备轮转...", node_id);
-                                    println!("🔍 节点-{}: rotation_data是否存在: {}", node_id, rotation_data.is_some());
                                     let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
-                                    println!("🔍 节点-{}: 轮转结果: should_rotate={}, status_msg={:?}", 
-                                            node_id, should_rotate, status_msg);
                                     if should_rotate {
+                                        println!("🔍 节点-{}: 轮转结果: should_rotate=true, status_msg={:?}", node_id, status_msg);
+                                        println!("🔍 节点-{}: 轮转成功，结束当前节点处理", node_id);
                                         if let Some(msg) = status_msg {
                                             update_status(msg);
                                         }
-                                        println!("🔍 节点-{}: 轮转成功，结束当前节点处理", node_id);
                                         return; // 结束当前节点的处理
                                     } else {
-                                        println!("🔍 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                        println!("🔍 节点-{}: 轮转结果: should_rotate=false", node_id);
                                     }
                                     
                                     break;
@@ -1066,8 +1070,8 @@ async fn run_memory_optimized_node(
                             }
                             }
                             
-                            if success || retry_count >= MAX_SUBMISSION_RETRIES {
-                                if !success {
+                            if _success || retry_count >= MAX_SUBMISSION_RETRIES {
+                                if !_success {
                                     // 如果是由于速率限制而失败，等待更长时间
                                     if rate_limited {
                                         update_status(format!("[{}] ⚠️ 速率限制重试次数已达上限，等待一段时间后再尝试", timestamp));
@@ -1155,7 +1159,7 @@ async fn run_memory_optimized_node(
         }
         
         // 如果所有尝试都失败，等待一段时间后再试
-        if !success && attempt > MAX_TASK_RETRIES {
+        if !_success && attempt > MAX_TASK_RETRIES {
             update_status(format!("[{}] ⚠️ 获取任务失败，等待后重试...", timestamp));
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
