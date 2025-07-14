@@ -495,7 +495,7 @@ async fn node_manager(
                                 
                                 // 启动新节点
                                 let handle = start_node_worker(
-                                    *node_id,
+                                    node_id,
                                     env_clone.clone(),
                                     proxy_clone.clone(),
                                     num_workers_per_node,
