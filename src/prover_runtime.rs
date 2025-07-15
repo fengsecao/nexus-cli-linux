@@ -424,7 +424,6 @@ pub async fn start_optimized_batch_workers(
             let status_callback_for_manager = status_callback_arc.clone();
             let event_sender_for_manager = event_sender.clone();
             let shutdown_for_manager = shutdown.resubscribe();
-            let node_rx_for_manager = node_rx;
             let rotation_data_for_manager = rotation_data.clone();
             
             // 打印初始活动节点列表
@@ -434,6 +433,13 @@ pub async fn start_optimized_batch_workers(
             }
             
             println!("🔄 启动节点管理器线程");
+            
+            // 创建一个新的通道，用于节点管理器
+            let (node_tx, node_rx) = mpsc::channel::<NodeManagerCommand>(100);
+            
+            // 保存发送端，以便后续使用
+            let node_tx_for_workers = node_tx.clone();
+            
             let manager_handle = tokio::spawn(async move {
                 node_manager(
                     active_nodes_clone,
@@ -445,7 +451,7 @@ pub async fn start_optimized_batch_workers(
                     status_callback_for_manager,
                     event_sender_for_manager,
                     shutdown_for_manager,
-                    node_rx_for_manager,
+                    node_rx,
                     rotation_data_for_manager,
                 ).await;
             });
@@ -659,6 +665,9 @@ async fn node_manager(
     // 创建一个集合来跟踪正在启动的节点，避免重复启动
     let mut starting_nodes = HashSet::new();
     
+    // 创建一个新的通道，用于节点工作线程向节点管理器发送命令
+    let (node_cmd_tx, mut node_cmd_rx) = mpsc::channel::<NodeManagerCommand>(100);
+    
     // 定期检查和清理活动节点列表
     let active_nodes_clone = active_nodes.clone();
     let active_threads_clone = active_threads.clone();
@@ -678,98 +687,14 @@ async fn node_manager(
                 break;
             }
             
-            // 处理节点命令
+            // 处理原始节点命令通道
             Some(cmd) = node_rx.recv() => {
-                match cmd {
-                    NodeManagerCommand::NodeStarted(node_id) => {
-                        // 节点已启动，从启动中列表移除
-                        starting_nodes.remove(&node_id);
-                    }
-                    NodeManagerCommand::NodeStopped(node_id) => {
-                        // 检查是否已经处理过这个停止消息
-                        if processed_stop_messages.contains(&node_id) {
-                            continue;
-                        }
-                        
-                        // 标记为已处理
-                        processed_stop_messages.insert(node_id);
-                        
-                        // 在一段时间后移除已处理标记，允许将来再次处理该节点的停止消息
-                        let node_id_clone = node_id;
-                        let processed_messages_clone = Arc::new(Mutex::new(processed_stop_messages.clone()));
-                        tokio::spawn(async move {
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            let mut guard = processed_messages_clone.lock();
-                            guard.remove(&node_id_clone);
-                        });
-                        
-                        println!("🛑 节点管理器: 节点-{} 已停止", node_id);
-                        
-                        // 更新节点状态
-                        {
-                            let mut threads_guard = active_threads.lock();
-                            threads_guard.insert(node_id, false);
-                        }
-                        
-                        println!("🔄 节点管理器: 节点-{} 已停止，准备启动新节点", node_id);
-                        
-                        // 获取需要启动的节点
-                        let nodes_to_start = get_nodes_to_start(&active_nodes, &active_threads).await;
-                        
-                        // 确保不超过最大并发数
-                        let current_active_count = {
-                            let threads_guard = active_threads.lock();
-                            threads_guard.values().filter(|&&active| active).count()
-                        };
-                        
-                        // 计算可以启动的节点数量
-                        let available_slots = if current_active_count < max_concurrent {
-                            max_concurrent - current_active_count
-                        } else {
-                            0
-                        };
-                        
-                        if available_slots > 0 {
-                            // 只启动可用槽位数量的节点
-                            let nodes_to_start = nodes_to_start.into_iter()
-                                .filter(|&node_id| !starting_nodes.contains(&node_id))
-                                .take(available_slots)
-                                .collect::<Vec<_>>();
-                            
-                            // 标记这些节点为正在启动
-                            for &node_id in &nodes_to_start {
-                                starting_nodes.insert(node_id);
-                            }
-                            
-                            // 启动节点
-                            for node_id in nodes_to_start {
-                                // 启动新节点
-                                println!("🚀 节点管理器: 启动节点-{}", node_id);
-                                
-                                let handle = start_node_worker(
-                                    node_id,
-                                    environment.clone(),
-                                    proxy_file.clone(),
-                                    num_workers_per_node,
-                                    proof_interval,
-                                    status_callback_arc.clone(),
-                                    event_sender.clone(),
-                                    shutdown.resubscribe(),
-                                    rotation_data.clone(),
-                                    active_threads.clone(),
-                                    node_rx.clone(),
-                                ).await;
-                                
-                                // 不需要存储句柄，因为它们会在完成时自动清理
-                                tokio::spawn(async move {
-                                    let _ = handle.await;
-                                });
-                            }
-                        } else {
-                            println!("⚠️ 节点管理器: 已达到最大并发数 {}, 暂不启动新节点", max_concurrent);
-                        }
-                    }
-                }
+                handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, &active_nodes, &active_threads, &environment, &proxy_file, num_workers_per_node, proof_interval, &status_callback_arc, &event_sender, &shutdown, &node_cmd_tx, &rotation_data, max_concurrent).await;
+            }
+            
+            // 处理新创建的节点命令通道
+            Some(cmd) = node_cmd_rx.recv() => {
+                handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, &active_nodes, &active_threads, &environment, &proxy_file, num_workers_per_node, proof_interval, &status_callback_arc, &event_sender, &shutdown, &node_cmd_tx, &rotation_data, max_concurrent).await;
             }
             
             // 定期检查是否有节点需要启动
@@ -819,7 +744,7 @@ async fn node_manager(
                                 shutdown.resubscribe(),
                                 rotation_data.clone(),
                                 active_threads.clone(),
-                                node_rx.clone(),
+                                node_cmd_tx.clone(),
                             ).await;
                             
                             // 不需要存储句柄，因为它们会在完成时自动清理
@@ -834,6 +759,116 @@ async fn node_manager(
                         cleanup_active_nodes(&active_nodes, &active_threads, max_concurrent).await;
                     }
                 }
+            }
+        }
+    }
+}
+
+// 提取处理节点命令的逻辑为一个单独的函数
+async fn handle_node_command(
+    cmd: NodeManagerCommand,
+    processed_stop_messages: &mut HashSet<u64>,
+    starting_nodes: &mut HashSet<u64>,
+    active_nodes: &Arc<Mutex<Vec<u64>>>,
+    active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
+    environment: &Environment,
+    proxy_file: &Option<String>,
+    num_workers_per_node: usize,
+    proof_interval: u64,
+    status_callback_arc: &Option<Arc<Box<dyn Fn(u64, String) + Send + Sync + 'static>>>,
+    event_sender: &mpsc::Sender<Event>,
+    shutdown: &broadcast::Receiver<()>,
+    node_cmd_tx: &mpsc::Sender<NodeManagerCommand>,
+    rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<HashMap<u64, usize>>>, usize)>,
+    max_concurrent: usize,
+) {
+    match cmd {
+        NodeManagerCommand::NodeStarted(node_id) => {
+            // 节点已启动，从启动中列表移除
+            starting_nodes.remove(&node_id);
+        }
+        NodeManagerCommand::NodeStopped(node_id) => {
+            // 检查是否已经处理过这个停止消息
+            if processed_stop_messages.contains(&node_id) {
+                return;
+            }
+            
+            // 标记为已处理
+            processed_stop_messages.insert(node_id);
+            
+            // 在一段时间后移除已处理标记，允许将来再次处理该节点的停止消息
+            let node_id_clone = node_id;
+            let processed_messages_clone = Arc::new(Mutex::new(processed_stop_messages.clone()));
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let mut guard = processed_messages_clone.lock();
+                guard.remove(&node_id_clone);
+            });
+            
+            println!("🛑 节点管理器: 节点-{} 已停止", node_id);
+            
+            // 更新节点状态
+            {
+                let mut threads_guard = active_threads.lock();
+                threads_guard.insert(node_id, false);
+            }
+            
+            println!("🔄 节点管理器: 节点-{} 已停止，准备启动新节点", node_id);
+            
+            // 获取需要启动的节点
+            let nodes_to_start = get_nodes_to_start(active_nodes, active_threads).await;
+            
+            // 确保不超过最大并发数
+            let current_active_count = {
+                let threads_guard = active_threads.lock();
+                threads_guard.values().filter(|&&active| active).count()
+            };
+            
+            // 计算可以启动的节点数量
+            let available_slots = if current_active_count < max_concurrent {
+                max_concurrent - current_active_count
+            } else {
+                0
+            };
+            
+            if available_slots > 0 {
+                // 只启动可用槽位数量的节点
+                let nodes_to_start = nodes_to_start.into_iter()
+                    .filter(|&node_id| !starting_nodes.contains(&node_id))
+                    .take(available_slots)
+                    .collect::<Vec<_>>();
+                
+                // 标记这些节点为正在启动
+                for &node_id in &nodes_to_start {
+                    starting_nodes.insert(node_id);
+                }
+                
+                // 启动节点
+                for node_id in nodes_to_start {
+                    // 启动新节点
+                    println!("🚀 节点管理器: 启动节点-{}", node_id);
+                    
+                    let handle = start_node_worker(
+                        node_id,
+                        environment.clone(),
+                        proxy_file.clone(),
+                        num_workers_per_node,
+                        proof_interval,
+                        status_callback_arc.clone(),
+                        event_sender.clone(),
+                        shutdown.resubscribe(),
+                        rotation_data.clone(),
+                        active_threads.clone(),
+                        node_cmd_tx.clone(),
+                    ).await;
+                    
+                    // 不需要存储句柄，因为它们会在完成时自动清理
+                    tokio::spawn(async move {
+                        let _ = handle.await;
+                    });
+                }
+            } else {
+                println!("⚠️ 节点管理器: 已达到最大并发数 {}, 暂不启动新节点", max_concurrent);
             }
         }
     }
@@ -1772,7 +1807,7 @@ async fn cleanup_active_nodes(
     {
         let threads_guard = active_threads.lock();
         active_node_ids = threads_guard.iter()
-            .filter(|(_, &is_active)| is_active)
+            .filter(|pair| *pair.1)
             .map(|(&id, _)| id)
             .collect();
     }
