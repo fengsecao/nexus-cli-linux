@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
 use std::time::Duration;
 use parking_lot::Mutex;
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::Lazy;
 use rand;
 use log::{debug, warn};
 use crate::orchestrator_client_enhanced::EnhancedOrchestratorClient;
@@ -27,6 +27,8 @@ use sha3::Digest;
 use postcard;
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::time::Instant;
+use std::future::Future;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -57,6 +59,102 @@ fn get_timestamp_efficient() -> String {
         // 使用缓存的时间戳
         CACHED_TIMESTAMP.lock().clone()
     }
+}
+
+/// 全局请求限流器 - 限制对服务器的请求频率
+pub struct GlobalRateLimiter {
+    last_request_time: Instant,
+    request_interval: Duration,
+    requests_per_second: f64,
+    total_requests: u64,
+}
+
+impl GlobalRateLimiter {
+    pub fn new(requests_per_second: f64) -> Self {
+        let interval = Duration::from_secs_f64(1.0 / requests_per_second);
+        println!("🚦 初始化全局请求限流器 - 每秒 {} 个请求，间隔 {:.2}ms", 
+                requests_per_second, interval.as_millis());
+        
+        Self {
+            last_request_time: Instant::now() - interval, // 初始化为可以立即发送请求
+            request_interval: interval,
+            requests_per_second,
+            total_requests: 0,
+        }
+    }
+    
+    /// 等待直到可以发送下一个请求
+    pub async fn wait_for_next_request(&mut self) {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_request_time);
+        
+        // 如果距离上次请求的时间小于间隔，则等待
+        if elapsed < self.request_interval {
+            let wait_time = self.request_interval - elapsed;
+            
+            // 每10个请求输出一次日志，避免日志过多
+            if self.total_requests % 10 == 0 {
+                println!("🚦 全局限流: 等待 {:.2}ms 后发送下一个请求 (总请求数: {})", 
+                        wait_time.as_millis(), self.total_requests);
+            }
+            
+            tokio::time::sleep(wait_time).await;
+        }
+        
+        // 更新上次请求时间
+        self.last_request_time = Instant::now();
+        self.total_requests += 1;
+    }
+    
+    /// 调整请求速率
+    pub fn set_rate(&mut self, requests_per_second: f64) {
+        self.requests_per_second = requests_per_second;
+        self.request_interval = Duration::from_secs_f64(1.0 / requests_per_second);
+        println!("🚦 调整全局请求限流器 - 每秒 {} 个请求，间隔 {:.2}ms", 
+                requests_per_second, self.request_interval.as_millis());
+    }
+    
+    /// 获取当前请求速率
+    pub fn get_rate(&self) -> f64 {
+        self.requests_per_second
+    }
+    
+    /// 获取总请求数
+    pub fn get_total_requests(&self) -> u64 {
+        self.total_requests
+    }
+}
+
+// 创建全局限流器实例 - 每秒1个请求
+static GLOBAL_RATE_LIMITER: Lazy<Mutex<GlobalRateLimiter>> = Lazy::new(|| {
+    Mutex::new(GlobalRateLimiter::new(1.0))
+});
+
+/// 全局API请求函数 - 所有对服务器的请求都应该通过这个函数
+pub async fn make_api_request<F, T>(request_func: F) -> T 
+where 
+    F: Future<Output = T>,
+{
+    // 等待限流器允许发送请求
+    {
+        let mut limiter = GLOBAL_RATE_LIMITER.lock();
+        limiter.wait_for_next_request().await;
+    }
+    
+    // 发送请求
+    request_func.await
+}
+
+/// 调整全局请求速率
+pub fn set_global_request_rate(requests_per_second: f64) {
+    let mut limiter = GLOBAL_RATE_LIMITER.lock();
+    limiter.set_rate(requests_per_second);
+}
+
+/// 获取全局请求统计信息
+pub fn get_global_request_stats() -> (f64, u64) {
+    let limiter = GLOBAL_RATE_LIMITER.lock();
+    (limiter.get_rate(), limiter.get_total_requests())
 }
 
 /// Starts authenticated workers that fetch tasks from the orchestrator and process them.
@@ -289,6 +387,73 @@ pub async fn start_optimized_batch_workers(
             
             join_handles.push(manager_handle);
             
+            // 启动一个定期任务，用于监控和调整请求速率
+            let shutdown_monitor = shutdown.resubscribe();
+            let monitor_handle = tokio::spawn(async move {
+                let mut consecutive_429s = 0;
+                let mut consecutive_successes = 0;
+                let check_interval = std::time::Duration::from_secs(30); // 每30秒检查一次
+                
+                // 初始速率为每秒1个请求
+                let mut current_rate = 1.0;
+                
+                loop {
+                    tokio::select! {
+                        _ = shutdown_monitor.recv() => {
+                            println!("🛑 请求速率监控任务收到关闭信号，正在退出");
+                            break;
+                        }
+                        _ = tokio::time::sleep(check_interval) => {
+                            // 获取当前请求统计信息
+                            let (rate, total_requests) = get_global_request_stats();
+                            
+                            // 检查最近是否有429错误
+                            let recent_429s = 0; // 这里需要从某处获取最近的429错误数量
+                            
+                            if recent_429s > 0 {
+                                // 如果有429错误，减慢请求速率
+                                consecutive_429s += 1;
+                                consecutive_successes = 0;
+                                
+                                if consecutive_429s >= 2 {
+                                    // 连续两次检查都有429错误，大幅降低速率
+                                    current_rate = (current_rate * 0.5).max(0.2); // 最低每5秒1个请求
+                                    set_global_request_rate(current_rate);
+                                    println!("⚠️ 检测到连续429错误，大幅降低请求速率至每秒{}个", current_rate);
+                                } else {
+                                    // 第一次检测到429错误，小幅降低速率
+                                    current_rate = (current_rate * 0.8).max(0.5); // 最低每2秒1个请求
+                                    set_global_request_rate(current_rate);
+                                    println!("⚠️ 检测到429错误，降低请求速率至每秒{}个", current_rate);
+                                }
+                            } else {
+                                // 如果没有429错误，可以考虑逐渐增加请求速率
+                                consecutive_429s = 0;
+                                consecutive_successes += 1;
+                                
+                                if consecutive_successes >= 3 {
+                                    // 连续三次检查都没有429错误，小幅增加速率
+                                    current_rate = (current_rate * 1.1).min(2.0); // 最高每秒2个请求
+                                    set_global_request_rate(current_rate);
+                                    println!("✅ 连续{}次无429错误，增加请求速率至每秒{}个", 
+                                            consecutive_successes, current_rate);
+                                    
+                                    // 重置成功计数，避免无限增加
+                                    if consecutive_successes >= 5 {
+                                        consecutive_successes = 3;
+                                    }
+                                }
+                            }
+                            
+                            // 输出当前请求统计信息
+                            println!("📊 请求速率监控: 当前速率 = 每秒{}个请求, 总请求数 = {}", rate, total_requests);
+                        }
+                    }
+                }
+            });
+            
+            join_handles.push(monitor_handle);
+            
             // 创建一个任务来监控所有初始节点是否已启动
             let active_threads_monitor = active_threads.clone();
             let all_nodes_started_monitor = all_nodes_started_clone.clone();
@@ -488,6 +653,10 @@ async fn node_manager(
                                 // 使用全局通信通道
                                 let node_tx = global_tx_clone.clone();
                                 
+                                // 添加强制延迟 - 3秒
+                                println!("🔄 节点管理器: 节点-{} 启动延迟3秒...", node_id);
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                
                                 // 启动新节点
                                 let handle = start_node_worker(
                                     node_id,
@@ -559,6 +728,10 @@ async fn node_manager(
                         
                         // 使用全局通信通道
                         let node_tx = global_tx.clone();
+                        
+                        // 添加强制延迟 - 3秒
+                        println!("🔄 节点管理器: 节点-{} 启动延迟3秒...", node_id);
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                         
                         // 启动新节点
                         let handle = start_node_worker(
@@ -665,6 +838,10 @@ async fn node_manager(
                                         
                                         // 使用全局通信通道
                                         let node_tx = global_tx.clone();
+                                        
+                                        // 添加强制延迟 - 3秒
+                                        println!("🔄 节点管理器: 节点-{} 启动延迟3秒...", node_id);
+                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                                         
                                         // 启动新节点
                                         let handle = start_node_worker(
