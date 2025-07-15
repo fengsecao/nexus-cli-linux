@@ -813,39 +813,25 @@ async fn handle_submission_success(
     rate_limit_tracker: &NodeRateLimitTracker,
 ) {
     // Record successful submission to prevent duplicates
-    successful_tasks.insert(task.task_id.clone()).await;
-    
-    // 成功提交证明，重置429计数
-    // 从task_id中提取节点ID
+    successful_tasks.insert(task.task_id.clone());
+
+    // 解析节点ID - 从任务ID中提取
     let node_id_str = task.task_id.split('-').next().unwrap_or("0");
-    if let Ok(node_id) = node_id_str.parse::<u64>() {
-        rate_limit_tracker.reset_429_count(node_id).await;
-        
-        // 增加成功计数
-        let success_count = rate_limit_tracker.increment_success_count(node_id).await;
-        
-        // Log the success
-        let _ = event_sender
-            .send(Event::proof_submitter(
-                format!(
-                    "Proof submitted successfully for task {} (成功: {}次)",
-                    task.task_id, success_count
-                ),
-                crate::events::EventType::ProofSubmitted, // 使用ProofSubmitted事件类型，确保正确计数
-            ))
-            .await;
-    } else {
-        // Log the success without success count
-        let _ = event_sender
-            .send(Event::proof_submitter(
-                format!(
-                    "Proof submitted successfully for task {}",
-                    task.task_id
-                ),
-                crate::events::EventType::ProofSubmitted, // 使用ProofSubmitted事件类型，确保正确计数
-            ))
-            .await;
-    }
+    let node_id = node_id_str.parse::<u64>().unwrap_or(0);
+    
+    // 增加节点的成功计数
+    let success_count = rate_limit_tracker.increment_success_count(node_id).await;
+
+    // Send success event
+    let _ = event_sender
+        .send(Event::proof_submitter(
+            format!(
+                "Proof submitted successfully for task {} (success count: {})",
+                task.task_id, success_count
+            ),
+            crate::events::EventType::ProofSubmitted,
+        ))
+        .await;
 }
 
 /// Handle proof submission error

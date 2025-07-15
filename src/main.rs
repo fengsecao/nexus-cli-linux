@@ -165,17 +165,8 @@ impl FixedLineDisplay {
     }
 
     async fn update_node_status(&self, node_id: u64, status: String) {
-        // 检查是否是成功或失败状态，并更新计数
-        // 只在明确的证明提交成功时计数，避免重复计数
-        if (status.contains("证明提交成功") || status.contains("✅ 证明 #")) && !status.contains("轮转") {
-            // 使用原子操作增加计数
-            let new_count = self.success_count.fetch_add(1, Ordering::Relaxed) + 1;
-            println!("📈 增加成功计数: 当前成功总数: {}", new_count);
-        } else if status.contains("失败") || status.contains("错误") {
-            // 使用原子操作增加计数
-            let new_count = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
-            println!("📉 增加失败计数: 当前失败总数: {}", new_count);
-        }
+        // 移除此处的成功/失败计数逻辑，避免重复计数
+        // 计数由事件监听器统一处理
         
         let needs_update = {
             let lines = self.node_lines.read().await;
@@ -662,12 +653,17 @@ async fn start_batch_processing(
         while let Some(event) = event_receiver.recv().await {
             // 更新成功/失败计数
             if event.event_type == crate::events::EventType::ProofSubmitted {
-                display_clone.success_count.fetch_add(1, Ordering::Relaxed);
+                let new_count = display_clone.success_count.fetch_add(1, Ordering::Relaxed) + 1;
+                println!("📈 事件监听: 增加成功计数 - 当前成功总数: {}", new_count);
             } else if event.event_type == crate::events::EventType::Error &&
                       (event.msg.contains("Error submitting proof") || 
                        event.msg.contains("Failed to submit proof")) {
-                display_clone.failure_count.fetch_add(1, Ordering::Relaxed);
+                let new_count = display_clone.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
+                println!("📉 事件监听: 增加失败计数 - 当前失败总数: {}", new_count);
             }
+            
+            // 输出事件信息用于调试
+            println!("📣 收到事件: 类型={:?}, 消息={}", event.event_type, event.msg);
         }
     });
     

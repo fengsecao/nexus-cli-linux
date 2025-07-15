@@ -1625,9 +1625,6 @@ async fn run_memory_optimized_node(
                                     let msg = format!("[{}] ✅ 缓存证明提交成功! 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
                                     
-                                    // 确保使用正确的事件类型记录成功
-                                    send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
-                                    
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                     if rotation_data.is_some() {
                                         println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
@@ -1716,7 +1713,8 @@ async fn run_memory_optimized_node(
                                         let msg = format!("[{}] ✅ 证明已被接受 (409) (成功: {}次)", timestamp, success_count);
                                         update_status(msg.clone());
                                         
-                                        send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                        // 不再直接发送事件，由workers/online.rs的handle_submission_success处理
+                                        // 避免重复计数
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                         if rotation_data.is_some() {
@@ -1811,8 +1809,8 @@ async fn run_memory_optimized_node(
                                     let msg = format!("[{}] ✅ 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
                                     
-                                    // 确保使用正确的事件类型记录成功
-                                    send_event(format!("Proof submitted successfully #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                    // 不再直接发送事件，由workers/online.rs的handle_submission_success处理
+                                    // 避免重复计数
                                     
                                     println!("\n🔍 节点-{}: 证明提交成功，准备轮转...", node_id);
                                     println!("🔍 节点-{}: rotation_data是否存在: {}\n", node_id, rotation_data.is_some());
@@ -1906,7 +1904,8 @@ async fn run_memory_optimized_node(
                                         let msg = format!("[{}] ✅ 证明已被接受 (409) (成功: {}次)", timestamp, success_count);
                                         update_status(msg.clone());
                                         
-                                        send_event(format!("Proof already accepted #{}", proof_count), crate::events::EventType::ProofSubmitted);
+                                        // 不再直接发送事件，由workers/online.rs的handle_submission_success处理
+                                        // 避免重复计数
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                         if rotation_data.is_some() {
