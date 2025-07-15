@@ -1938,7 +1938,7 @@ async fn cleanup_active_nodes(
     let active_node_ids = {
         let threads_guard = active_threads.lock();
         threads_guard.iter()
-            .filter(|(_, &is_active)| is_active)
+            .filter(|&(_, &is_active)| is_active)
             .map(|(&id, _)| id)
             .collect::<Vec<u64>>()
     };
