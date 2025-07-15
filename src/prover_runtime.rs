@@ -1180,7 +1180,7 @@ async fn rotate_to_next_node(
             
             // 即使通知失败，我们仍然认为轮转成功，因为活动节点列表已更新
             // 根据之前的查找结果生成状态消息
-            let status_msg = if let Some(_) = is_full {
+            let status_msg = if is_full {
                 format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason)
             } else {
                 format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, final_next_node_id, reason)
