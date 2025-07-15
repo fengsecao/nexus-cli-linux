@@ -412,9 +412,9 @@ pub async fn start_optimized_batch_workers(
             join_handles.push(manager_handle);
             
             // 启动一个定期任务，用于监控和调整请求速率
-            let shutdown_monitor = shutdown.resubscribe();
+            let mut shutdown_monitor = shutdown.resubscribe();
             let monitor_handle = tokio::spawn(async move {
-                let mut consecutive_429s = 0;
+                let mut _consecutive_429s = 0;
                 let mut consecutive_successes = 0;
                 let check_interval = std::time::Duration::from_secs(30); // 每30秒检查一次
                 
@@ -436,7 +436,7 @@ pub async fn start_optimized_batch_workers(
                             
                             if recent_429s > 0 {
                                 // 如果有429错误，减慢请求速率 (降低10%)
-                                consecutive_429s += 1;
+                                _consecutive_429s += 1;
                                 consecutive_successes = 0;
                                 
                                 // 每次减少10%的速率
@@ -445,7 +445,7 @@ pub async fn start_optimized_batch_workers(
                                 println!("⚠️ 检测到429错误，降低请求速率至每秒{}个 (降低10%)", current_rate);
                             } else {
                                 // 如果没有429错误，可以考虑逐渐增加请求速率
-                                consecutive_429s = 0;
+                                _consecutive_429s = 0;
                                 consecutive_successes += 1;
                                 
                                 // 每次检查都增加10%的速率
