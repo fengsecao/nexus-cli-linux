@@ -24,7 +24,6 @@ struct CachedProof {
 #[derive(Clone)]
 pub struct EnhancedOrchestratorClient {
     pub client: OrchestratorClient,
-    last_request_time: Instant,
     #[allow(dead_code)]
     environment: Environment,
     // 证明缓存 - 任务ID -> 缓存的证明
@@ -36,7 +35,6 @@ impl EnhancedOrchestratorClient {
     pub fn new(environment: Environment) -> Self {
         Self {
             client: OrchestratorClient::new(environment.clone()),
-            last_request_time: Instant::now(),
             environment,
             proof_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -54,7 +52,6 @@ impl EnhancedOrchestratorClient {
         
         Self {
             client,
-            last_request_time: Instant::now(),
             environment,
             proof_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -179,18 +176,6 @@ impl EnhancedOrchestratorClient {
                 }
             }
         }).await
-    }
-    
-    /// 强制执行速率限制
-    async fn enforce_rate_limit(&self) {
-        // 确保请求之间至少间隔300毫秒
-        let min_interval = Duration::from_millis(300);
-        let elapsed = self.last_request_time.elapsed();
-        
-        if elapsed < min_interval {
-            let wait_time = min_interval - elapsed;
-            tokio::time::sleep(wait_time).await;
-        }
     }
     
     /// 获取带有签名的提交证明URL

@@ -121,9 +121,19 @@ pub fn increment_429_error_count() {
     RECENT_429_ERRORS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// 获取429错误计数（不重置）
+pub fn get_429_error_count() -> u32 {
+    RECENT_429_ERRORS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// 获取并重置429错误计数
 pub fn get_and_reset_429_error_count() -> u32 {
     RECENT_429_ERRORS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 重置429错误计数
+pub fn reset_429_error_count() {
+    RECENT_429_ERRORS.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// 全局API请求函数 - 所有对服务器的请求都应该通过这个函数
@@ -431,8 +441,8 @@ pub async fn start_optimized_batch_workers(
                             // 获取当前请求统计信息
                             let (rate, total_requests) = get_global_request_stats();
                             
-                            // 检查最近是否有429错误
-                            let recent_429s = get_and_reset_429_error_count();
+                            // 检查最近是否有429错误（不重置计数器）
+                            let recent_429s = get_429_error_count();
                             
                             if recent_429s > 0 {
                                 // 如果有429错误，减慢请求速率 (降低10%)
@@ -442,7 +452,11 @@ pub async fn start_optimized_batch_workers(
                                 // 每次减少10%的速率
                                 current_rate = f64::max(current_rate * 0.9, 0.1); // 最低每10秒1个请求
                                 set_global_request_rate(current_rate);
-                                println!("⚠️ 检测到429错误，降低请求速率至每秒{}个 (降低10%)", current_rate);
+                                println!("⚠️ 检测到429错误 ({}个)，降低请求速率至每秒{}个 (降低10%)", 
+                                        recent_429s, current_rate);
+                                
+                                // 重置429错误计数，避免重复计算
+                                reset_429_error_count();
                             } else {
                                 // 如果没有429错误，可以考虑逐渐增加请求速率
                                 _consecutive_429s = 0;
@@ -520,15 +534,8 @@ pub async fn start_optimized_batch_workers(
 
     // 按序启动各节点
     for (index, node_id) in active_nodes_list.iter().enumerate() {
-        // 添加启动延迟
-        if index > 0 {
-            // 设置固定3秒延迟
-            let actual_delay = 3.0;
-            
-            println!("启动节点 {} (第{}/{}个), 延迟 {:.1}秒...", 
-                    node_id, index + 1, actual_concurrent, actual_delay);
-            tokio::time::sleep(std::time::Duration::from_secs_f64(actual_delay)).await;
-        }
+        println!("启动节点 {} (第{}/{}个)", 
+                node_id, index + 1, actual_concurrent);
         
         // 检查内存压力，如果需要则等待更长时间
         if check_memory_pressure() {
