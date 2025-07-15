@@ -487,21 +487,25 @@ pub async fn start_optimized_batch_workers(
             let all_nodes_started_monitor = all_nodes_started_clone.clone();
             
             tokio::spawn(async move {
+                let mut check_count = 0;
+                const MAX_CHECKS = 5; // 最多检查5次，然后强制设置为已启动
+                
                 loop {
                     // 检查所有初始节点是否已启动
-                    let all_started = {
+                    let (all_started, not_started_nodes) = {
                         let active_threads_guard = active_threads_monitor.lock();
                         let mut all_started = true;
+                        let mut not_started = Vec::new();
                         
                         // 检查每个活动节点是否已启动
-                        for (_, &started) in active_threads_guard.iter() {
+                        for (node_id, &started) in active_threads_guard.iter() {
                             if !started {
                                 all_started = false;
-                                break;
+                                not_started.push(*node_id);
                             }
                         }
                         
-                        all_started
+                        (all_started, not_started)
                     };
                     
                     if all_started {
@@ -509,6 +513,17 @@ pub async fn start_optimized_batch_workers(
                         all_nodes_started_monitor.store(true, std::sync::atomic::Ordering::SeqCst);
                         println!("🚀 所有初始节点已启动，可以开始轮转");
                         break;
+                    } else {
+                        check_count += 1;
+                        println!("⏳ 等待节点启动完成 (检查 {}/{}): 未启动节点: {:?}", 
+                                check_count, MAX_CHECKS, not_started_nodes);
+                        
+                        // 检查次数达到上限，强制设置为已启动
+                        if check_count >= MAX_CHECKS {
+                            println!("⚠️ 检查次数达到上限，强制设置所有节点为已启动状态");
+                            all_nodes_started_monitor.store(true, std::sync::atomic::Ordering::SeqCst);
+                            break;
+                        }
                     }
                     
                     // 等待一段时间后再次检查
@@ -628,89 +643,35 @@ async fn node_manager(
     
     // 启动一个后台任务来处理全局通信通道的消息
     tokio::spawn(async move {
+        // 限制日志输出频率的变量
+        let mut last_log_time = std::time::Instant::now();
+        let log_interval = std::time::Duration::from_secs(5); // 每5秒最多输出一次日志
+        let mut log_count = 0;
+        
         while let Some(cmd) = global_rx.recv().await {
             match cmd {
+                NodeManagerCommand::NodeStarted(node_id) => {
+                    // 限制日志输出频率，避免大量日志
+                    log_count += 1;
+                    let now = std::time::Instant::now();
+                    if now.duration_since(last_log_time) > log_interval {
+                        println!("🌐 全局通信: 共收到{}个节点启动通知，最近一个: 节点-{}", log_count, node_id);
+                        last_log_time = now;
+                        log_count = 0;
+                    }
+                    
+                    // 在单独作用域内更新状态，避免跨await持有锁
+                    {
+                        let mut active_threads_guard = active_threads_clone.lock();
+                        active_threads_guard.insert(node_id, true);
+                    }
+                },
                 NodeManagerCommand::NodeStopped(node_id) => {
                     println!("🛑 节点管理器: 节点-{} 已停止", node_id);
                     // 在单独作用域内更新状态，避免跨await持有锁
                     {
                         let mut active_threads_guard = active_threads_clone.lock();
                         active_threads_guard.insert(node_id, false);
-                    }
-                    
-                    // 立即检查是否有新节点需要启动
-                    println!("🔄 节点管理器: 节点-{} 已停止，准备启动新节点", node_id);
-                    
-                    // 获取需要启动的节点列表
-                    let new_nodes = get_nodes_to_start(&active_nodes_clone, &active_threads_clone).await;
-                    
-                    // 检查当前活动节点数量
-                    let current_active_count = {
-                        let active_threads_guard = active_threads_clone.lock();
-                        let mut count = 0;
-                        for (_, &active) in active_threads_guard.iter() {
-                            if active {
-                                count += 1;
-                            }
-                        }
-                        count
-                    };
-                    
-                    // 只有当活动节点数量低于最大并发数时才启动新节点
-                    if current_active_count < max_concurrent {
-                        // 计算可以启动的节点数量
-                        let nodes_to_start_count = (max_concurrent - current_active_count).min(new_nodes.len());
-                        
-                        if nodes_to_start_count > 0 {
-                            println!("🔄 节点管理器: 当前活动节点数量: {}, 最大并发数: {}, 将立即启动 {} 个新节点", 
-                                    current_active_count, max_concurrent, nodes_to_start_count);
-                            
-                            // 创建一个本地的节点启动列表
-                            let nodes_to_launch: Vec<u64> = new_nodes.into_iter().take(nodes_to_start_count).collect();
-                            
-                            for node_id in nodes_to_launch {
-                                println!("🔄 节点管理器: 立即启动节点-{}", node_id);
-                                
-                                // 使用全局通信通道
-                                let node_tx = global_tx_clone.clone();
-                                
-                                // 添加强制延迟 - 3秒
-                                println!("🔄 节点管理器: 节点-{} 启动延迟3秒...", node_id);
-                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                
-                                // 启动新节点
-                                let handle = start_node_worker(
-                                    node_id,
-                                    env_clone.clone(),
-                                    proxy_clone.clone(),
-                                    num_workers_per_node,
-                                    proof_interval,
-                                    callback_clone.clone(),
-                                    event_sender_clone.clone(),
-                                    shutdown_clone.resubscribe(),
-                                    rotation_clone.clone(),
-                                    active_threads_clone.clone(),
-                                    node_tx,
-                                ).await;
-                                
-                                // 这里不需要存储handle，因为我们只关心节点是否在运行
-                                tokio::spawn(async move {
-                                    let _ = handle.await;
-                                    println!("⚠️ 节点工作线程已完成");
-                                });
-                                
-                                // 添加一个短暂的延迟，避免同时启动太多节点
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                            }
-                        }
-                    }
-                },
-                NodeManagerCommand::NodeStarted(node_id) => {
-                    println!("🌐 全局通信: 节点-{} 已启动", node_id);
-                    // 在单独作用域内更新状态，避免跨await持有锁
-                    {
-                        let mut active_threads_guard = active_threads_clone.lock();
-                        active_threads_guard.insert(node_id, true);
                     }
                 }
             }
@@ -1354,8 +1315,7 @@ async fn run_memory_optimized_node(
     
     update_status(format!("🚀 启动中"));
     
-    // 通知节点管理器节点已启动
-    let _ = node_tx.send(NodeManagerCommand::NodeStarted(node_id)).await;
+    // 注意：不再重复发送NodeStarted消息，因为start_node_worker已经发送过了
     
     loop {
         // 检查停止标志
