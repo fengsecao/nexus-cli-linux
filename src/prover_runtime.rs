@@ -1043,25 +1043,27 @@ async fn get_nodes_to_start(
     active_nodes: &Arc<Mutex<Vec<u64>>>,
     active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
 ) -> Vec<u64> {
-    // 获取需要启动的节点列表
-    let active_nodes_guard = active_nodes.lock();
-    let active_threads_guard = active_threads.lock();
+    // 获取需要启动的节点列表和活动节点数量
+    let to_start;
+    let active_count;
     
-    // 检查每个活动节点，找出没有运行的节点
-    let mut to_start = Vec::new();
-    for &node_id in active_nodes_guard.iter() {
-        let is_running = active_threads_guard.get(&node_id).copied().unwrap_or(false);
-        if !is_running {
-            to_start.push(node_id);
-        }
-    }
-    
-    // 计算当前活动节点数量
-    let mut active_count = 0;
-    for (_, &active) in active_threads_guard.iter() {
-        if active {
-            active_count += 1;
-        }
+    // 使用作用域确保锁在操作完成后释放
+    {
+        let active_nodes_guard = active_nodes.lock();
+        let active_threads_guard = active_threads.lock();
+        
+        // 检查每个活动节点，找出没有运行的节点
+        to_start = active_nodes_guard.iter()
+            .filter(|&&node_id| {
+                !active_threads_guard.get(&node_id).copied().unwrap_or(false)
+            })
+            .copied()
+            .collect::<Vec<u64>>();
+        
+        // 计算当前活动节点数量
+        active_count = active_threads_guard.iter()
+            .filter(|(_, &active)| active)
+            .count();
     }
     
     if !to_start.is_empty() {
@@ -1089,13 +1091,15 @@ async fn rotate_to_next_node(
         }
         
         // 强制限制活动节点列表不超过最大并发数
-        let mut active_nodes_guard = active_nodes.lock();
-        if active_nodes_guard.len() > *max_concurrent {
-            println!("⚠️ 节点-{}: 强制限制活动节点列表大小 {} -> {}", 
-                    node_id, active_nodes_guard.len(), *max_concurrent);
-            active_nodes_guard.truncate(*max_concurrent);
+        {
+            let mut active_nodes_guard = active_nodes.lock();
+            if active_nodes_guard.len() > *max_concurrent {
+                println!("⚠️ 节点-{}: 强制限制活动节点列表大小 {} -> {}", 
+                        node_id, active_nodes_guard.len(), *max_concurrent);
+                active_nodes_guard.truncate(*max_concurrent);
+            }
+            // 锁在这里释放
         }
-        drop(active_nodes_guard); // 显式释放锁
         
         // 获取当前节点的索引
         let node_idx_opt = {
@@ -1125,15 +1129,17 @@ async fn rotate_to_next_node(
                     node_id, node_idx, final_next_idx, all_nodes.len());
             println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, final_next_node_id, final_next_idx);
             
-            // 获取当前活跃节点列表并打印
+            // 获取当前活跃节点列表并打印（在一个独立的作用域内）
             {
                 let active_nodes_guard = active_nodes.lock();
                 println!("📋 节点-{}: 轮转前活动节点列表: {:?}", node_id, *active_nodes_guard);
                 println!("📋 节点-{}: 活动节点数量: {}, 最大并发数: {}", node_id, active_nodes_guard.len(), *max_concurrent);
+                // 锁在这里释放
             }
             
             // 查找当前节点在活动列表中的位置，并更新节点
-            let pos_opt = {
+            // 存储必要的操作结果以供后续使用
+            let rotation_result = {
                 let mut active_nodes_guard = active_nodes.lock();
                 println!("📋 节点-{}: 当前活动节点列表: {:?}", node_id, *active_nodes_guard);
                 
@@ -1238,7 +1244,7 @@ async fn rotate_to_next_node(
             
             // 即使通知失败，我们仍然认为轮转成功，因为活动节点列表已更新
             // 根据之前的查找结果生成状态消息
-            let status_msg = if pos_opt.is_some() {
+            let status_msg = if rotation_result.is_some() {
                 format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason)
             } else {
                 format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, final_next_node_id, reason)
@@ -1317,18 +1323,26 @@ async fn start_node_worker(
     let node_tx_clone = node_tx.clone();
     let active_threads_clone = active_threads.clone();
     
+    // 在spawning前，预先更新活动线程状态
+    {
+        // 更新活动线程状态
+        let mut active_threads_guard = active_threads.lock();
+        active_threads_guard.insert(node_id, true);
+        // 锁在这里释放
+    }
+    
+    // 先发送节点启动通知
+    let notify_future = node_tx.clone().send(NodeManagerCommand::NodeStarted(node_id));
+    
+    // 等待通知完成
+    match tokio::time::timeout(Duration::from_secs(2), notify_future).await {
+        Ok(Ok(_)) => println!("📣 节点-{}: 已成功通知节点管理器节点启动", node_id),
+        Ok(Err(e)) => println!("⚠️ 节点-{}: 通知节点管理器启动失败: {}", node_id, e),
+        Err(_) => println!("⚠️ 节点-{}: 通知节点管理器启动超时", node_id),
+    }
+    
     // 启动节点工作线程
     let handle = tokio::spawn(async move {
-        // 在单独的作用域中更新活动线程状态，避免跨await持有锁
-        {
-            // 通知节点管理器节点已启动
-            let _ = node_tx_clone.send(NodeManagerCommand::NodeStarted(node_id)).await;
-            
-            // 更新活动线程状态
-            let mut active_threads_guard = active_threads_clone.lock();
-            active_threads_guard.insert(node_id, true);
-        } // 锁在这里释放
-        
         // 运行节点
         run_memory_optimized_node(
             node_id,
