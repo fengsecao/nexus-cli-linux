@@ -425,7 +425,7 @@ async fn node_manager(
     println!("🔄 节点管理器: 最大并发数设置为 {}", max_concurrent);
     
     // 添加一个定期检查标志，避免过于频繁的检查
-    let mut last_check_time = std::time::Instant::now();
+    let last_check_time = std::time::Instant::now();
     let check_interval = std::time::Duration::from_secs(1); // 减少检查间隔为1秒
     
     // 创建一个节点启动队列，用于记录需要启动的节点
@@ -484,8 +484,8 @@ async fn node_manager(
                             println!("🔄 节点管理器: 当前活动节点数量: {}, 最大并发数: {}, 将立即启动 {} 个新节点", 
                                     current_active_count, max_concurrent, nodes_to_start_count);
                             
-                            // 只启动需要的节点数量
-                            let nodes_to_launch: Vec<u64> = nodes_to_start.drain(..nodes_to_start_count).collect();
+                            // 创建一个本地的节点启动列表
+                            let nodes_to_launch: Vec<u64> = new_nodes.into_iter().take(nodes_to_start_count).collect();
                             
                             for node_id in nodes_to_launch {
                                 println!("🔄 节点管理器: 立即启动节点-{}", node_id);
