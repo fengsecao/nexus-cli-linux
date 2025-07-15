@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
 use std::time::Duration;
 use parking_lot::Mutex;
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 use rand;
 use log::{debug, warn};
 use crate::orchestrator_client_enhanced::EnhancedOrchestratorClient;
@@ -156,7 +156,7 @@ pub async fn start_optimized_batch_workers(
     nodes: Vec<u64>,
     _orchestrator: OrchestratorClient,
     num_workers_per_node: usize,
-    start_delay: f64,
+    _start_delay: f64,
     proof_interval: u64,
     environment: Environment,
     shutdown: broadcast::Receiver<()>,
@@ -754,15 +754,17 @@ async fn node_manager(
                     
                     // 只在活动线程数量变化时或每隔30秒才输出一次状态
                     static mut LAST_ACTIVE_COUNT: u32 = 0;
-                    static mut LAST_STATUS_TIME: std::time::Instant = std::time::Instant::now();
+                    static LAST_STATUS_TIME: Lazy<Mutex<std::time::Instant>> = Lazy::new(|| {
+                        Mutex::new(std::time::Instant::now())
+                    });
                     
                     let should_print = unsafe {
                         let count_changed = LAST_ACTIVE_COUNT != current_active_count as u32;
-                        let time_passed = LAST_STATUS_TIME.elapsed() >= std::time::Duration::from_secs(30);
+                        let time_passed = LAST_STATUS_TIME.lock().elapsed() >= std::time::Duration::from_secs(30);
                         
                         if count_changed || time_passed {
                             LAST_ACTIVE_COUNT = current_active_count as u32;
-                            LAST_STATUS_TIME = std::time::Instant::now();
+                            *LAST_STATUS_TIME.lock() = std::time::Instant::now();
                             true
                         } else {
                             false
