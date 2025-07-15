@@ -1062,7 +1062,7 @@ async fn get_nodes_to_start(
         
         // 计算当前活动节点数量
         active_count = active_threads_guard.iter()
-            .filter(|(_, &active)| active)
+            .filter(|pair| *pair.1)
             .count();
     }
     
@@ -1332,7 +1332,8 @@ async fn start_node_worker(
     }
     
     // 先发送节点启动通知
-    let notify_future = node_tx.clone().send(NodeManagerCommand::NodeStarted(node_id));
+    let node_tx_for_notify = node_tx.clone();
+    let notify_future = node_tx_for_notify.send(NodeManagerCommand::NodeStarted(node_id));
     
     // 等待通知完成
     match tokio::time::timeout(Duration::from_secs(2), notify_future).await {
