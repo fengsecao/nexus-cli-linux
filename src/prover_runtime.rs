@@ -743,6 +743,16 @@ async fn node_manager(
     });
     
     loop {
+        // 强制执行并发限制，确保活动节点数不超过max_concurrent
+        {
+            let mut active_nodes_guard = active_nodes.lock();
+            if active_nodes_guard.len() > max_concurrent {
+                println!("⚠️ 强制执行并发限制: 活动节点列表 {} -> {}", 
+                        active_nodes_guard.len(), max_concurrent);
+                active_nodes_guard.truncate(max_concurrent);
+            }
+        }
+        
         // 定期清理活动节点列表，确保不超过最大并发数
         cleanup_active_nodes(&active_nodes, &active_threads, max_concurrent).await;
         
@@ -1078,8 +1088,14 @@ async fn rotate_to_next_node(
             return (false, Some(format!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id)));
         }
         
-        // 轮转前清理活动节点列表，确保不超过最大并发数
-        cleanup_active_nodes(active_nodes, &Arc::new(Mutex::new(HashMap::new())), *max_concurrent).await;
+        // 强制限制活动节点列表不超过最大并发数
+        let mut active_nodes_guard = active_nodes.lock();
+        if active_nodes_guard.len() > *max_concurrent {
+            println!("⚠️ 节点-{}: 强制限制活动节点列表大小 {} -> {}", 
+                    node_id, active_nodes_guard.len(), *max_concurrent);
+            active_nodes_guard.truncate(*max_concurrent);
+        }
+        drop(active_nodes_guard); // 显式释放锁
         
         // 获取当前节点的索引
         let node_idx_opt = {
@@ -1088,8 +1104,9 @@ async fn rotate_to_next_node(
         };
         
         if let Some(node_idx) = node_idx_opt {
-            // 计算下一个节点的索引：当前索引 + 1，如果超出范围则循环
-            let next_idx = (node_idx + 1) % all_nodes.len();
+            // 计算下一个节点的索引：当前索引 + max_concurrent，以确保节点分散
+            let jump_distance = *max_concurrent;
+            let next_idx = (node_idx + jump_distance) % all_nodes.len();
             let next_node_id = all_nodes[next_idx];
             
             // 确保不会轮转到自己
@@ -1481,8 +1498,8 @@ async fn run_memory_optimized_node(
                                     // 重置429计数
                                     rate_limit_tracker.reset_429_count(node_id).await;
                                     
-                                    // 增加成功计数
-                                    let success_count = rate_limit_tracker.increment_success_count(node_id).await;
+                                    // 获取成功计数（不增加计数，避免重复计数）
+                                    let success_count = rate_limit_tracker.get_success_count(node_id).await;
                                     
                                     let msg = format!("[{}] ✅ 缓存证明提交成功! 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
@@ -1667,8 +1684,8 @@ async fn run_memory_optimized_node(
                                     // 重置429计数
                                     rate_limit_tracker.reset_429_count(node_id).await;
                                     
-                                    // 增加成功计数
-                                    let success_count = rate_limit_tracker.increment_success_count(node_id).await;
+                                    // 获取成功计数（不增加计数，避免重复计数）
+                                    let success_count = rate_limit_tracker.get_success_count(node_id).await;
                                     
                                     let msg = format!("[{}] ✅ 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
