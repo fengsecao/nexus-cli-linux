@@ -16,7 +16,7 @@ use ed25519_dalek::SigningKey;
 use nexus_sdk::stwo::seq::Proof;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
+use std::sync::atomic::{AtomicU64, Ordering, AtomicBool, AtomicU32};
 use std::time::Duration;
 use parking_lot::Mutex;
 use once_cell::sync::Lazy;
@@ -62,6 +62,12 @@ fn get_timestamp_efficient() -> String {
 }
 
 /// 全局请求限流器 - 限制对服务器的请求频率
+/// 
+/// 动态调整机制:
+/// - 初始速率: 每秒1个请求
+/// - 如果检测到429错误: 降低10%速率 (例如: 1.0 -> 0.9 -> 0.81 ...)
+/// - 如果请求成功: 增加10%速率 (例如: 1.0 -> 1.1 -> 1.21 ...)
+/// - 速率限制范围: 最低每10秒1个请求 (0.1/秒), 最高每秒5个请求 (5.0/秒)
 pub struct GlobalRateLimiter {
     last_request_time: Instant,
     request_interval: Duration,
@@ -81,29 +87,6 @@ impl GlobalRateLimiter {
             requests_per_second,
             total_requests: 0,
         }
-    }
-    
-    /// 等待直到可以发送下一个请求
-    pub async fn wait_for_next_request(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last_request_time);
-        
-        // 如果距离上次请求的时间小于间隔，则等待
-        if elapsed < self.request_interval {
-            let wait_time = self.request_interval - elapsed;
-            
-            // 每10个请求输出一次日志，避免日志过多
-            if self.total_requests % 10 == 0 {
-                println!("🚦 全局限流: 等待 {:.2}ms 后发送下一个请求 (总请求数: {})", 
-                        wait_time.as_millis(), self.total_requests);
-            }
-            
-            tokio::time::sleep(wait_time).await;
-        }
-        
-        // 更新上次请求时间
-        self.last_request_time = Instant::now();
-        self.total_requests += 1;
     }
     
     /// 调整请求速率
@@ -130,6 +113,19 @@ static GLOBAL_RATE_LIMITER: Lazy<Mutex<GlobalRateLimiter>> = Lazy::new(|| {
     Mutex::new(GlobalRateLimiter::new(1.0))
 });
 
+// 全局429错误计数器
+static RECENT_429_ERRORS: Lazy<AtomicU32> = Lazy::new(|| AtomicU32::new(0));
+
+/// 增加429错误计数
+pub fn increment_429_error_count() {
+    RECENT_429_ERRORS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 获取并重置429错误计数
+pub fn get_and_reset_429_error_count() -> u32 {
+    RECENT_429_ERRORS.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// 全局API请求函数 - 所有对服务器的请求都应该通过这个函数
 pub async fn make_api_request<F, T>(request_func: F) -> T 
 where 
@@ -137,8 +133,36 @@ where
 {
     // 等待限流器允许发送请求
     {
-        let mut limiter = GLOBAL_RATE_LIMITER.lock();
-        limiter.wait_for_next_request().await;
+        // 在单独的作用域中获取锁并等待
+        let wait_duration = {
+            let mut limiter = GLOBAL_RATE_LIMITER.lock();
+            let now = Instant::now();
+            let elapsed = now.duration_since(limiter.last_request_time);
+            
+            // 计算需要等待的时间
+            let wait_time = if elapsed < limiter.request_interval {
+                limiter.request_interval - elapsed
+            } else {
+                Duration::from_secs(0)
+            };
+            
+            // 更新上次请求时间和总请求数
+            limiter.last_request_time = now;
+            limiter.total_requests += 1;
+            
+            // 每10个请求输出一次日志，避免日志过多
+            if limiter.total_requests % 10 == 0 {
+                println!("🚦 全局限流: 等待 {:.2}ms 后发送下一个请求 (总请求数: {})", 
+                        wait_time.as_millis(), limiter.total_requests);
+            }
+            
+            wait_time
+        }; // 锁在这里释放
+        
+        // 锁释放后再等待
+        if wait_duration.as_nanos() > 0 {
+            tokio::time::sleep(wait_duration).await;
+        }
     }
     
     // 发送请求
@@ -408,40 +432,30 @@ pub async fn start_optimized_batch_workers(
                             let (rate, total_requests) = get_global_request_stats();
                             
                             // 检查最近是否有429错误
-                            let recent_429s = 0; // 这里需要从某处获取最近的429错误数量
+                            let recent_429s = get_and_reset_429_error_count();
                             
                             if recent_429s > 0 {
-                                // 如果有429错误，减慢请求速率
+                                // 如果有429错误，减慢请求速率 (降低10%)
                                 consecutive_429s += 1;
                                 consecutive_successes = 0;
                                 
-                                if consecutive_429s >= 2 {
-                                    // 连续两次检查都有429错误，大幅降低速率
-                                    current_rate = (current_rate * 0.5).max(0.2); // 最低每5秒1个请求
-                                    set_global_request_rate(current_rate);
-                                    println!("⚠️ 检测到连续429错误，大幅降低请求速率至每秒{}个", current_rate);
-                                } else {
-                                    // 第一次检测到429错误，小幅降低速率
-                                    current_rate = (current_rate * 0.8).max(0.5); // 最低每2秒1个请求
-                                    set_global_request_rate(current_rate);
-                                    println!("⚠️ 检测到429错误，降低请求速率至每秒{}个", current_rate);
-                                }
+                                // 每次减少10%的速率
+                                current_rate = f64::max(current_rate * 0.9, 0.1); // 最低每10秒1个请求
+                                set_global_request_rate(current_rate);
+                                println!("⚠️ 检测到429错误，降低请求速率至每秒{}个 (降低10%)", current_rate);
                             } else {
                                 // 如果没有429错误，可以考虑逐渐增加请求速率
                                 consecutive_429s = 0;
                                 consecutive_successes += 1;
                                 
-                                if consecutive_successes >= 3 {
-                                    // 连续三次检查都没有429错误，小幅增加速率
-                                    current_rate = (current_rate * 1.1).min(2.0); // 最高每秒2个请求
-                                    set_global_request_rate(current_rate);
-                                    println!("✅ 连续{}次无429错误，增加请求速率至每秒{}个", 
-                                            consecutive_successes, current_rate);
-                                    
-                                    // 重置成功计数，避免无限增加
-                                    if consecutive_successes >= 5 {
-                                        consecutive_successes = 3;
-                                    }
+                                // 每次检查都增加10%的速率
+                                current_rate = f64::min(current_rate * 1.1, 5.0); // 最高每秒5个请求
+                                set_global_request_rate(current_rate);
+                                println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
+                                
+                                // 重置成功计数，避免过大
+                                if consecutive_successes >= 10 {
+                                    consecutive_successes = 1;
                                 }
                             }
                             
