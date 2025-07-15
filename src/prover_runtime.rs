@@ -444,27 +444,32 @@ pub async fn start_optimized_batch_workers(
             let node_tx_for_workers = node_tx.clone();
             
             // 使用node_tx_for_workers来启动节点
-            for node_id in active_nodes_guard.iter().copied().take(actual_concurrent) {
-                println!("🚀 节点管理器: 初始启动节点-{}", node_id);
+            {
+                // 获取活动节点列表
+                let active_nodes_guard = active_nodes_clone.lock();
                 
-                let handle = start_node_worker(
-                    node_id,
-                    environment.clone(),
-                    proxy_file.clone(),
-                    num_workers_per_node,
-                    proof_interval,
-                    status_callback_arc.clone(),
-                    event_sender.clone(),
-                    shutdown.resubscribe(),
-                    rotation_data.clone(),
-                    active_threads.clone(),
-                    node_tx_for_workers.clone(),
-                ).await;
-                
-                // 不需要存储句柄，因为它们会在完成时自动清理
-                tokio::spawn(async move {
-                    let _ = handle.await;
-                });
+                for node_id in active_nodes_guard.iter().copied().take(actual_concurrent) {
+                    println!("🚀 节点管理器: 初始启动节点-{}", node_id);
+                    
+                    let handle = start_node_worker(
+                        node_id,
+                        environment.clone(),
+                        proxy_file.clone(),
+                        num_workers_per_node,
+                        proof_interval,
+                        status_callback_arc.clone(),
+                        event_sender.clone(),
+                        shutdown.resubscribe(),
+                        rotation_data.clone(),
+                        active_threads.clone(),
+                        node_tx_for_workers.clone(),
+                    ).await;
+                    
+                    // 不需要存储句柄，因为它们会在完成时自动清理
+                    tokio::spawn(async move {
+                        let _ = handle.await;
+                    });
+                }
             }
             
             let manager_handle = tokio::spawn(async move {
