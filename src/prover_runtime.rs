@@ -332,7 +332,10 @@ pub async fn start_optimized_batch_workers(
     }
     
     // 创建一个用于节点管理器和工作线程之间通信的通道
-    let (node_tx, node_rx) = mpsc::channel::<NodeManagerCommand>(100);
+    let (node_tx, _node_rx) = mpsc::channel::<NodeManagerCommand>(100);
+    
+    // 保存发送端，以便后续使用
+    let _node_tx_for_workers = node_tx.clone();
     
     // 如果启用了轮转功能，创建节点队列和活动节点跟踪器
     let all_nodes = Arc::new(nodes.clone());
@@ -437,8 +440,32 @@ pub async fn start_optimized_batch_workers(
             // 创建一个新的通道，用于节点管理器
             let (node_tx, node_rx) = mpsc::channel::<NodeManagerCommand>(100);
             
-            // 保存发送端，以便后续使用
+            // 保存发送端，供其他地方使用
             let node_tx_for_workers = node_tx.clone();
+            
+            // 使用node_tx_for_workers来启动节点
+            for node_id in active_nodes_guard.iter().copied().take(actual_concurrent) {
+                println!("🚀 节点管理器: 初始启动节点-{}", node_id);
+                
+                let handle = start_node_worker(
+                    node_id,
+                    environment.clone(),
+                    proxy_file.clone(),
+                    num_workers_per_node,
+                    proof_interval,
+                    status_callback_arc.clone(),
+                    event_sender.clone(),
+                    shutdown.resubscribe(),
+                    rotation_data.clone(),
+                    active_threads.clone(),
+                    node_tx_for_workers.clone(),
+                ).await;
+                
+                // 不需要存储句柄，因为它们会在完成时自动清理
+                tokio::spawn(async move {
+                    let _ = handle.await;
+                });
+            }
             
             let manager_handle = tokio::spawn(async move {
                 node_manager(
@@ -1812,8 +1839,7 @@ async fn cleanup_active_nodes(
             .collect();
     }
     
-    // 更新活动节点列表，只保留真正活跃的节点
-    let mut needs_truncation = false;
+    // 更新活动节点列表，确保包含所有真正活跃的节点
     {
         let mut nodes_guard = active_nodes.lock();
         
@@ -1821,24 +1847,49 @@ async fn cleanup_active_nodes(
         println!("📊 节点清理: 当前活动节点列表: {:?}", *nodes_guard);
         println!("📊 节点清理: 真正活跃的节点: {:?}", active_node_ids);
         
-        // 先移除不再活跃的节点
-        let original_len = nodes_guard.len();
-        nodes_guard.retain(|id| active_node_ids.contains(id));
-        
-        if original_len != nodes_guard.len() {
-            println!("✅ 节点清理: 已移除不活跃节点，列表大小: {} -> {}", 
-                    original_len, nodes_guard.len());
+        // 检查活动节点列表是否为空
+        if nodes_guard.is_empty() && !active_node_ids.is_empty() {
+            println!("⚠️ 节点清理: 活动节点列表为空，但有{}个活跃节点，正在恢复", active_node_ids.len());
+            
+            // 将所有真正活跃的节点添加回活动列表，但不超过最大并发数
+            let nodes_to_add = active_node_ids.iter()
+                .take(max_concurrent)
+                .cloned()
+                .collect::<Vec<u64>>();
+            
+            nodes_guard.extend(nodes_to_add);
+            println!("✅ 节点清理: 已将{}个活跃节点添加回活动列表", nodes_guard.len());
+        } else {
+            // 先移除不再活跃的节点
+            let original_len = nodes_guard.len();
+            nodes_guard.retain(|id| active_node_ids.contains(id));
+            
+            if original_len != nodes_guard.len() {
+                println!("✅ 节点清理: 已移除不活跃节点，列表大小: {} -> {}", 
+                        original_len, nodes_guard.len());
+            }
+            
+            // 如果活动列表中缺少一些活跃节点，添加它们（但不超过最大并发数）
+            let missing_nodes: Vec<u64> = active_node_ids.iter()
+                .filter(|id| !nodes_guard.contains(id))
+                .cloned()
+                .collect();
+            
+            if !missing_nodes.is_empty() && nodes_guard.len() < max_concurrent {
+                let slots_available = max_concurrent - nodes_guard.len();
+                let nodes_to_add = missing_nodes.iter()
+                    .take(slots_available)
+                    .cloned()
+                    .collect::<Vec<u64>>();
+                
+                if !nodes_to_add.is_empty() {
+                    println!("✅ 节点清理: 添加{}个缺失的活跃节点到活动列表", nodes_to_add.len());
+                    nodes_guard.extend(nodes_to_add);
+                }
+            }
         }
         
-        // 如果活动节点列表超出max_concurrent，标记需要截断
-        if nodes_guard.len() > max_concurrent {
-            needs_truncation = true;
-        }
-    }
-    
-    // 如果需要截断，在单独的作用域中进行
-    if needs_truncation {
-        let mut nodes_guard = active_nodes.lock();
+        // 如果活动节点列表超出max_concurrent，截断多余的
         if nodes_guard.len() > max_concurrent {
             println!("⚠️ 节点清理: 活动节点列表超出限制 ({} > {}), 截断多余节点", 
                     nodes_guard.len(), max_concurrent);
@@ -1847,6 +1898,9 @@ async fn cleanup_active_nodes(
             println!("✅ 节点清理: 已截断活动节点列表: {} -> {}", 
                     original_len, nodes_guard.len());
         }
+        
+        // 最后打印更新后的活动节点列表
+        println!("📊 节点清理: 更新后的活动节点列表: {:?} (大小: {})", *nodes_guard, nodes_guard.len());
     }
     
     // 确保所有在活动节点列表中的节点在active_threads中都被标记为活跃
