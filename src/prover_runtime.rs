@@ -488,7 +488,7 @@ pub async fn start_optimized_batch_workers(
             
             tokio::spawn(async move {
                 let mut check_count = 0;
-                const MAX_CHECKS = 5; // 最多检查5次，然后强制设置为已启动
+                const MAX_CHECKS: u32 = 5; // 最多检查5次，然后强制设置为已启动
                 
                 loop {
                     // 检查所有初始节点是否已启动
@@ -632,14 +632,14 @@ async fn node_manager(
     
     // 创建一个任务来处理全局通信通道的消息
     let active_threads_clone = active_threads.clone();
-    let active_nodes_clone = active_nodes.clone();
-    let env_clone = environment.clone();
-    let proxy_clone = proxy_file.clone();
-    let callback_clone = status_callback_arc.clone();
-    let event_sender_clone = event_sender.clone();
-    let rotation_clone = rotation_data.clone();
-    let global_tx_clone = global_tx.clone(); // 为闭包创建一个克隆
-    let shutdown_clone = shutdown.resubscribe(); // 为闭包创建一个克隆
+    let _active_nodes_clone = active_nodes.clone();
+    let _env_clone = environment.clone();
+    let _proxy_clone = proxy_file.clone();
+    let _callback_clone = status_callback_arc.clone();
+    let _event_sender_clone = event_sender.clone();
+    let _rotation_clone = rotation_data.clone();
+    let _global_tx_clone = global_tx.clone(); // 为闭包创建一个克隆
+    let _shutdown_clone = shutdown.resubscribe(); // 为闭包创建一个克隆
     
     // 启动一个后台任务来处理全局通信通道的消息
     tokio::spawn(async move {
