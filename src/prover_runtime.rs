@@ -343,13 +343,8 @@ pub async fn start_optimized_batch_workers(
     for (index, node_id) in active_nodes_list.iter().enumerate() {
         // 添加启动延迟
         if index > 0 {
-            // 使用更长的延迟，特别是对于前几个节点
-            let actual_delay = if index < 5 {
-                // 前5个节点使用更长的延迟
-                start_delay * 2.0
-            } else {
-                start_delay
-            };
+            // 设置固定3秒延迟
+            let actual_delay = 3.0;
             
             println!("启动节点 {} (第{}/{}个), 延迟 {:.1}秒...", 
                     node_id, index + 1, actual_concurrent, actual_delay);
@@ -757,9 +752,28 @@ async fn node_manager(
                         }
                     }
                     
-                    // 输出当前状态
-                    println!("🔄 节点管理器: 定期检查 - 活动线程数: {}, 最大并发数: {}", 
-                            current_active_count, max_concurrent);
+                    // 只在活动线程数量变化时或每隔30秒才输出一次状态
+                    static mut LAST_ACTIVE_COUNT: u32 = 0;
+                    static mut LAST_STATUS_TIME: std::time::Instant = std::time::Instant::now();
+                    
+                    let should_print = unsafe {
+                        let count_changed = LAST_ACTIVE_COUNT != current_active_count as u32;
+                        let time_passed = LAST_STATUS_TIME.elapsed() >= std::time::Duration::from_secs(30);
+                        
+                        if count_changed || time_passed {
+                            LAST_ACTIVE_COUNT = current_active_count as u32;
+                            LAST_STATUS_TIME = std::time::Instant::now();
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    
+                    if should_print {
+                        // 输出当前状态
+                        println!("🔄 节点管理器: 定期检查 - 活动线程数: {}, 最大并发数: {}", 
+                                current_active_count, max_concurrent);
+                    }
                     
                     // 获取需要启动的节点列表
                     let new_nodes = get_nodes_to_start(&active_nodes, &active_threads).await;
