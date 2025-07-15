@@ -194,7 +194,7 @@ pub fn get_global_request_stats() -> (f64, u64) {
 }
 
 /// 全局活跃节点数量限制器
-static GLOBAL_ACTIVE_NODES: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+pub static GLOBAL_ACTIVE_NODES: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
 /// 获取当前全局活跃节点数量
 pub fn get_global_active_node_count() -> usize {

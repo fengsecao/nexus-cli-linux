@@ -257,8 +257,16 @@ impl FixedLineDisplay {
         
         println!("───────────────────────────────────────────");
         
-        // 按节点ID排序显示
-        let mut sorted_lines: Vec<_> = lines.iter().collect();
+        // 获取全局活跃节点列表
+        let active_node_ids = {
+            let nodes = crate::prover_runtime::GLOBAL_ACTIVE_NODES.lock();
+            nodes.clone()
+        };
+        
+        // 过滤并按节点ID排序显示 - 只显示活跃节点
+        let mut sorted_lines: Vec<_> = lines.iter()
+            .filter(|(id, _)| active_node_ids.contains(id)) // 只保留活跃节点
+            .collect();
         sorted_lines.sort_unstable_by_key(|(id, _)| *id);
         
         for (node_id, status) in sorted_lines {
