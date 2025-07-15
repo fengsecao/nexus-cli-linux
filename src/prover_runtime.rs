@@ -127,6 +127,7 @@ pub fn get_429_error_count() -> u32 {
 }
 
 /// 获取并重置429错误计数
+#[allow(dead_code)]
 pub fn get_and_reset_429_error_count() -> u32 {
     RECENT_429_ERRORS.swap(0, std::sync::atomic::Ordering::SeqCst)
 }
@@ -510,7 +511,7 @@ pub async fn start_optimized_batch_workers(
                     // 检查所有初始节点是否已启动
                     let all_started = {
                         let active_threads_guard = active_threads_monitor.lock();
-                        let mut all_started = !active_threads_guard.is_empty();
+                        let all_started = !active_threads_guard.is_empty();
                         
                         // 输出当前活动线程信息
                         println!("🔄 节点启动监控: 当前活动节点数量: {}, 尝试次数: {}", active_threads_guard.len(), attempts);
@@ -742,6 +743,9 @@ async fn node_manager(
     });
     
     loop {
+        // 定期清理活动节点列表，确保不超过最大并发数
+        cleanup_active_nodes(&active_nodes, &active_threads, max_concurrent).await;
+        
         // 首先检查是否有需要启动的节点
         if !nodes_to_start.is_empty() {
             // 检查当前活动节点数量
@@ -1074,6 +1078,9 @@ async fn rotate_to_next_node(
             return (false, Some(format!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id)));
         }
         
+        // 轮转前清理活动节点列表，确保不超过最大并发数
+        cleanup_active_nodes(active_nodes, &Arc::new(Mutex::new(HashMap::new())), *max_concurrent).await;
+        
         // 获取当前节点的索引
         let node_idx_opt = {
             let node_indices_guard = node_indices.lock();
@@ -1112,6 +1119,13 @@ async fn rotate_to_next_node(
             let pos_opt = {
                 let mut active_nodes_guard = active_nodes.lock();
                 println!("📋 节点-{}: 当前活动节点列表: {:?}", node_id, *active_nodes_guard);
+                
+                // 确保活动节点数量不超过最大限制
+                if active_nodes_guard.len() > *max_concurrent {
+                    println!("⚠️ 节点-{}: 活动节点列表超出限制 ({} > {}), 截断多余节点", 
+                            node_id, active_nodes_guard.len(), *max_concurrent);
+                    active_nodes_guard.truncate(*max_concurrent);
+                }
                 
                 // 查找当前节点在活动列表中的位置
                 let pos = active_nodes_guard.iter().position(|&id| id == node_id);
@@ -1910,6 +1924,37 @@ async fn run_memory_optimized_node(
             let wait_time = proof_interval + (rand::random::<u64>() % 2); // 添加0-1秒的随机变化
             update_status(format!("[{}] ⏱️ 等待 {}s 后继续...", timestamp, wait_time));
             tokio::time::sleep(Duration::from_secs(wait_time)).await;
+        }
+    }
+}
+
+// 清理活动节点列表，确保只有真正活动的节点被包含
+async fn cleanup_active_nodes(
+    active_nodes: &Arc<Mutex<Vec<u64>>>, 
+    active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
+    max_concurrent: usize
+) {
+    // 获取当前真正活跃的节点
+    let active_node_ids = {
+        let threads_guard = active_threads.lock();
+        threads_guard.iter()
+            .filter(|(_, &is_active)| is_active)
+            .map(|(&id, _)| id)
+            .collect::<Vec<u64>>()
+    };
+    
+    // 更新活动节点列表，只保留真正活跃的节点
+    {
+        let mut nodes_guard = active_nodes.lock();
+        
+        // 先移除不再活跃的节点
+        nodes_guard.retain(|id| active_node_ids.contains(id));
+        
+        // 如果活动节点列表超出max_concurrent，截断多余的
+        if nodes_guard.len() > max_concurrent {
+            println!("⚠️ 活动节点列表超出限制 ({} > {}), 截断多余节点", 
+                nodes_guard.len(), max_concurrent);
+            nodes_guard.truncate(max_concurrent);
         }
     }
 }
