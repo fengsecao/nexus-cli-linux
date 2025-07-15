@@ -47,6 +47,9 @@ use log::warn;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 
+// 导入全局活跃节点计数函数
+use crate::prover_runtime::get_global_active_node_count;
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 /// Command-line arguments
@@ -226,16 +229,14 @@ impl FixedLineDisplay {
         // 获取持久化的成功和失败计数
         let (successful_count, failed_count) = self.get_persistent_counts().await;
         
-        // 统计信息 - 只计算活跃节点数量，成功和失败使用累计值
-        let (total_nodes, active_count) = lines.values()
-            .fold((0, 0), |(total, active), status| {
-                let new_total = total + 1;
-                let new_active = if status.contains("获取任务") || status.contains("生成证明") || status.contains("提交证明") { active + 1 } else { active };
-                (new_total, new_active)
-            });
+        // 统计信息 - 获取全局活跃节点数量
+        let global_active_count = get_global_active_node_count();
+        
+        // 本地统计信息 - 只计算总节点数量，活跃数使用全局计数
+        let total_nodes = lines.len();
         
         println!("📊 状态: {} 总数 | {} 活跃 | {} 成功 | {} 失败", 
-                 total_nodes, active_count, successful_count, failed_count);
+                 total_nodes, global_active_count, successful_count, failed_count);
         println!("⏱️ 运行时间: {}天 {}小时 {}分钟 {}秒", 
                  self.start_time.elapsed().as_secs() / 86400,
                  (self.start_time.elapsed().as_secs() % 86400) / 3600,

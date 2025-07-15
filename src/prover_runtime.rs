@@ -193,6 +193,57 @@ pub fn get_global_request_stats() -> (f64, u64) {
     (limiter.get_rate(), limiter.get_total_requests())
 }
 
+/// 全局活跃节点数量限制器
+static GLOBAL_ACTIVE_NODES: Lazy<Mutex<HashSet<u64>>> = Lazy::new(|| Mutex::new(HashSet::new()));
+
+/// 获取当前全局活跃节点数量
+pub fn get_global_active_node_count() -> usize {
+    let nodes = GLOBAL_ACTIVE_NODES.lock();
+    nodes.len()
+}
+
+/// 添加节点到全局活跃节点集合
+pub fn add_global_active_node(node_id: u64) -> bool {
+    let mut nodes = GLOBAL_ACTIVE_NODES.lock();
+    nodes.insert(node_id)
+}
+
+/// 从全局活跃节点集合移除节点
+pub fn remove_global_active_node(node_id: u64) -> bool {
+    let mut nodes = GLOBAL_ACTIVE_NODES.lock();
+    nodes.remove(&node_id)
+}
+
+/// 检查节点是否在全局活跃集合中
+pub fn is_node_globally_active(node_id: u64) -> bool {
+    let nodes = GLOBAL_ACTIVE_NODES.lock();
+    nodes.contains(&node_id)
+}
+
+/// 清理全局活跃节点集合，确保只保留真正活跃的节点
+pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>, max_concurrent: usize) {
+    let mut nodes = GLOBAL_ACTIVE_NODES.lock();
+    
+    // 获取当前真正活跃的节点
+    let active_nodes: HashSet<u64> = {
+        let threads_guard = active_threads.lock();
+        threads_guard.iter()
+            .filter(|pair| *pair.1)
+            .map(|(&id, _)| id)
+            .collect()
+    };
+    
+    // 清空并重建全局活跃节点集合
+    nodes.clear();
+    
+    // 仅添加最多max_concurrent个活跃节点
+    for node_id in active_nodes.iter().take(max_concurrent) {
+        nodes.insert(*node_id);
+    }
+    
+    println!("🌍 全局活跃节点同步 - 当前活跃节点数量: {}/{}", nodes.len(), max_concurrent);
+}
+
 /// Starts authenticated workers that fetch tasks from the orchestrator and process them.
 pub async fn start_authenticated_workers(
     node_id: u64,
@@ -711,6 +762,16 @@ async fn node_manager(
         }
     });
     
+    // 定期执行全局节点计数同步
+    let active_threads_for_sync = active_threads.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        loop {
+            interval.tick().await;
+            sync_global_active_nodes(&active_threads_for_sync, max_concurrent);
+        }
+    });
+    
     loop {
         tokio::select! {
             // 处理关闭信号
@@ -734,6 +795,9 @@ async fn node_manager(
                 // 每次检查前强制执行清理，确保活动节点列表和活动线程状态一致
                 cleanup_active_nodes(&active_nodes, &active_threads, max_concurrent).await;
                 
+                // 获取全局活跃节点数量
+                let global_active_count = get_global_active_node_count();
+                
                 // 确认清理后的状态
                 let current_active_count = {
                     let threads_guard = active_threads.lock();
@@ -745,15 +809,21 @@ async fn node_manager(
                     nodes_guard.len()
                 };
                 
-                println!("📊 节点管理器: 定期检查 - 当前活动节点数量: {}, 活动列表长度: {}, 最大并发数: {}", 
-                        current_active_count, active_nodes_count, max_concurrent);
+                println!("📊 节点管理器: 定期检查 - 当前活动节点数量: {}, 活动列表长度: {}, 全局活跃数量: {}, 最大并发数: {}", 
+                        current_active_count, active_nodes_count, global_active_count, max_concurrent);
                 
                 // 如果活动节点数量或活动列表长度超过最大并发数，执行强制清理
-                if current_active_count > max_concurrent || active_nodes_count > max_concurrent {
+                if current_active_count > max_concurrent || active_nodes_count > max_concurrent || global_active_count > max_concurrent {
                     println!("⚠️ 节点管理器: 状态不一致或超出限制，执行强制清理");
+                    
+                    // 强制同步全局活跃节点集合
+                    sync_global_active_nodes(&active_threads, max_concurrent);
+                    
+                    // 然后清理活动节点列表
                     cleanup_active_nodes(&active_nodes, &active_threads, max_concurrent).await;
                     
-                    // 重新获取活动节点数量和活动列表长度
+                    // 重新获取各种计数
+                    let global_active_count = get_global_active_node_count();
                     let current_active_count = {
                         let threads_guard = active_threads.lock();
                         threads_guard.values().filter(|&&active| active).count()
@@ -764,12 +834,12 @@ async fn node_manager(
                         nodes_guard.len()
                     };
                     
-                    println!("📊 节点管理器: 清理后 - 当前活动节点数量: {}, 活动列表长度: {}", 
-                            current_active_count, active_nodes_count);
+                    println!("📊 节点管理器: 清理后 - 当前活动节点数量: {}, 活动列表长度: {}, 全局活跃数量: {}", 
+                            current_active_count, active_nodes_count, global_active_count);
                     
                     // 再次确认清理是否有效
-                    if current_active_count > max_concurrent || active_nodes_count > max_concurrent {
-                        println!("⚠️ 节点管理器: 清理无效，手动截断活动节点列表");
+                    if current_active_count > max_concurrent || active_nodes_count > max_concurrent || global_active_count > max_concurrent {
+                        println!("⚠️ 节点管理器: 清理无效，执行紧急强制限制");
                         
                         // 手动截断活动节点列表
                         {
@@ -795,11 +865,27 @@ async fn node_manager(
                                 threads_guard.insert(node_id, true);
                             }
                         }
+                        
+                        // 强制重置全局活跃节点集合
+                        {
+                            let mut nodes = GLOBAL_ACTIVE_NODES.lock();
+                            nodes.clear();
+                            
+                            let nodes_guard = active_nodes.lock();
+                            for &node_id in nodes_guard.iter() {
+                                nodes.insert(node_id);
+                            }
+                            
+                            println!("🌍 全局活跃节点紧急重置 - 当前活跃节点数量: {}/{}", nodes.len(), max_concurrent);
+                        }
                     }
                 }
                 
                 // 获取需要启动的节点
                 let nodes_to_start = get_nodes_to_start(&active_nodes, &active_threads).await;
+                
+                // 获取最新的全局活跃节点数量
+                let global_active_count = get_global_active_node_count();
                 
                 // 确认最终状态
                 let final_active_count = {
@@ -807,19 +893,25 @@ async fn node_manager(
                     threads_guard.values().filter(|&&active| active).count()
                 };
                 
+                // 使用全局计数和本地计数的较大值来计算可用槽位，确保更严格的控制
+                let effective_active_count = std::cmp::max(global_active_count, final_active_count);
+                
                 // 计算可以启动的节点数量
-                let available_slots = if final_active_count < max_concurrent {
-                    max_concurrent - final_active_count
+                let available_slots = if effective_active_count < max_concurrent {
+                    max_concurrent - effective_active_count
                 } else {
                     0
                 };
+                
+                println!("📊 节点管理器: 最终状态 - 活跃节点: {}, 全局活跃: {}, 可用槽位: {}", 
+                        final_active_count, global_active_count, available_slots);
                 
                 if available_slots > 0 {
                     println!("📊 节点管理器: 有 {} 个可用槽位，可以启动新节点", available_slots);
                     
                     // 只启动可用槽位数量的节点
                     let nodes_to_start = nodes_to_start.into_iter()
-                        .filter(|&node_id| !starting_nodes.contains(&node_id))
+                        .filter(|&node_id| !starting_nodes.contains(&node_id) && !is_node_globally_active(node_id))
                         .take(available_slots)
                         .collect::<Vec<_>>();
                     
@@ -833,6 +925,12 @@ async fn node_manager(
                         
                         // 启动节点
                         for node_id in nodes_to_start {
+                            // 再次确认全局活跃节点数量未超限
+                            if get_global_active_node_count() >= max_concurrent {
+                                println!("⚠️ 节点管理器: 全局活跃节点数量已达到最大并发数，取消启动剩余节点");
+                                break;
+                            }
+                            
                             // 启动新节点
                             println!("🚀 节点管理器: 启动节点-{}", node_id);
                             
@@ -854,6 +952,9 @@ async fn node_manager(
                             tokio::spawn(async move {
                                 let _ = handle.await;
                             });
+                            
+                            // 短暂等待确保节点启动逻辑完成
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     } else {
                         println!("📊 节点管理器: 没有需要启动的新节点");
@@ -1021,11 +1122,36 @@ async fn rotate_to_next_node(
 ) -> (bool, Option<String>) {
     println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
     
+    // 从全局活跃节点集合移除当前节点
+    remove_global_active_node(node_id);
+    println!("🌍 节点-{}: 已从全局活跃节点集合移除", node_id);
+    
     if let Some((active_nodes, _next_node_index, all_nodes, all_nodes_started, node_indices, max_concurrent)) = rotation_data {
         // 检查所有初始节点是否已启动
         if !all_nodes_started.load(std::sync::atomic::Ordering::SeqCst) {
             println!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id);
             return (false, Some(format!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id)));
+        }
+        
+        // 检查全局活跃节点数量，如果已达到最大并发数，则不轮转新节点
+        let global_active_count = get_global_active_node_count();
+        if global_active_count >= *max_concurrent {
+            println!("⚠️ 节点-{}: 全局活跃节点数量 ({}) 已达到最大并发数 ({}), 仅移除当前节点，不添加新节点", 
+                    node_id, global_active_count, *max_concurrent);
+            
+            // 从活动节点列表中移除当前节点
+            {
+                let mut active_nodes_guard = active_nodes.lock();
+                if let Some(pos) = active_nodes_guard.iter().position(|&id| id == node_id) {
+                    active_nodes_guard.remove(pos);
+                    println!("✅ 节点-{}: 已从活动节点列表移除", node_id);
+                }
+            }
+            
+            // 通知节点管理器当前节点已停止
+            let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+            
+            return (true, Some(format!("⚠️ 节点-{}: 全局活跃节点已达上限，仅停止当前节点", node_id)));
         }
         
         // 强制限制活动节点列表不超过最大并发数
@@ -1067,6 +1193,18 @@ async fn rotate_to_next_node(
                     node_id, node_idx, final_next_idx, all_nodes.len());
             println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, final_next_node_id, final_next_idx);
             
+            // 检查新节点是否已经在全局活跃节点集合中
+            if is_node_globally_active(final_next_node_id) {
+                println!("⚠️ 节点-{}: 新节点-{} 已经在全局活跃节点集合中，不重复添加", 
+                        node_id, final_next_node_id);
+                
+                // 通知节点管理器当前节点已停止
+                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                
+                return (true, Some(format!("⚠️ 节点-{}: 新节点-{} 已在全局活跃节点集合中，跳过添加", 
+                                       node_id, final_next_node_id)));
+            }
+            
             // 获取当前活跃节点列表并打印（在一个独立的作用域内）
             {
                 let active_nodes_guard = active_nodes.lock();
@@ -1074,12 +1212,6 @@ async fn rotate_to_next_node(
                 println!("📋 节点-{}: 活动节点数量: {}, 最大并发数: {}", node_id, active_nodes_guard.len(), *max_concurrent);
                 // 锁在这里释放
             }
-            
-            // 检查活动节点列表是否已满
-            let is_full = {
-                let active_nodes_guard = active_nodes.lock();
-                active_nodes_guard.len() >= *max_concurrent
-            };
             
             // 更新活动节点列表
             {
@@ -1100,6 +1232,10 @@ async fn rotate_to_next_node(
                     println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
                     active_nodes_guard[pos] = final_next_node_id;
                     println!("✅ 节点-{}: 已替换为节点-{}", node_id, final_next_node_id);
+                    
+                    // 将新节点添加到全局活跃节点集合
+                    add_global_active_node(final_next_node_id);
+                    println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
                 } else {
                     // 当前节点不在列表中
                     println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
@@ -1108,6 +1244,10 @@ async fn rotate_to_next_node(
                     if active_nodes_guard.len() < *max_concurrent {
                         active_nodes_guard.push(final_next_node_id);
                         println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, final_next_node_id);
+                        
+                        // 将新节点添加到全局活跃节点集合
+                        add_global_active_node(final_next_node_id);
+                        println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
                     } else {
                         // 列表已满，无法添加新节点
                         println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 无法添加新节点", node_id, *max_concurrent);
@@ -1115,7 +1255,7 @@ async fn rotate_to_next_node(
                     }
                 }
                 
-                // 最后再次确保活动节点数量不超过最大并发数
+                // 最后再次确保活动节点列表不超过最大并发数
                 if active_nodes_guard.len() > *max_concurrent {
                     println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
                             node_id, active_nodes_guard.len(), *max_concurrent);
@@ -1174,6 +1314,11 @@ async fn rotate_to_next_node(
             
             // 即使通知失败，我们仍然认为轮转成功，因为活动节点列表已更新
             // 根据之前的查找结果生成状态消息
+            let is_full = {
+                let active_nodes_guard = active_nodes.lock();
+                active_nodes_guard.len() >= *max_concurrent
+            };
+            
             let status_msg = if is_full {
                 format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason)
             } else {
@@ -1212,6 +1357,30 @@ async fn start_node_worker(
     active_threads: Arc<Mutex<HashMap<u64, bool>>>,
     node_tx: mpsc::Sender<NodeManagerCommand>,
 ) -> JoinHandle<()> {
+    // 获取最大并发数
+    let max_concurrent = if let Some((_, _, _, _, _, max)) = &rotation_data {
+        *max
+    } else {
+        10 // 默认值
+    };
+
+    // 全局并发检查 - 如果已达到最大并发数且该节点不在活跃列表中，则不启动
+    let global_active_count = get_global_active_node_count();
+    if global_active_count >= max_concurrent && !is_node_globally_active(node_id) {
+        println!("⚠️ 节点-{}: 全局活跃节点数量 ({}) 已达到最大并发数 ({}), 拒绝启动", 
+                node_id, global_active_count, max_concurrent);
+                
+        // 使用Arc包装的回调
+        if let Some(callback_arc) = &status_callback_arc {
+            callback_arc(node_id, format!("拒绝启动: 已达到最大并发数 {}", max_concurrent));
+        }
+        
+        // 返回一个已完成的JoinHandle
+        return tokio::spawn(async move {
+            println!("🛑 节点-{}: 启动被拒绝，返回空任务", node_id);
+        });
+    }
+
     // 获取密钥
     let signing_key = match crate::key_manager::load_or_generate_signing_key() {
         Ok(key) => key,
@@ -1253,6 +1422,9 @@ async fn start_node_worker(
     let node_tx_clone = node_tx.clone();
     let active_threads_clone = active_threads.clone();
     
+    // 更新全局活跃节点集合
+    add_global_active_node(node_id);
+    
     // 在spawning前，预先更新活动线程状态
     {
         // 更新活动线程状态
@@ -1290,6 +1462,10 @@ async fn start_node_worker(
             active_threads_clone,
             node_tx_clone,
         ).await;
+        
+        // 节点完成时从全局活跃节点集合中移除
+        remove_global_active_node(node_id);
+        println!("🔴 节点-{}: 已从全局活跃节点集合中移除", node_id);
     });
     
     handle
@@ -1763,6 +1939,7 @@ async fn run_memory_optimized_node(
                                         // 检查是否为404错误（任务未找到），如果是则不再重试
                                         if error_str.contains("404") || error_str.contains("NotFoundError") || error_str.contains("Task not found") {
                                             update_status(format!("[{}] 🔍 任务已不存在 (404)，停止重试并获取新任务", timestamp));
+                                            retry_count = MAX_429_RETRIES; // 设置为最大值以跳出循环
                                             break; // 立即退出重试循环
                                         }
                                         
@@ -1982,6 +2159,9 @@ async fn cleanup_active_nodes(
                     active_count, max_concurrent);
         }
     }
+    
+    // 同步全局活跃节点集合
+    sync_global_active_nodes(active_threads, max_concurrent);
 }
 
 #[cfg(test)]
