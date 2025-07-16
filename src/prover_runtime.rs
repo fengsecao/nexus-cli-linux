@@ -241,6 +241,12 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
             .collect()
     };
     
+    // 如果活跃节点为空但全局节点不为空，保留全局节点
+    if active_nodes.is_empty() && !nodes.is_empty() {
+        println!("⚠️ 同步警告: 本地活跃节点为空，但全局有 {} 个活跃节点，保留全局状态", nodes.len());
+        return;
+    }
+    
     // 清空并重建全局活跃节点集合
     nodes.clear();
     
@@ -1185,6 +1191,9 @@ async fn rotate_to_next_node(
                     // 将新节点添加到全局活跃节点集合
                     add_global_active_node(final_next_node_id);
                     println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
+                    
+                    // 创建一个任务来启动新节点
+                    println!("🚀 节点-{}: 正在触发新节点-{} 的启动", node_id, final_next_node_id);
                 } else {
                     // 当前节点不在列表中
                     println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
@@ -1213,6 +1222,9 @@ async fn rotate_to_next_node(
                             // 将新节点添加到全局活跃节点集合
                             add_global_active_node(final_next_node_id);
                             println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
+                            
+                            // 创建一个任务来启动新节点
+                            println!("🚀 节点-{}: 正在触发新节点-{} 的启动", node_id, final_next_node_id);
                         } else {
                             println!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id);
                             return (false, Some(format!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id)));
@@ -1276,8 +1288,20 @@ async fn rotate_to_next_node(
             // 创建一个临时的活动线程状态映射，用于清理
             let active_threads_for_cleanup = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
             
+            // 将新节点标记为活跃状态
+            {
+                let mut threads_guard = active_threads_for_cleanup.lock();
+                threads_guard.insert(final_next_node_id, true);
+            }
+            
             // 强制执行一次节点清理，确保状态一致
             cleanup_active_nodes(active_nodes, &active_threads_for_cleanup, *max_concurrent).await;
+            
+            // 确保新节点在全局活跃节点集合中
+            if !is_node_globally_active(final_next_node_id) {
+                add_global_active_node(final_next_node_id);
+                println!("🌍 节点-{}: 确保新节点-{} 在全局活跃节点集合中", node_id, final_next_node_id);
+            }
             
             // 生成状态消息
             let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason);
@@ -2088,7 +2112,24 @@ async fn cleanup_active_nodes(
     
     // 如果没有活跃节点，说明可能出现了问题，打印警告
     if active_node_ids_for_empty_check.is_empty() {
-        println!("⚠️ 警告: 没有检测到任何活跃节点，这可能是一个问题");
+        // 检查全局活跃节点集合是否也为空
+        let global_active_count = get_global_active_node_count();
+        if global_active_count == 0 {
+            println!("⚠️ 警告: 没有检测到任何活跃节点，这可能是一个问题");
+        } else {
+            println!("⚠️ 警告: 本地活跃节点列表为空，但全局有 {} 个活跃节点，尝试恢复...", global_active_count);
+            // 从全局活跃节点集合恢复
+            let global_active_nodes = {
+                let nodes = GLOBAL_ACTIVE_NODES.lock();
+                nodes.clone()
+            };
+            
+            // 更新活动线程状态
+            let mut threads_guard = active_threads.lock();
+            for node_id in global_active_nodes {
+                threads_guard.insert(node_id, true);
+            }
+        }
     }
     
     // 如果活跃节点数量超过最大并发数，强制限制
@@ -2201,13 +2242,25 @@ async fn cleanup_active_nodes(
                 .collect()
         };
         
-        // 如果活动节点列表为空但有活跃节点，这是一个严重问题
-        if nodes_guard.is_empty() && !current_active_node_ids.is_empty() {
-            println!("🚨 严重错误: 活动节点列表为空，但有 {} 个活跃节点", current_active_node_ids.len());
-            // 紧急添加活跃节点
-            nodes_guard.extend(current_active_node_ids.iter().take(max_concurrent).cloned());
-            println!("🚨 紧急修复: 已添加 {} 个活跃节点到活动列表", nodes_guard.len());
-        }
+                        // 如果活动节点列表为空但有活跃节点，这是一个严重问题
+                if nodes_guard.is_empty() && !current_active_node_ids.is_empty() {
+                    println!("🚨 严重错误: 活动节点列表为空，但有 {} 个活跃节点", current_active_node_ids.len());
+                    // 紧急添加活跃节点
+                    nodes_guard.extend(current_active_node_ids.iter().take(max_concurrent).cloned());
+                    println!("🚨 紧急修复: 已添加 {} 个活跃节点到活动列表", nodes_guard.len());
+                }
+                
+                // 检查全局活跃节点集合是否为空，如果为空但活动节点列表不为空，则同步
+                let global_active_count = get_global_active_node_count();
+                if global_active_count == 0 && !nodes_guard.is_empty() {
+                    println!("🚨 严重错误: 全局活跃节点集合为空，但活动节点列表有 {} 个节点", nodes_guard.len());
+                    // 紧急同步全局活跃节点集合
+                    let mut global_nodes = GLOBAL_ACTIVE_NODES.lock();
+                    for &node_id in nodes_guard.iter().take(max_concurrent) {
+                        global_nodes.insert(node_id);
+                    }
+                    println!("🚨 紧急修复: 已添加 {} 个节点到全局活跃节点集合", global_nodes.len());
+                }
     }
     
     // 更新active_threads，确保与活动节点列表一致
