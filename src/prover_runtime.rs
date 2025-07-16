@@ -586,6 +586,7 @@ pub async fn start_optimized_batch_workers(
                     shutdown_for_manager,
                     node_rx,
                     rotation_data_for_manager,
+                    node_tx_for_workers,
                 ).await;
             });
             
@@ -790,8 +791,7 @@ async fn node_manager(
     mut shutdown: broadcast::Receiver<()>,
     mut node_rx: mpsc::Receiver<NodeManagerCommand>,
     rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<HashMap<u64, usize>>>, usize)>,
-    active_threads: Arc<Mutex<HashMap<u64, bool>>>,
-    node_tx: mpsc::Sender<NodeManagerCommand>,
+    _node_tx: mpsc::Sender<NodeManagerCommand>,
 ) {
     // 提取max_concurrent值用于节点管理
     let max_concurrent = if let Some((_, _, _, _, _, max)) = &rotation_data {
