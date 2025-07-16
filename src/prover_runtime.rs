@@ -1273,8 +1273,11 @@ async fn rotate_to_next_node(
                 }
             }
             
+            // 创建一个临时的活动线程状态映射，用于清理
+            let active_threads_for_cleanup = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
+            
             // 强制执行一次节点清理，确保状态一致
-            cleanup_active_nodes(active_nodes, &active_threads_clone, *max_concurrent).await;
+            cleanup_active_nodes(active_nodes, &active_threads_for_cleanup, *max_concurrent).await;
             
             // 生成状态消息
             let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason);
