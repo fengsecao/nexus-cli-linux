@@ -1511,6 +1511,9 @@ async fn run_memory_optimized_node(
     // 创建节点速率限制跟踪器
     let rate_limit_tracker = online::NodeRateLimitTracker::new();
     
+    // 创建event_sender的克隆，以便在闭包和后续代码中使用
+    let event_sender_for_closure = event_sender.clone();
+    
     // 更新节点状态
     let update_status = move |status: String| {
         if let Some(callback) = &status_callback {
@@ -1520,7 +1523,7 @@ async fn run_memory_optimized_node(
     
     // 发送事件到UI
     let _send_event = move |msg: String, event_type: crate::events::EventType| {
-        let event_sender = event_sender.clone();
+        let event_sender = event_sender_for_closure.clone();
         tokio::spawn(async move {
             let _ = event_sender
                 .send(Event::proof_submitter(msg, event_type))
