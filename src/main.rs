@@ -653,16 +653,15 @@ async fn start_batch_processing(
         while let Some(event) = event_receiver.recv().await {
             // 更新成功/失败计数
             if event.event_type == crate::events::EventType::ProofSubmitted {
-                let new_count = display_clone.success_count.fetch_add(1, Ordering::Relaxed) + 1;
-                println!("📈 事件监听: 增加成功计数 - 当前成功总数: {}", new_count);
+                let _ = display_clone.success_count.fetch_add(1, Ordering::Relaxed);
             } else if event.event_type == crate::events::EventType::Error &&
                       (event.msg.contains("Error submitting proof") || 
                        event.msg.contains("Failed to submit proof")) {
-                let new_count = display_clone.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
-                println!("📉 事件监听: 增加失败计数 - 当前失败总数: {}", new_count);
+                let _ = display_clone.failure_count.fetch_add(1, Ordering::Relaxed);
             }
             
-            // 输出事件信息用于调试
+            // 只在调试模式下输出事件信息
+            #[cfg(debug_assertions)]
             println!("📣 收到事件: 类型={:?}, 消息={}", event.event_type, event.msg);
         }
     });
