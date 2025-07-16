@@ -878,7 +878,7 @@ async fn node_manager(
     let status_callback_arc_for_recovery = status_callback_arc.clone();
     let event_sender_for_recovery = event_sender.clone();
     let rotation_data_for_recovery = rotation_data.clone();
-    let shutdown_for_recovery = shutdown.resubscribe();
+    let mut shutdown_for_recovery = shutdown.resubscribe();
     
     tokio::spawn(async move {
         // 创建一个计数器，跟踪连续检测到的无活跃节点次数
