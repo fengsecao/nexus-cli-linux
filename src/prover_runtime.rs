@@ -826,7 +826,7 @@ async fn node_manager(
     mut shutdown: broadcast::Receiver<()>,
     mut node_rx: mpsc::Receiver<NodeManagerCommand>,
     rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<HashMap<u64, usize>>>, usize)>,
-    _node_tx: mpsc::Sender<NodeManagerCommand>,
+    node_tx: mpsc::Sender<NodeManagerCommand>,
 ) {
     // 提取max_concurrent值用于节点管理
     let max_concurrent = if let Some((_, _, _, _, _, max)) = &rotation_data {
