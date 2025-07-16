@@ -924,7 +924,15 @@ async fn node_manager(
                 // 确认最终状态
                 let final_active_count = {
                     let threads_guard = active_threads.lock();
-                    threads_guard.values().filter(|&&active| active).count()
+                    let active_count = threads_guard.values().filter(|&&active| active).count();
+                    
+                    // 打印所有节点的状态，帮助调试
+                    println!("🔍 节点状态检查:");
+                    for (node_id, is_active) in threads_guard.iter() {
+                        println!("   节点-{}: {}", node_id, if *is_active { "活跃" } else { "非活跃" });
+                    }
+                    
+                    active_count
                 };
                 
                 // 使用全局计数和本地计数的较大值来计算可用槽位，确保更严格的控制
@@ -1114,16 +1122,30 @@ async fn get_nodes_to_start(
     // 获取需要启动的节点列表和活动节点数量
     let to_start;
     let active_count;
+    let global_active_count = get_global_active_node_count();
     
     // 使用作用域确保锁在操作完成后释放
     {
         let active_nodes_guard = active_nodes.lock();
         let active_threads_guard = active_threads.lock();
         
+        // 打印当前状态，帮助调试
+        println!("\n🔍 get_nodes_to_start: 当前状态");
+        println!("  - 活动节点列表: {:?}", *active_nodes_guard);
+        println!("  - 全局活跃节点数量: {}", global_active_count);
+        println!("  - active_threads映射:");
+        for (node_id, is_active) in active_threads_guard.iter() {
+            println!("    节点-{}: {}", node_id, if *is_active { "活跃" } else { "非活跃" });
+        }
+        
         // 检查每个活动节点，找出没有运行的节点
         to_start = active_nodes_guard.iter()
             .filter(|&&node_id| {
-                !active_threads_guard.get(&node_id).copied().unwrap_or(false)
+                let is_active = active_threads_guard.get(&node_id).copied().unwrap_or(false);
+                if !is_active {
+                    println!("  - 节点-{}: 未在active_threads中标记为活跃，需要启动", node_id);
+                }
+                !is_active
             })
             .copied()
             .collect::<Vec<u64>>();
@@ -1134,9 +1156,36 @@ async fn get_nodes_to_start(
             .count();
     }
     
-    if !to_start.is_empty() {
-        println!("🔄 节点管理器: 发现 {} 个未运行的节点需要启动: {:?}", to_start.len(), to_start);
-        println!("🔄 节点管理器: 当前活动节点数量: {}", active_count);
+    // 打印结果
+    println!("🔄 节点管理器: 发现 {} 个未运行的节点需要启动: {:?}", to_start.len(), to_start);
+    println!("🔄 节点管理器: 当前活动节点数量: {}, 全局活跃节点数量: {}", active_count, global_active_count);
+    
+    // 如果没有找到需要启动的节点，但活动节点列表不为空且活动节点数量为0，
+    // 尝试从活动节点列表中获取一个节点来启动
+    if to_start.is_empty() && active_count == 0 {
+        let mut emergency_nodes = Vec::new();
+        
+        // 获取活动节点列表
+        let active_nodes_list = {
+            let active_nodes_guard = active_nodes.lock();
+            active_nodes_guard.clone()
+        };
+        
+        if !active_nodes_list.is_empty() {
+            // 选择第一个节点作为紧急启动节点
+            let emergency_node = active_nodes_list[0];
+            emergency_nodes.push(emergency_node);
+            
+            println!("⚠️ 节点管理器: 紧急情况 - 没有活跃节点，选择节点-{} 进行紧急启动", emergency_node);
+            
+            // 确保这个节点在active_threads中标记为非活跃
+            {
+                let mut threads_guard = active_threads.lock();
+                threads_guard.insert(emergency_node, false);
+            }
+            
+            return emergency_nodes;
+        }
     }
     
     to_start
@@ -1508,9 +1557,24 @@ async fn start_node_worker(
         Err(_) => println!("⚠️ 节点-{}: 通知节点管理器启动超时", node_id),
     }
     
+    // 强制输出节点启动状态
+    println!("\n🚀🚀🚀 节点-{}: 开始启动工作线程\n", node_id);
+    
     // 启动节点工作线程
     let handle = tokio::spawn(async move {
+        // 再次确保节点在active_threads中标记为活跃
+        {
+            let mut threads_guard = active_threads_clone.lock();
+            threads_guard.insert(node_id, true);
+            println!("📌 节点-{}: 工作线程中再次确认标记为活跃", node_id);
+        }
+        
+        // 确保节点在全局活跃节点集合中
+        add_global_active_node(node_id);
+        println!("🌍 节点-{}: 工作线程中再次确认添加到全局活跃节点集合", node_id);
+        
         // 运行节点
+        println!("\n🚀🚀🚀 节点-{}: 即将运行主任务循环\n", node_id);
         run_memory_optimized_node(
             node_id,
             signing_key,
@@ -1553,16 +1617,10 @@ async fn run_memory_optimized_node(
 ) {
     // 创建一个停止标志，用于强制退出循环
     let should_stop = Arc::new(AtomicBool::new(false));
-    let should_stop_clone = should_stop.clone();
+    // 重命名为_should_stop_clone避免未使用变量警告
+    let _should_stop_clone = should_stop.clone();
     
-    // 创建一个任务来监听停止信号 - 不要立即停止节点
-    // 移除自动停止逻辑，让节点持续运行
-    /*
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        should_stop_clone.store(true, std::sync::atomic::Ordering::SeqCst);
-    });
-    */
+    // 不再创建自动停止逻辑，让节点持续运行
     
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
     const MAX_TASK_RETRIES: usize = 5; // 增加到5次
@@ -1618,8 +1676,14 @@ async fn run_memory_optimized_node(
     // 发送一个明确的状态更新
     update_status(format!("🌐 节点已启动并运行中 - 准备获取任务"));
     
+    // 强制输出节点启动状态
+    println!("\n🚀🚀🚀 节点-{}: 真正开始运行任务循环\n", node_id);
+    
+    // 发送一个明确的状态更新到UI
+    update_status(format!("🚀 节点-{}: 开始运行任务循环", node_id));
+    
     loop {
-        // 检查停止标志
+        // 检查停止标志 - 但我们已经移除了自动设置标志的逻辑，所以这里只会在外部设置时触发
         if should_stop.load(std::sync::atomic::Ordering::SeqCst) {
             update_status("🛑 收到停止信号，正在停止...".to_string());
             // 通知节点管理器当前节点已停止
