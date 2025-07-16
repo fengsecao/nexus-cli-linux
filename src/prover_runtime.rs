@@ -1720,11 +1720,11 @@ async fn run_memory_optimized_node(
                                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
                                         
                                         // 增加节点的429计数
-                                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
+                                        let count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
-                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{})", 
-                                            timestamp, wait_time, retry_count + 1, MAX_429_RETRIES));
+                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{}, 连续429: {}次)", 
+                                            timestamp, wait_time, retry_count + 1, MAX_429_RETRIES, count));
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
@@ -1832,7 +1832,7 @@ async fn run_memory_optimized_node(
                         // 如果成功提交或达到429重试上限但仍是速率限制，则继续下一个循环
                         if _success || (retry_count >= MAX_429_RETRIES && rate_limited) {
                             if !_success && rate_limited {
-                                update_status(format!("[{}] ⚠️ 429重试次数已达上限，等待一段时间后再尝试", timestamp));
+                                                                        update_status(format!("[{}] ⚠️ 429限制 - 等待60s后重试", timestamp));
                                 tokio::time::sleep(Duration::from_secs(60)).await; // 长时间等待
                             }
                             break;
@@ -1929,15 +1929,15 @@ async fn run_memory_optimized_node(
                                         rate_limited = true;
                                         
                                         // 增加节点的429计数
-                                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
+                                        let count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
                                         // 缓存证明以便后续重试
                                         orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         
                                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{})", 
-                                            timestamp, wait_time, retry_count + 1, MAX_SUBMISSION_RETRIES));
+                                        update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                            timestamp, wait_time));
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
@@ -2048,10 +2048,10 @@ async fn run_memory_optimized_node(
                                 if !_success {
                                     // 如果是由于速率限制而失败，等待更长时间
                                     if rate_limited {
-                                        update_status(format!("[{}] ⚠️ 速率限制重试次数已达上限，等待一段时间后再尝试", timestamp));
+                                        update_status(format!("[{}] ⚠️ 429限制 - 等待60s后重试", timestamp));
                                         tokio::time::sleep(Duration::from_secs(60)).await;
                                     } else {
-                                        update_status(format!("[{}] ⚠️ 提交重试次数已达上限，等待一段时间后再尝试", timestamp));
+                                        update_status(format!("[{}] ⚠️ 提交失败 - 等待5s后重试", timestamp));
                                         tokio::time::sleep(Duration::from_secs(5)).await;
                                     }
                                 }
@@ -2078,19 +2078,17 @@ async fn run_memory_optimized_node(
                     let error_str = e.to_string();
                     if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
                         // 速率限制错误
-                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
+                        let count = rate_limit_tracker.increment_429_count(node_id).await;
                         consecutive_429s += 1; // 增加连续429计数
                         
                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (尝试 {}/{})", 
-                            timestamp, wait_time, attempt, MAX_TASK_RETRIES));
+                                                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                            timestamp, wait_time));
                         
                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                            if VERBOSE_OUTPUT {
-                                println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
-                                    node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
-                            }
+                            println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
+                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                             
                             println!("🔄 节点-{}: 429错误，触发轮转", node_id);
                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
@@ -2111,10 +2109,8 @@ async fn run_memory_optimized_node(
                                 println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                             }
                         } else {
-                            if VERBOSE_OUTPUT {
-                                println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
-                                    node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
-                            }
+                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
+                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
                         }
                         
                         tokio::time::sleep(Duration::from_secs(wait_time)).await;

@@ -475,9 +475,9 @@ async fn handle_fetch_error(
                 let wait_seconds = state.backoff_duration.as_secs();
                 
                 (
-                    format!("[{}] 🚫 速率限制 (429) - 等待 {}s - 成功{}次 - 等待{}次", 
+                    format!("[{}] 🚫 429限制 - 等待{}s后重试", 
                             chrono::Local::now().format("%H:%M:%S"),
-                            wait_seconds, success_count, count),
+                            wait_seconds),
                     crate::events::EventType::Warning,
                     LogLevel::Warn,
                 )
