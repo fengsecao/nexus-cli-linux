@@ -213,13 +213,19 @@ pub fn get_global_active_node_count() -> usize {
 /// 添加节点到全局活跃节点集合
 pub fn add_global_active_node(node_id: u64) -> bool {
     let mut nodes = GLOBAL_ACTIVE_NODES.lock();
-    nodes.insert(node_id)
+    let result = nodes.insert(node_id);
+    println!("🌍 全局活跃节点: 添加节点-{} ({}), 当前活跃节点数量: {}", 
+            node_id, if result { "新增" } else { "已存在" }, nodes.len());
+    result
 }
 
 /// 从全局活跃节点集合移除节点
 pub fn remove_global_active_node(node_id: u64) -> bool {
     let mut nodes = GLOBAL_ACTIVE_NODES.lock();
-    nodes.remove(&node_id)
+    let result = nodes.remove(&node_id);
+    println!("🌍 全局活跃节点: 移除节点-{} ({}), 当前活跃节点数量: {}", 
+            node_id, if result { "成功" } else { "不存在" }, nodes.len());
+    result
 }
 
 /// 检查节点是否在全局活跃集合中
@@ -247,18 +253,33 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
         return;
     }
     
-    // 清空并重建全局活跃节点集合
-    nodes.clear();
+    // 增量更新全局活跃节点集合，而不是完全清空重建
+    // 1. 移除不再活跃的节点
+    let nodes_to_remove: Vec<u64> = nodes.iter()
+        .filter(|node_id| !active_nodes.contains(node_id))
+        .copied()
+        .collect();
     
-    // 仅添加最多max_concurrent个活跃节点
-    for node_id in active_nodes.iter().take(max_concurrent) {
-        nodes.insert(*node_id);
+    for node_id in nodes_to_remove {
+        nodes.remove(&node_id);
+        println!("🌍 全局活跃节点同步 - 移除不活跃节点: {}", node_id);
     }
     
-    if VERBOSE_OUTPUT {
-        println!("🌍 全局活跃节点同步 - 当前活跃节点数量: {}/{}", nodes.len(), max_concurrent);
+    // 2. 添加新的活跃节点，但确保不超过max_concurrent
+    let mut added_count = 0;
+    for &node_id in active_nodes.iter() {
+        if !nodes.contains(&node_id) && nodes.len() < max_concurrent {
+            nodes.insert(node_id);
+            added_count += 1;
+            println!("🌍 全局活跃节点同步 - 添加新活跃节点: {}", node_id);
+        }
     }
+    
+    println!("🌍 全局活跃节点同步 - 移除了 {} 个不活跃节点，添加了 {} 个新活跃节点，当前活跃节点数量: {}/{}", 
+            nodes_to_remove.len(), added_count, nodes.len(), max_concurrent);
 }
+
+
 
 /// Starts authenticated workers that fetch tasks from the orchestrator and process them.
 pub async fn start_authenticated_workers(
@@ -699,7 +720,7 @@ pub async fn start_optimized_batch_workers(
         active_nodes_guard.clone()
     } else {
         // 如果未启用轮转，则使用前actual_concurrent个节点
-        nodes.iter().take(actual_concurrent).copied().collect()
+        nodes.iter().take(actual_concurrent).copied().collect::<Vec<u64>>()
     };
     
     println!("🔄 准备按顺序启动以下节点: {:?}", active_nodes_list);
@@ -1104,6 +1125,7 @@ async fn rotate_to_next_node(
     rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<HashMap<u64, usize>>>, usize)>,
     reason: &str,
     node_tx: &mpsc::Sender<NodeManagerCommand>,
+    active_threads: &Arc<Mutex<HashMap<u64, bool>>>, // 添加active_threads参数
 ) -> (bool, Option<String>) {
     if VERBOSE_OUTPUT {
         println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
@@ -1120,6 +1142,15 @@ async fn rotate_to_next_node(
         if !all_nodes_started.load(std::sync::atomic::Ordering::SeqCst) {
             println!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id);
             return (false, Some(format!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id)));
+        }
+        
+        // 确保当前节点在active_threads中标记为活跃，避免不一致状态
+        {
+            let mut threads_guard = active_threads.lock();
+            if !threads_guard.get(&node_id).copied().unwrap_or(false) {
+                println!("⚠️ 节点-{}: 在active_threads中未标记为活跃，正在修复", node_id);
+                threads_guard.insert(node_id, true);
+            }
         }
         
         // 获取当前活跃节点数量（仅用于日志记录）
@@ -1201,6 +1232,17 @@ async fn rotate_to_next_node(
                     
                     // 创建一个任务来启动新节点
                     println!("🚀 节点-{}: 正在触发新节点-{} 的启动", node_id, final_next_node_id);
+
+                    // 同时更新active_threads映射
+                    {
+                        let mut threads_guard = active_threads.lock();
+                        // 将当前节点标记为非活跃
+                        threads_guard.insert(node_id, false);
+                        // 将新节点标记为活跃
+                        threads_guard.insert(final_next_node_id, true);
+                        println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
+                                node_id, node_id, final_next_node_id);
+                    }
                 } else {
                     // 当前节点不在列表中
                     println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
@@ -1232,6 +1274,17 @@ async fn rotate_to_next_node(
                             
                             // 创建一个任务来启动新节点
                             println!("🚀 节点-{}: 正在触发新节点-{} 的启动", node_id, final_next_node_id);
+
+                            // 同时更新active_threads映射
+                            {
+                                let mut threads_guard = active_threads.lock();
+                                // 将当前节点标记为非活跃
+                                threads_guard.insert(node_id, false);
+                                // 将新节点标记为活跃
+                                threads_guard.insert(final_next_node_id, true);
+                                println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
+                                        node_id, node_id, final_next_node_id);
+                            }
                         } else {
                             println!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id);
                             return (false, Some(format!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id)));
@@ -1631,7 +1684,7 @@ async fn run_memory_optimized_node(
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                     if rotation_data.is_some() {
                                         println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
-                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
+                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx, &active_threads).await;
                                         if should_rotate {
                                             if let Some(msg) = status_msg {
                                                 update_status(msg);
@@ -1666,7 +1719,7 @@ async fn run_memory_optimized_node(
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                                             
                                             println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
@@ -1723,7 +1776,7 @@ async fn run_memory_optimized_node(
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                         if rotation_data.is_some() {
                                             println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(msg);
@@ -1833,7 +1886,7 @@ async fn run_memory_optimized_node(
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                     if rotation_data.is_some() {
                                         println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
-                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx).await;
+                                        let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx, &active_threads).await;
                                         if should_rotate {
                                             if let Some(msg) = status_msg {
                                                 update_status(msg);
@@ -1879,7 +1932,7 @@ async fn run_memory_optimized_node(
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                                             
                                             println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
@@ -1934,7 +1987,7 @@ async fn run_memory_optimized_node(
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                         if rotation_data.is_some() {
                                             println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx).await;
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(msg);
@@ -2025,7 +2078,7 @@ async fn run_memory_optimized_node(
                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                             
                             println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
@@ -2290,6 +2343,22 @@ async fn cleanup_active_nodes(
                         println!("🚨 紧急修复: 已添加 {} 个节点到全局活跃节点集合，现有 {} 个", 
                                 nodes_to_add.len(), global_nodes.len());
                     }
+                    
+                    // 确保所有活动节点列表中的节点都在active_threads中标记为活跃
+                    {
+                        let mut threads_guard = active_threads.lock();
+                        for &node_id in nodes_guard.iter() {
+                            threads_guard.insert(node_id, true);
+                        }
+                    }
+                    
+                    // 打印当前活跃节点状态
+                    println!("📊 节点清理后状态: 活动节点列表 {} 个, 全局活跃节点集合 {} 个", 
+                            nodes_guard.len(), global_nodes.len());
+                    
+                    // 打印所有活跃节点ID，便于调试
+                    println!("📋 活动节点列表: {:?}", *nodes_guard);
+                    println!("📋 全局活跃节点: {:?}", global_nodes.iter().collect::<Vec<&u64>>());
                 }
     }
     
