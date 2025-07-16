@@ -1274,7 +1274,7 @@ async fn rotate_to_next_node(
             }
             
             // 强制执行一次节点清理，确保状态一致
-            cleanup_active_nodes(active_nodes, active_threads, *max_concurrent).await;
+            cleanup_active_nodes(active_nodes, &active_threads_clone, *max_concurrent).await;
             
             // 生成状态消息
             let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason);
@@ -2080,8 +2080,11 @@ async fn cleanup_active_nodes(
             .collect();
     }
     
+    // 创建一个副本，以便后面可以再次使用
+    let active_node_ids_for_empty_check = active_node_ids.clone();
+    
     // 如果没有活跃节点，说明可能出现了问题，打印警告
-    if active_node_ids.is_empty() {
+    if active_node_ids_for_empty_check.is_empty() {
         println!("⚠️ 警告: 没有检测到任何活跃节点，这可能是一个问题");
     }
     
@@ -2186,11 +2189,20 @@ async fn cleanup_active_nodes(
             }
         }
         
+        // 获取当前真正活跃的节点
+        let current_active_node_ids: Vec<u64> = {
+            let threads_guard = active_threads.lock();
+            threads_guard.iter()
+                .filter(|pair| *pair.1)
+                .map(|(&id, _)| id)
+                .collect()
+        };
+        
         // 如果活动节点列表为空但有活跃节点，这是一个严重问题
-        if nodes_guard.is_empty() && !active_node_ids.is_empty() {
-            println!("🚨 严重错误: 活动节点列表为空，但有 {} 个活跃节点", active_node_ids.len());
+        if nodes_guard.is_empty() && !current_active_node_ids.is_empty() {
+            println!("🚨 严重错误: 活动节点列表为空，但有 {} 个活跃节点", current_active_node_ids.len());
             // 紧急添加活跃节点
-            nodes_guard.extend(active_node_ids.iter().take(max_concurrent).cloned());
+            nodes_guard.extend(current_active_node_ids.iter().take(max_concurrent).cloned());
             println!("🚨 紧急修复: 已添加 {} 个活跃节点到活动列表", nodes_guard.len());
         }
     }
