@@ -878,6 +878,7 @@ async fn node_manager(
     let status_callback_arc_for_recovery = status_callback_arc.clone();
     let event_sender_for_recovery = event_sender.clone();
     let rotation_data_for_recovery = rotation_data.clone();
+    let shutdown_for_recovery = shutdown.resubscribe();
     
     tokio::spawn(async move {
         // 创建一个计数器，跟踪连续检测到的无活跃节点次数
@@ -885,78 +886,84 @@ async fn node_manager(
         let mut interval = tokio::time::interval(Duration::from_secs(30)); // 每30秒检查一次
         
         loop {
-            interval.tick().await;
-            
-            // 检查是否有活跃节点
-            let active_count = {
-                let threads_guard = active_threads_for_recovery.lock();
-                threads_guard.values().filter(|&&active| active).count()
-            };
-            
-            // 检查全局活跃节点数量
-            let global_active_count = get_global_active_node_count();
-            
-            // 如果本地和全局都没有活跃节点，增加计数
-            if active_count == 0 && global_active_count == 0 {
-                no_active_nodes_count += 1;
-                println!("⚠️ 紧急恢复监控: 没有检测到活跃节点 (连续{}次)", no_active_nodes_count);
-                
-                // 如果连续3次检测到没有活跃节点，启动紧急恢复
-                if no_active_nodes_count >= 3 {
-                    println!("🚨 紧急恢复: 连续{}次没有检测到活跃节点，启动紧急恢复流程", no_active_nodes_count);
+            tokio::select! {
+                _ = interval.tick() => {
+                    // 检查是否有活跃节点
+                    let active_count = {
+                        let threads_guard = active_threads_for_recovery.lock();
+                        threads_guard.values().filter(|&&active| active).count()
+                    };
                     
-                    // 如果有all_nodes，从中选择节点启动
-                    if let Some(all_nodes) = &all_nodes_for_recovery {
-                        // 选择前3个节点进行紧急启动
-                        let emergency_nodes: Vec<u64> = all_nodes.iter().take(3).copied().collect();
+                    // 检查全局活跃节点数量
+                    let global_active_count = get_global_active_node_count();
+                    
+                    // 如果本地和全局都没有活跃节点，增加计数
+                    if active_count == 0 && global_active_count == 0 {
+                        no_active_nodes_count += 1;
+                        println!("⚠️ 紧急恢复监控: 没有检测到活跃节点 (连续{}次)", no_active_nodes_count);
                         
-                        println!("🚨 紧急恢复: 将启动以下节点: {:?}", emergency_nodes);
-                        
-                        for &node_id in &emergency_nodes {
-                            println!("🚨 紧急恢复: 启动节点-{}", node_id);
+                        // 如果连续3次检测到没有活跃节点，启动紧急恢复
+                        if no_active_nodes_count >= 3 {
+                            println!("🚨 紧急恢复: 连续{}次没有检测到活跃节点，启动紧急恢复流程", no_active_nodes_count);
                             
-                            // 确保节点在active_threads中标记为活跃
-                            {
-                                let mut threads_guard = active_threads_for_recovery.lock();
-                                threads_guard.insert(node_id, true);
+                            // 如果有all_nodes，从中选择节点启动
+                            if let Some(all_nodes) = &all_nodes_for_recovery {
+                                // 选择前3个节点进行紧急启动
+                                let emergency_nodes: Vec<u64> = all_nodes.iter().take(3).copied().collect();
+                                
+                                println!("🚨 紧急恢复: 将启动以下节点: {:?}", emergency_nodes);
+                                
+                                for &node_id in &emergency_nodes {
+                                    println!("🚨 紧急恢复: 启动节点-{}", node_id);
+                                    
+                                    // 确保节点在active_threads中标记为活跃
+                                    {
+                                        let mut threads_guard = active_threads_for_recovery.lock();
+                                        threads_guard.insert(node_id, true);
+                                    }
+                                    
+                                    // 启动节点
+                                    let handle = start_node_worker(
+                                        node_id,
+                                        environment_for_recovery.clone(),
+                                        proxy_file_for_recovery.clone(),
+                                        num_workers_per_node,
+                                        proof_interval,
+                                        status_callback_arc_for_recovery.clone(),
+                                        event_sender_for_recovery.clone(),
+                                        shutdown_for_recovery.resubscribe(),
+                                        rotation_data_for_recovery.clone(),
+                                        active_threads_for_recovery.clone(),
+                                        node_tx_for_recovery.clone(),
+                                    ).await;
+                                    
+                                    // 不需要存储句柄，因为它们会在完成时自动清理
+                                    tokio::spawn(async move {
+                                        let _ = handle.await;
+                                    });
+                                    
+                                    // 等待一段时间，避免同时启动多个节点
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                }
+                                
+                                // 重置计数器
+                                no_active_nodes_count = 0;
+                            } else {
+                                println!("🚨 紧急恢复: 没有可用的节点列表，无法启动紧急恢复");
                             }
-                            
-                            // 启动节点
-                            let handle = start_node_worker(
-                                node_id,
-                                environment_for_recovery.clone(),
-                                proxy_file_for_recovery.clone(),
-                                num_workers_per_node,
-                                proof_interval,
-                                status_callback_arc_for_recovery.clone(),
-                                event_sender_for_recovery.clone(),
-                                shutdown.resubscribe(),
-                                rotation_data_for_recovery.clone(),
-                                active_threads_for_recovery.clone(),
-                                node_tx_for_recovery.clone(),
-                            ).await;
-                            
-                            // 不需要存储句柄，因为它们会在完成时自动清理
-                            tokio::spawn(async move {
-                                let _ = handle.await;
-                            });
-                            
-                            // 等待一段时间，避免同时启动多个节点
-                            tokio::time::sleep(Duration::from_secs(2)).await;
                         }
-                        
-                        // 重置计数器
-                        no_active_nodes_count = 0;
                     } else {
-                        println!("🚨 紧急恢复: 没有可用的节点列表，无法启动紧急恢复");
+                        // 如果有活跃节点，重置计数器
+                        if no_active_nodes_count > 0 {
+                            println!("✅ 紧急恢复监控: 检测到活跃节点，重置计数器 (本地: {}, 全局: {})", 
+                                    active_count, global_active_count);
+                            no_active_nodes_count = 0;
+                        }
                     }
                 }
-            } else {
-                // 如果有活跃节点，重置计数器
-                if no_active_nodes_count > 0 {
-                    println!("✅ 紧急恢复监控: 检测到活跃节点，重置计数器 (本地: {}, 全局: {})", 
-                            active_count, global_active_count);
-                    no_active_nodes_count = 0;
+                _ = shutdown_for_recovery.recv() => {
+                    println!("🛑 紧急恢复监控: 收到关闭信号，正在停止");
+                    break;
                 }
             }
         }
