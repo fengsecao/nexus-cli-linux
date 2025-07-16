@@ -469,7 +469,7 @@ async fn handle_fetch_error(
                 state.increment_429_count(); // 保留原有的计数器
                 
                 // 增加节点特定的429计数
-                let count = rate_limit_tracker.increment_429_count(*node_id).await;
+                let _count = rate_limit_tracker.increment_429_count(*node_id).await;
                 
                 // 计算等待时间（秒）
                 let wait_seconds = state.backoff_duration.as_secs();

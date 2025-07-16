@@ -440,7 +440,9 @@ pub async fn start_optimized_batch_workers(
                 // 确保节点不重复添加
                 if !active_nodes_guard.contains(node_id) {
                     active_nodes_guard.push(*node_id);
-                    println!("🔄 添加节点-{} 到活动节点队列 (索引: {})", node_id, idx);
+                    if VERBOSE_OUTPUT {
+                        println!("🔄 添加节点-{} 到活动节点队列 (索引: {})", node_id, idx);
+                    }
                 } else {
                     println!("⚠️ 节点-{} 已在活动队列中，跳过 (索引: {})", node_id, idx);
                 }
@@ -464,9 +466,11 @@ pub async fn start_optimized_batch_workers(
                 }
             }
             
-            println!("🔄 初始活动节点队列: {:?} (大小: {})", *active_nodes_guard, active_nodes_guard.len());
-            println!("🔄 下一个节点索引: {}", next_node_index.load(std::sync::atomic::Ordering::SeqCst));
-            println!("🔄 最大并发数: {}, 总节点数: {}", actual_concurrent, nodes.len());
+            if VERBOSE_OUTPUT {
+                println!("🔄 初始活动节点队列: {:?} (大小: {})", *active_nodes_guard, active_nodes_guard.len());
+                println!("🔄 下一个节点索引: {}", next_node_index.load(std::sync::atomic::Ordering::SeqCst));
+                println!("🔄 最大并发数: {}, 总节点数: {}", actual_concurrent, nodes.len());
+            }
             
             // 最后再次确认活动节点数量不超过最大并发数
             if active_nodes_guard.len() > actual_concurrent {
@@ -657,7 +661,9 @@ pub async fn start_optimized_batch_workers(
                         let all_started = !active_threads_guard.is_empty();
                         
                         // 输出当前活动线程信息
-                        println!("🔄 节点启动监控: 当前活动节点数量: {}, 尝试次数: {}", active_threads_guard.len(), attempts);
+                        if attempts % 5 == 0 || attempts == 1 { // 减少日志输出频率
+                            println!("🔄 节点启动监控: 当前活动节点数量: {}, 尝试次数: {}", active_threads_guard.len(), attempts);
+                        }
                         
                         all_started
                     };
@@ -735,6 +741,9 @@ pub async fn start_optimized_batch_workers(
         join_handles.push(handle);
     }
     
+    // 执行一次初始化同步
+    sync_global_active_nodes(&active_threads, max_concurrent);
+    
     (event_receiver, join_handles)
 }
 
@@ -779,7 +788,7 @@ async fn node_manager(
     let active_nodes_clone = active_nodes.clone();
     let active_threads_clone = active_threads.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(5)); // 5秒检查一次
+        let mut interval = tokio::time::interval(Duration::from_secs(10)); // 增加到10秒检查一次，减少频率
         loop {
             interval.tick().await;
             cleanup_active_nodes(&active_nodes_clone, &active_threads_clone, max_concurrent).await;
@@ -789,12 +798,16 @@ async fn node_manager(
     // 定期执行全局节点计数同步
     let active_threads_for_sync = active_threads.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             interval.tick().await;
             sync_global_active_nodes(&active_threads_for_sync, max_concurrent);
         }
     });
+    
+    // 记录上次检查时间，避免频繁检查
+    let mut last_check_time = Instant::now();
+    let check_interval = Duration::from_secs(5); // 每5秒检查一次
     
     loop {
         tokio::select! {
@@ -815,7 +828,15 @@ async fn node_manager(
             }
             
             // 定期检查是否有节点需要启动 - 更短的检查间隔
-            _ = tokio::time::sleep(Duration::from_secs(3)) => {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                // 检查是否到了检查时间
+                if last_check_time.elapsed() < check_interval {
+                    continue;
+                }
+                
+                // 更新上次检查时间
+                last_check_time = Instant::now();
+                
                 // 每次检查前强制执行清理，确保活动节点列表和活动线程状态一致
                 cleanup_active_nodes(&active_nodes, &active_threads, max_concurrent).await;
                 
@@ -840,81 +861,13 @@ async fn node_manager(
                 
                 // 如果活动节点数量或活动列表长度超过最大并发数，执行强制清理
                 if current_active_count > max_concurrent || active_nodes_count > max_concurrent || global_active_count > max_concurrent {
-                    if VERBOSE_OUTPUT {
-                        println!("⚠️ 节点管理器: 状态不一致或超出限制，执行强制清理");
-                    }
+                    println!("⚠️ 节点管理器: 状态不一致或超出限制，执行强制清理");
                     
                     // 强制同步全局活跃节点集合
                     sync_global_active_nodes(&active_threads, max_concurrent);
                     
                     // 然后清理活动节点列表
                     cleanup_active_nodes(&active_nodes, &active_threads, max_concurrent).await;
-                    
-                    // 重新获取各种计数
-                    let global_active_count = get_global_active_node_count();
-                    let current_active_count = {
-                        let threads_guard = active_threads.lock();
-                        threads_guard.values().filter(|&&active| active).count()
-                    };
-                    
-                    let active_nodes_count = {
-                        let nodes_guard = active_nodes.lock();
-                        nodes_guard.len()
-                    };
-                    
-                    if VERBOSE_OUTPUT {
-                        println!("📊 节点管理器: 清理后 - 当前活动节点数量: {}, 活动列表长度: {}, 全局活跃数量: {}", 
-                                current_active_count, active_nodes_count, global_active_count);
-                    }
-                    
-                    // 再次确认清理是否有效
-                    if current_active_count > max_concurrent || active_nodes_count > max_concurrent || global_active_count > max_concurrent {
-                        if VERBOSE_OUTPUT {
-                            println!("⚠️ 节点管理器: 清理无效，执行紧急强制限制");
-                        }
-                        
-                        // 手动截断活动节点列表
-                        {
-                            let mut nodes_guard = active_nodes.lock();
-                            if nodes_guard.len() > max_concurrent {
-                                nodes_guard.truncate(max_concurrent);
-                                if VERBOSE_OUTPUT {
-                                    println!("✅ 节点管理器: 已手动截断活动节点列表至 {} 个节点", nodes_guard.len());
-                                }
-                            }
-                        }
-                        
-                        // 再次更新活动线程状态
-                        {
-                            let nodes_guard = active_nodes.lock();
-                            let mut threads_guard = active_threads.lock();
-                            
-                            // 首先将所有节点标记为非活跃
-                            for (_, is_active) in threads_guard.iter_mut() {
-                                *is_active = false;
-                            }
-                            
-                            // 然后将活动节点列表中的节点标记为活跃
-                            for &node_id in nodes_guard.iter() {
-                                threads_guard.insert(node_id, true);
-                            }
-                        }
-                        
-                        // 强制重置全局活跃节点集合
-                        {
-                            let mut nodes = GLOBAL_ACTIVE_NODES.lock();
-                            nodes.clear();
-                            
-                            let nodes_guard = active_nodes.lock();
-                            for &node_id in nodes_guard.iter() {
-                                nodes.insert(node_id);
-                            }
-                            
-                            if VERBOSE_OUTPUT {
-                                println!("🌍 全局活跃节点紧急重置 - 当前活跃节点数量: {}/{}", nodes.len(), max_concurrent);
-                            }
-                        }
-                    }
                 }
                 
                 // 获取需要启动的节点
@@ -939,15 +892,8 @@ async fn node_manager(
                     0
                 };
                 
-                                if VERBOSE_OUTPUT {
-                    println!("📊 节点管理器: 最终状态 - 活跃节点: {}, 全局活跃: {}, 可用槽位: {}", 
-                        final_active_count, global_active_count, available_slots);
-                }
-                
-                                    if available_slots > 0 {
-                        if VERBOSE_OUTPUT {
-                            println!("📊 节点管理器: 有 {} 个可用槽位，可以启动新节点", available_slots);
-                        }
+                if available_slots > 0 && !nodes_to_start.is_empty() {
+                    println!("📊 节点管理器: 有 {} 个可用槽位，可以启动新节点", available_slots);
                     
                     // 只启动可用槽位数量的节点
                     let nodes_to_start = nodes_to_start.into_iter()
@@ -956,9 +902,7 @@ async fn node_manager(
                         .collect::<Vec<_>>();
                     
                     if !nodes_to_start.is_empty() {
-                                                    if VERBOSE_OUTPUT {
-                                println!("🚀 节点管理器: 准备启动 {} 个新节点", nodes_to_start.len());
-                            }
+                        println!("🚀 节点管理器: 准备启动 {} 个新节点", nodes_to_start.len());
                         
                         // 标记这些节点为正在启动
                         for &node_id in &nodes_to_start {
@@ -998,11 +942,7 @@ async fn node_manager(
                             // 短暂等待确保节点启动逻辑完成
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
-                    } else {
-                        println!("📊 节点管理器: 没有需要启动的新节点");
                     }
-                } else {
-                    println!("⚠️ 节点管理器: 已达到最大并发数 {}, 暂不启动新节点", max_concurrent);
                 }
             }
         }
@@ -1113,7 +1053,9 @@ async fn handle_node_command(
                     });
                 }
             } else {
-                println!("⚠️ 节点管理器: 已达到最大并发数 {}, 暂不启动新节点", max_concurrent);
+                if VERBOSE_OUTPUT {
+                    println!("⚠️ 节点管理器: 已达到最大并发数 {}, 暂不启动新节点", max_concurrent);
+                }
             }
         }
     }
@@ -1179,38 +1121,6 @@ async fn rotate_to_next_node(
             return (false, Some(format!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id)));
         }
         
-        // 检查全局活跃节点数量，如果已达到最大并发数，则不轮转新节点
-        let global_active_count = get_global_active_node_count();
-        if global_active_count >= *max_concurrent {
-            println!("⚠️ 节点-{}: 全局活跃节点数量 ({}) 已达到最大并发数 ({}), 仅移除当前节点，不添加新节点", 
-                    node_id, global_active_count, *max_concurrent);
-            
-            // 从活动节点列表中移除当前节点
-            {
-                let mut active_nodes_guard = active_nodes.lock();
-                if let Some(pos) = active_nodes_guard.iter().position(|&id| id == node_id) {
-                    active_nodes_guard.remove(pos);
-                    println!("✅ 节点-{}: 已从活动节点列表移除", node_id);
-                }
-            }
-            
-            // 通知节点管理器当前节点已停止
-            let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-            
-            return (true, Some(format!("⚠️ 节点-{}: 全局活跃节点已达上限，仅停止当前节点", node_id)));
-        }
-        
-        // 强制限制活动节点列表不超过最大并发数
-        {
-            let mut active_nodes_guard = active_nodes.lock();
-            if active_nodes_guard.len() > *max_concurrent {
-                println!("⚠️ 节点-{}: 强制限制活动节点列表大小 {} -> {}", 
-                        node_id, active_nodes_guard.len(), *max_concurrent);
-                active_nodes_guard.truncate(*max_concurrent);
-            }
-            // 锁在这里释放
-        }
-        
         // 获取当前节点的索引
         let node_idx_opt = {
             let node_indices_guard = node_indices.lock();
@@ -1263,13 +1173,6 @@ async fn rotate_to_next_node(
             {
                 let mut active_nodes_guard = active_nodes.lock();
                 
-                // 先检查新节点是否已经在列表中
-                if active_nodes_guard.contains(&final_next_node_id) {
-                    println!("⚠️ 节点-{}: 新节点-{} 已经在活动列表中，不重复添加", node_id, final_next_node_id);
-                    // 如果是轮转节点已在列表中，我们仍然认为轮转成功
-                    return (true, Some(format!("⚠️ 节点-{}: 新节点-{} 已经在活动列表中，不重复添加", node_id, final_next_node_id)));
-                }
-                
                 // 查找当前节点在活动列表中的位置
                 let pos = active_nodes_guard.iter().position(|&id| id == node_id);
                 
@@ -1295,9 +1198,25 @@ async fn rotate_to_next_node(
                         add_global_active_node(final_next_node_id);
                         println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
                     } else {
-                        // 列表已满，无法添加新节点
-                        println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 无法添加新节点", node_id, *max_concurrent);
-                        return (false, Some(format!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 无法添加新节点", node_id, *max_concurrent)));
+                        // 列表已满，尝试替换一个节点
+                        println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 尝试替换一个节点", node_id, *max_concurrent);
+                        
+                        // 选择第一个节点进行替换
+                        if !active_nodes_guard.is_empty() {
+                            let replaced_node = active_nodes_guard[0];
+                            active_nodes_guard[0] = final_next_node_id;
+                            println!("✅ 节点-{}: 已替换节点-{} 为节点-{}", node_id, replaced_node, final_next_node_id);
+                            
+                            // 从全局活跃节点集合中移除被替换的节点
+                            remove_global_active_node(replaced_node);
+                            
+                            // 将新节点添加到全局活跃节点集合
+                            add_global_active_node(final_next_node_id);
+                            println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
+                        } else {
+                            println!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id);
+                            return (false, Some(format!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id)));
+                        }
                     }
                 }
                 
@@ -1306,7 +1225,7 @@ async fn rotate_to_next_node(
                     println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
                             node_id, active_nodes_guard.len(), *max_concurrent);
                     active_nodes_guard.truncate(*max_concurrent);
-                    println!("✅ 节点-{}: 已截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
+                    println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
                 }
             }
             
@@ -1335,8 +1254,6 @@ async fn rotate_to_next_node(
                         
                         if retry_count >= max_retries {
                             println!("⚠️ 节点-{}: 通知节点管理器失败，达到最大重试次数", node_id);
-                            // 即使通知失败，我们仍然认为轮转成功
-                            println!("⚠️ 节点-{}: 通知失败，但活动节点列表已更新，继续轮转", node_id);
                         } else {
                             // 短暂等待后重试
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1348,8 +1265,6 @@ async fn rotate_to_next_node(
                         
                         if retry_count >= max_retries {
                             println!("⚠️ 节点-{}: 通知节点管理器超时，达到最大重试次数", node_id);
-                            // 即使通知失败，我们仍然认为轮转成功
-                            println!("⚠️ 节点-{}: 通知超时，但活动节点列表已更新，继续轮转", node_id);
                         } else {
                             // 短暂等待后重试
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1358,18 +1273,11 @@ async fn rotate_to_next_node(
                 }
             }
             
-            // 即使通知失败，我们仍然认为轮转成功，因为活动节点列表已更新
-            // 根据之前的查找结果生成状态消息
-            let is_full = {
-                let active_nodes_guard = active_nodes.lock();
-                active_nodes_guard.len() >= *max_concurrent
-            };
+            // 强制执行一次节点清理，确保状态一致
+            cleanup_active_nodes(active_nodes, active_threads, *max_concurrent).await;
             
-            let status_msg = if is_full {
-                format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason)
-            } else {
-                format!("🔄 节点轮转: {} → {} (原因: {}) - 添加新节点", node_id, final_next_node_id, reason)
-            };
+            // 生成状态消息
+            let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason);
             
             println!("\n{}\n", status_msg); // 添加明显的控制台输出
             
@@ -1720,11 +1628,11 @@ async fn run_memory_optimized_node(
                                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
                                         
                                         // 增加节点的429计数
-                                        let count = rate_limit_tracker.increment_429_count(node_id).await;
+                                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
-                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{}, 连续429: {}次)", 
-                                            timestamp, wait_time, retry_count + 1, MAX_429_RETRIES, count));
+                                        update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                            timestamp, wait_time));
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
@@ -1929,7 +1837,7 @@ async fn run_memory_optimized_node(
                                         rate_limited = true;
                                         
                                         // 增加节点的429计数
-                                        let count = rate_limit_tracker.increment_429_count(node_id).await;
+                                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
                                         // 缓存证明以便后续重试
@@ -2078,7 +1986,7 @@ async fn run_memory_optimized_node(
                     let error_str = e.to_string();
                     if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
                         // 速率限制错误
-                        let count = rate_limit_tracker.increment_429_count(node_id).await;
+                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
                         consecutive_429s += 1; // 增加连续429计数
                         
                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
@@ -2172,9 +2080,9 @@ async fn cleanup_active_nodes(
             .collect();
     }
     
-    if VERBOSE_OUTPUT {
-        // 打印当前状态
-        println!("📊 节点清理: 真正活跃的节点: {:?} (数量: {})", active_node_ids, active_node_ids.len());
+    // 如果没有活跃节点，说明可能出现了问题，打印警告
+    if active_node_ids.is_empty() {
+        println!("⚠️ 警告: 没有检测到任何活跃节点，这可能是一个问题");
     }
     
     // 如果活跃节点数量超过最大并发数，强制限制
@@ -2190,30 +2098,80 @@ async fn cleanup_active_nodes(
         active_node_ids
     };
     
+    // 获取全局活跃节点集合的当前状态
+    let global_active_count = get_global_active_node_count();
+    
+    // 如果全局活跃节点数量与实际活跃节点数量不一致，打印警告
+    if global_active_count != active_node_ids_limited.len() {
+        println!("⚠️ 节点清理: 全局活跃节点数量 ({}) 与实际活跃节点数量 ({}) 不一致", 
+                global_active_count, active_node_ids_limited.len());
+    }
+    
     // 更新活动节点列表，确保包含所有真正活跃的节点
     {
         let mut nodes_guard = active_nodes.lock();
         
-        if VERBOSE_OUTPUT {
-            // 打印当前状态
-            println!("📊 节点清理: 当前活动节点列表: {:?} (数量: {})", *nodes_guard, nodes_guard.len());
+        // 检查当前活动节点列表状态
+        if nodes_guard.len() < active_node_ids_limited.len() {
+            println!("⚠️ 节点清理: 活动节点列表 ({}) 小于实际活跃节点数量 ({}), 需要添加节点", 
+                    nodes_guard.len(), active_node_ids_limited.len());
+        } else if nodes_guard.len() > max_concurrent {
+            println!("⚠️ 节点清理: 活动节点列表 ({}) 超过最大并发数 ({}), 需要减少节点", 
+                    nodes_guard.len(), max_concurrent);
         }
         
-        // 强制清空活动节点列表，以确保下面的操作从零开始，避免累积
-        nodes_guard.clear();
-        if VERBOSE_OUTPUT {
-            println!("🧹 节点清理: 已清空活动节点列表，重新填充");
-        }
+        // 只有在以下情况才执行完全重建:
+        // 1. 活动节点列表为空
+        // 2. 活动节点列表大小与实际活跃节点数量差异超过2
+        // 3. 活动节点列表超过最大并发数
+        let should_rebuild = nodes_guard.is_empty() || 
+                            (nodes_guard.len() as i64 - active_node_ids_limited.len() as i64).abs() > 2 ||
+                            nodes_guard.len() > max_concurrent;
         
-        // 填充最多max_concurrent个活跃节点
-        let nodes_to_add = active_node_ids_limited.iter()
-            .take(max_concurrent)
-            .cloned()
-            .collect::<Vec<u64>>();
-        
-        if !nodes_to_add.is_empty() {
-            nodes_guard.extend(nodes_to_add);
-            println!("✅ 节点清理: 已添加{}个活跃节点到活动列表", nodes_guard.len());
+        if should_rebuild {
+            // 强制清空活动节点列表，以确保下面的操作从零开始，避免累积
+            nodes_guard.clear();
+            if VERBOSE_OUTPUT {
+                println!("🧹 节点清理: 已清空活动节点列表，重新填充");
+            }
+            
+            // 填充最多max_concurrent个活跃节点
+            let nodes_to_add = active_node_ids_limited.iter()
+                .take(max_concurrent)
+                .cloned()
+                .collect::<Vec<u64>>();
+            
+            if !nodes_to_add.is_empty() {
+                nodes_guard.extend(nodes_to_add);
+                println!("✅ 节点清理: 已添加{}个活跃节点到活动列表 (完全重建)", nodes_guard.len());
+            }
+        } else {
+            // 增量更新: 移除不再活跃的节点
+            nodes_guard.retain(|node_id| {
+                let active_threads_guard = active_threads.lock();
+                active_threads_guard.get(node_id).copied().unwrap_or(false)
+            });
+            
+            // 如果节点数量小于最大并发数，尝试添加更多节点
+            if nodes_guard.len() < max_concurrent {
+                // 找出当前不在列表中但是活跃的节点
+                let missing_nodes: Vec<u64> = active_node_ids_limited.iter()
+                    .filter(|id| !nodes_guard.contains(id))
+                    .cloned()
+                    .collect();
+                
+                // 添加缺失的节点，直到达到最大并发数
+                for node_id in missing_nodes {
+                    if nodes_guard.len() >= max_concurrent {
+                        break;
+                    }
+                    nodes_guard.push(node_id);
+                }
+                
+                if VERBOSE_OUTPUT {
+                    println!("✅ 节点清理: 增量更新 - 当前活动节点数量: {}", nodes_guard.len());
+                }
+            }
         }
         
         // 再次确保活动节点列表不超过最大并发数
@@ -2228,9 +2186,12 @@ async fn cleanup_active_nodes(
             }
         }
         
-        if VERBOSE_OUTPUT {
-            // 最后打印更新后的活动节点列表
-            println!("📊 节点清理: 更新后的活动节点列表: {:?} (大小: {})", *nodes_guard, nodes_guard.len());
+        // 如果活动节点列表为空但有活跃节点，这是一个严重问题
+        if nodes_guard.is_empty() && !active_node_ids.is_empty() {
+            println!("🚨 严重错误: 活动节点列表为空，但有 {} 个活跃节点", active_node_ids.len());
+            // 紧急添加活跃节点
+            nodes_guard.extend(active_node_ids.iter().take(max_concurrent).cloned());
+            println!("🚨 紧急修复: 已添加 {} 个活跃节点到活动列表", nodes_guard.len());
         }
     }
     
@@ -2247,21 +2208,6 @@ async fn cleanup_active_nodes(
         // 然后将活动节点列表中的节点标记为活跃
         for &node_id in nodes_guard.iter() {
             threads_guard.insert(node_id, true);
-        }
-        
-        if VERBOSE_OUTPUT {
-            // 打印更新后的活跃线程数量
-            let active_count = threads_guard.values().filter(|&&is_active| is_active).count();
-            println!("📊 节点清理: 更新后的活跃线程数量: {}", active_count);
-            
-            // 确保活跃节点数量不超过最大并发数
-            if active_count > max_concurrent {
-                println!("⚠️ 节点清理: 最终检查 - 活跃节点数量 ({}) 仍超过最大并发数 ({}), 这不应该发生", 
-                        active_count, max_concurrent);
-            } else {
-                println!("✅ 节点清理: 最终检查 - 活跃节点数量: {} <= 最大并发数: {}", 
-                        active_count, max_concurrent);
-            }
         }
     }
     

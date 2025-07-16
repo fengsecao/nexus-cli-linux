@@ -33,6 +33,9 @@ use crate::consts;
 // No precise location, IP addresses, or personal data is collected or stored.
 static COUNTRY_CODE: OnceCell<String> = OnceCell::new();
 
+// 添加一个常量控制日志输出
+const VERBOSE_LOGS: bool = false;
+
 /// 代理信息结构
 #[derive(Clone, Debug)]
 struct ProxyInfo {
@@ -103,12 +106,16 @@ impl ProxyManager {
 
     /// 从文件加载代理列表
     pub fn load_from_file(&self, file_path: &str) -> io::Result<()> {
-        info!("开始加载代理文件: {}", file_path);
+        if VERBOSE_LOGS {
+            info!("开始加载代理文件: {}", file_path);
+        }
         let path = Path::new(file_path);
         let file = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
-                error!("打开代理文件失败: {} - {}", file_path, e);
+                if VERBOSE_LOGS {
+                    error!("打开代理文件失败: {} - {}", file_path, e);
+                }
                 return Err(e);
             }
         };
@@ -175,7 +182,9 @@ impl ProxyManager {
         if !proxies.is_empty() {
             let mut proxy_list = self.proxies.lock().unwrap();
             *proxy_list = proxies;
-            info!("已加载 {} 个代理 (总行数: {})", proxy_list.len(), line_count);
+            if VERBOSE_LOGS {
+                info!("已加载 {} 个代理 (总行数: {})", proxy_list.len(), line_count);
+            }
             Ok(())
         } else {
             let err = io::Error::new(io::ErrorKind::InvalidData, "代理文件为空或格式不正确");
@@ -221,7 +230,9 @@ impl OrchestratorClient {
         
         // 尝试加载默认代理文件
         if let Err(e) = proxy_manager.load_from_file("proxy.txt") {
-            warn!("无法加载默认代理文件: {}", e);
+            if VERBOSE_LOGS {
+                warn!("无法加载默认代理文件: {}", e);
+            }
         }
         
         Self {
@@ -241,27 +252,27 @@ impl OrchestratorClient {
         
         // 尝试加载指定的代理文件
         if let Some(file_path) = proxy_file {
-            info!("尝试加载指定代理文件: {}", file_path);
+            if VERBOSE_LOGS {
+                info!("尝试加载指定代理文件: {}", file_path);
+            }
             // 检查文件是否存在
             if !Path::new(file_path).exists() {
-                warn!("指定的代理文件不存在: {}", file_path);
+                if VERBOSE_LOGS {
+                    warn!("指定的代理文件不存在: {}", file_path);
+                }
             } else {
                 match proxy_manager.load_from_file(file_path) {
-                    Ok(_) => info!("成功加载代理文件: {}", file_path),
-                    Err(e) => warn!("无法加载代理文件 {}: {}", file_path, e),
+                    Ok(_) => {
+                        if VERBOSE_LOGS {
+                            info!("成功加载代理文件: {}", file_path);
+                        }
+                    },
+                    Err(e) => {
+                        if VERBOSE_LOGS {
+                            warn!("无法加载代理文件: {} - {}", file_path, e);
+                        }
+                    }
                 }
-            }
-        } else {
-            // 尝试加载默认代理文件
-            let default_path = "proxy.txt";
-            if Path::new(default_path).exists() {
-                info!("尝试加载默认代理文件: {}", default_path);
-                match proxy_manager.load_from_file(default_path) {
-                    Ok(_) => info!("成功加载默认代理文件"),
-                    Err(e) => warn!("无法加载默认代理文件: {}", e),
-                }
-            } else {
-                warn!("默认代理文件不存在: {}", default_path);
             }
         }
         
@@ -331,7 +342,9 @@ impl OrchestratorClient {
 
     /// 创建带有代理的HTTP客户端（使用指定代理）
     async fn create_client_with_proxy_info(&self, proxy_info: &ProxyInfo) -> Client {
-        info!("使用代理: {} ({})", proxy_info.url, proxy_info.country);
+        if VERBOSE_LOGS {
+            info!("使用代理: {} ({})", proxy_info.url, proxy_info.country);
+        }
         
         // 创建代理
         match Proxy::all(&proxy_info.url) {
@@ -347,17 +360,23 @@ impl OrchestratorClient {
                         return client;
                     }
                     Err(e) => {
-                        error!("创建代理客户端失败: {} - {}", proxy_info.url, e);
+                        if VERBOSE_LOGS {
+                            error!("创建代理客户端失败: {} - {}", proxy_info.url, e);
+                        }
                     }
                 }
             }
             Err(e) => {
-                error!("创建代理失败: {} - {}", proxy_info.url, e);
+                if VERBOSE_LOGS {
+                    error!("创建代理失败: {} - {}", proxy_info.url, e);
+                }
             }
         }
         
         // 如果创建代理客户端失败，使用默认客户端
-        info!("使用默认连接（无代理）");
+        if VERBOSE_LOGS {
+            info!("使用默认连接（无代理）");
+        }
         ClientBuilder::new()
             .timeout(Duration::from_secs(10))
             .build()
@@ -460,13 +479,17 @@ impl OrchestratorClient {
             };
             
             if backoff_time > 0 {
-                info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
-                      node_id, 
-                      if is_429 { " (429 Too Many Requests)" } else { "" }, 
-                      backoff_time);
+                if VERBOSE_LOGS {
+                    info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
+                          node_id, 
+                          if is_429 { " (429 Too Many Requests)" } else { "" }, 
+                          backoff_time);
+                }
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             } else {
-                info!("节点 {} 请求失败，立即重试", node_id);
+                if VERBOSE_LOGS {
+                    info!("节点 {} 请求失败，立即重试", node_id);
+                }
             }
             
             // 重试请求
@@ -561,13 +584,17 @@ impl OrchestratorClient {
             };
             
             if backoff_time > 0 {
-                info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
-                      node_id, 
-                      if is_429 { " (429 Too Many Requests)" } else { "" }, 
-                      backoff_time);
+                if VERBOSE_LOGS {
+                    info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
+                          node_id, 
+                          if is_429 { " (429 Too Many Requests)" } else { "" }, 
+                          backoff_time);
+                }
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             } else {
-                info!("节点 {} 请求失败，立即重试", node_id);
+                if VERBOSE_LOGS {
+                    info!("节点 {} 请求失败，立即重试", node_id);
+                }
             }
             
             // 重试请求
@@ -662,13 +689,17 @@ impl OrchestratorClient {
             };
             
             if backoff_time > 0 {
-                info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
-                      node_id, 
-                      if is_429 { " (429 Too Many Requests)" } else { "" }, 
-                      backoff_time);
+                if VERBOSE_LOGS {
+                    info!("节点 {} 请求失败{}, 等待 {}s 后重试", 
+                          node_id, 
+                          if is_429 { " (429 Too Many Requests)" } else { "" }, 
+                          backoff_time);
+                }
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             } else {
-                info!("节点 {} 请求失败，立即重试", node_id);
+                if VERBOSE_LOGS {
+                    info!("节点 {} 请求失败，立即重试", node_id);
+                }
             }
             
             // 重试请求
@@ -815,7 +846,9 @@ impl OrchestratorClient {
         }
         
         // 如果没有可用代理，使用默认客户端
-        info!("使用默认连接（无代理）");
+        if VERBOSE_LOGS {
+            info!("使用默认连接（无代理）");
+        }
         ClientBuilder::new()
             .timeout(Duration::from_secs(10))
             .build()

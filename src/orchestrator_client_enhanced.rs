@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+// 添加一个常量控制日志输出，与client.rs保持一致
+const VERBOSE_LOGS: bool = false;
+
 /// 缓存的证明数据
 #[derive(Clone)]
 struct CachedProof {
@@ -44,7 +47,9 @@ impl EnhancedOrchestratorClient {
     pub fn new_with_proxy(environment: Environment, proxy_file: Option<&str>) -> Self {
         // 创建基础客户端
         let client = if let Some(proxy_path) = proxy_file {
-            info!("使用代理文件: {}", proxy_path);
+            if VERBOSE_LOGS {
+                info!("使用代理文件: {}", proxy_path);
+            }
             OrchestratorClient::new_with_proxy(environment.clone(), Some(proxy_path))
         } else {
             OrchestratorClient::new(environment.clone())

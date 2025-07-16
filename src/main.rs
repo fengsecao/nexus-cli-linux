@@ -260,8 +260,13 @@ impl FixedLineDisplay {
             .collect();
         sorted_lines.sort_unstable_by_key(|(id, _)| *id);
         
-        for (node_id, status) in sorted_lines {
-            println!("节点-{}: {}", node_id, status);
+        // 检查是否有活跃节点
+        if sorted_lines.is_empty() {
+            println!("⚠️ 警告: 没有检测到活跃节点，请检查节点状态");
+        } else {
+            for (node_id, status) in sorted_lines {
+                println!("节点-{}: {}", node_id, status);
+            }
         }
         
         println!("───────────────────────────────────────────");
