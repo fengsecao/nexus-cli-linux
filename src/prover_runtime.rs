@@ -1723,8 +1723,8 @@ async fn run_memory_optimized_node(
                                         let count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
-                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{}, 连续429: {}次)", 
-                                            timestamp, wait_time, retry_count + 1, MAX_429_RETRIES, count));
+                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{})", 
+                                            timestamp, wait_time, retry_count + 1, MAX_429_RETRIES));
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
@@ -1936,8 +1936,8 @@ async fn run_memory_optimized_node(
                                         orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         
                                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{}, 连续429: {}次)", 
-                                            timestamp, wait_time, retry_count + 1, MAX_SUBMISSION_RETRIES, count));
+                                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{})", 
+                                            timestamp, wait_time, retry_count + 1, MAX_SUBMISSION_RETRIES));
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
@@ -2082,13 +2082,15 @@ async fn run_memory_optimized_node(
                         consecutive_429s += 1; // 增加连续429计数
                         
                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (尝试 {}/{}, 连续429: {}次)", 
-                            timestamp, wait_time, attempt, MAX_TASK_RETRIES, count));
+                        update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (尝试 {}/{})", 
+                            timestamp, wait_time, attempt, MAX_TASK_RETRIES));
                         
                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                            println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
-                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                            if VERBOSE_OUTPUT {
+                                println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
+                                    node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                            }
                             
                             println!("🔄 节点-{}: 429错误，触发轮转", node_id);
                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx).await;
@@ -2109,8 +2111,10 @@ async fn run_memory_optimized_node(
                                 println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                             }
                         } else {
-                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
-                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
+                            if VERBOSE_OUTPUT {
+                                println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
+                                    node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
+                            }
                         }
                         
                         tokio::time::sleep(Duration::from_secs(wait_time)).await;

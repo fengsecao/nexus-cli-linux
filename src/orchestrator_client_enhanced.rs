@@ -40,14 +40,33 @@ impl EnhancedOrchestratorClient {
         }
     }
     
-    /// 创建带有代理支持的增强型协调器客户端
+    /// 创建一个新的增强型协调器客户端，支持代理
     pub fn new_with_proxy(environment: Environment, proxy_file: Option<&str>) -> Self {
-        // 创建基础客户端
         let client = if let Some(proxy_path) = proxy_file {
-            info!("使用代理文件: {}", proxy_path);
-            OrchestratorClient::new_with_proxy(environment.clone(), Some(proxy_path))
+            // 尝试加载代理列表
+            match Self::load_proxies(proxy_path) {
+                Ok(proxies) if !proxies.is_empty() => {
+                    // 创建代理客户端
+                    let client = Self::create_client_with_proxies(&proxies, environment);
+                    // 输出使用代理的信息
+                    // 不输出代理信息，减少日志
+                    client
+                }
+                Ok(_) => {
+                    // 代理列表为空，使用默认连接
+                    // 不输出默认连接信息，减少日志
+                    Self::create_default_client_with_env(environment)
+                }
+                Err(e) => {
+                    // 加载代理列表失败，使用默认连接
+                    // 不输出错误信息，减少日志
+                    Self::create_default_client_with_env(environment)
+                }
+            }
         } else {
-            OrchestratorClient::new(environment.clone())
+            // 没有提供代理文件，使用默认连接
+            // 不输出默认连接信息，减少日志
+            Self::create_default_client_with_env(environment)
         };
         
         Self {
@@ -228,5 +247,42 @@ impl EnhancedOrchestratorClient {
         let mut cache = self.proof_cache.lock().unwrap();
         let expiry = Duration::from_secs(60 * 60); // 60分钟
         cache.retain(|_, cached| cached.timestamp.elapsed() < expiry);
+    }
+
+    /// 创建默认客户端
+    fn create_default_client() -> OrchestratorClient {
+        OrchestratorClient::new(Environment::default())
+    }
+    
+    /// 创建默认客户端（使用指定环境）
+    fn create_default_client_with_env(environment: Environment) -> OrchestratorClient {
+        OrchestratorClient::new(environment)
+    }
+    
+    /// 从文件加载代理列表
+    fn load_proxies(path: &str) -> Result<Vec<String>, std::io::Error> {
+        use std::fs::File;
+        use std::io::{BufRead, BufReader};
+        
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let proxies: Vec<String> = reader.lines()
+            .filter_map(|line| line.ok())
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+            .collect();
+            
+        Ok(proxies)
+    }
+    
+    /// 创建带有代理的客户端
+    fn create_client_with_proxies(proxies: &[String], environment: Environment) -> OrchestratorClient {
+        // 简单实现，随机选择一个代理
+        if !proxies.is_empty() {
+            let idx = rand::random::<usize>() % proxies.len();
+            let proxy = &proxies[idx];
+            OrchestratorClient::new_with_proxy(environment, Some(proxy))
+        } else {
+            Self::create_default_client_with_env(environment)
+        }
     }
 } 
