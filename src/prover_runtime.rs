@@ -1720,7 +1720,7 @@ async fn run_memory_optimized_node(
                                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
                                         
                                         // 增加节点的429计数
-                                        let count = rate_limit_tracker.increment_429_count(node_id).await;
+                                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
                                         update_status(format!("[{}] 🚫 速率限制 (429) - 等待 {}s (重试 {}/{})", 
@@ -1929,7 +1929,7 @@ async fn run_memory_optimized_node(
                                         rate_limited = true;
                                         
                                         // 增加节点的429计数
-                                        let count = rate_limit_tracker.increment_429_count(node_id).await;
+                                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
                                         // 缓存证明以便后续重试
@@ -2078,7 +2078,7 @@ async fn run_memory_optimized_node(
                     let error_str = e.to_string();
                     if error_str.contains("RATE_LIMITED") || error_str.contains("429") {
                         // 速率限制错误
-                        let count = rate_limit_tracker.increment_429_count(node_id).await;
+                        let _count = rate_limit_tracker.increment_429_count(node_id).await;
                         consecutive_429s += 1; // 增加连续429计数
                         
                         let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机

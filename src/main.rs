@@ -47,8 +47,8 @@ use log::warn;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 
-// 导入全局活跃节点计数函数
-use crate::prover_runtime::get_global_active_node_count;
+// 移除未使用的导入
+// use crate::prover_runtime::get_global_active_node_count;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
