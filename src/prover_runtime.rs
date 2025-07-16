@@ -732,6 +732,17 @@ pub async fn start_optimized_batch_workers(
         println!("启动节点 {} (第{}/{}个)", 
                 node_id, index + 1, actual_concurrent);
         
+        // 确保节点在active_threads中标记为活跃
+        {
+            let mut threads_guard = active_threads.lock();
+            threads_guard.insert(*node_id, true);
+            println!("📌 节点-{}: 已在active_threads中标记为活跃", node_id);
+        }
+        
+        // 确保节点在全局活跃节点集合中
+        add_global_active_node(*node_id);
+        println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
+        
         // 检查内存压力，如果需要则等待更长时间
         if check_memory_pressure() {
             debug!("节点 {} 启动前检测到内存压力，执行清理...", node_id);
@@ -745,6 +756,12 @@ pub async fn start_optimized_batch_workers(
             }
             
             // 额外等待让内存清理生效
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        
+        // 添加延迟，确保节点启动间隔
+        if index > 0 {
+            println!("⏱️ 节点-{}: 添加1秒启动延迟，避免同时启动过多节点", node_id);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         
@@ -763,6 +780,9 @@ pub async fn start_optimized_batch_workers(
         ).await;
         
         join_handles.push(handle);
+        
+        // 等待短暂时间，确保节点有时间启动
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
     
     // 执行一次初始化同步
@@ -1535,11 +1555,14 @@ async fn run_memory_optimized_node(
     let should_stop = Arc::new(AtomicBool::new(false));
     let should_stop_clone = should_stop.clone();
     
-    // 创建一个任务来监听停止信号
+    // 创建一个任务来监听停止信号 - 不要立即停止节点
+    // 移除自动停止逻辑，让节点持续运行
+    /*
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         should_stop_clone.store(true, std::sync::atomic::Ordering::SeqCst);
     });
+    */
     
     const MAX_SUBMISSION_RETRIES: usize = 8; // 增加到8次，特别是针对429错误
     const MAX_TASK_RETRIES: usize = 5; // 增加到5次
@@ -1582,6 +1605,18 @@ async fn run_memory_optimized_node(
     
     // 不再需要额外输出大量启动日志
     println!("🌐 节点-{}: 启动并运行中", node_id);
+    
+    // 确保节点在active_threads中标记为活跃
+    {
+        let mut threads_guard = active_threads.lock();
+        threads_guard.insert(node_id, true);
+    }
+    
+    // 确保节点在全局活跃节点集合中
+    add_global_active_node(node_id);
+    
+    // 发送一个明确的状态更新
+    update_status(format!("🌐 节点已启动并运行中 - 准备获取任务"));
     
     loop {
         // 检查停止标志
