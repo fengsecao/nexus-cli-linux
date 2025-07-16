@@ -260,8 +260,9 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
         .copied()
         .collect();
     
-    for node_id in nodes_to_remove {
-        nodes.remove(&node_id);
+    let removed_count = nodes_to_remove.len();
+    for node_id in &nodes_to_remove {
+        nodes.remove(node_id);
         println!("🌍 全局活跃节点同步 - 移除不活跃节点: {}", node_id);
     }
     
@@ -276,7 +277,7 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
     }
     
     println!("🌍 全局活跃节点同步 - 移除了 {} 个不活跃节点，添加了 {} 个新活跃节点，当前活跃节点数量: {}/{}", 
-            nodes_to_remove.len(), added_count, nodes.len(), max_concurrent);
+            removed_count, added_count, nodes.len(), max_concurrent);
 }
 
 
@@ -688,12 +689,12 @@ pub async fn start_optimized_batch_workers(
                                 active_count, total_active_threads, global_active_count, attempts, max_attempts);
                     }
                     
-                    // 只有当所有初始节点都启动后，才标记为已启动
-                    if active_count >= *max_concurrent {
+                    // 检查是否达到了最大并发数
+                    if active_count >= max_concurrent {
                         // 设置所有节点已启动标志
                         all_nodes_started_monitor.store(true, std::sync::atomic::Ordering::SeqCst);
                         println!("🚀 所有初始节点已启动 ({}/{}), 可以开始轮转", 
-                                active_count, *max_concurrent);
+                                active_count, max_concurrent);
                         break;
                     }
                     
@@ -789,6 +790,8 @@ async fn node_manager(
     mut shutdown: broadcast::Receiver<()>,
     mut node_rx: mpsc::Receiver<NodeManagerCommand>,
     rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<HashMap<u64, usize>>>, usize)>,
+    active_threads: Arc<Mutex<HashMap<u64, bool>>>,
+    node_tx: mpsc::Sender<NodeManagerCommand>,
 ) {
     // 提取max_concurrent值用于节点管理
     let max_concurrent = if let Some((_, _, _, _, _, max)) = &rotation_data {
@@ -1525,7 +1528,7 @@ async fn run_memory_optimized_node(
     status_callback: Option<Box<dyn Fn(u64, String) + Send + Sync + 'static>>,
     event_sender: mpsc::Sender<Event>,
     rotation_data: Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<HashMap<u64, usize>>>, usize)>,
-    _active_threads: Arc<Mutex<HashMap<u64, bool>>>,
+    active_threads: Arc<Mutex<HashMap<u64, bool>>>,
     node_tx: mpsc::Sender<NodeManagerCommand>,
 ) {
     // 创建一个停止标志，用于强制退出循环
