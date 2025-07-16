@@ -813,7 +813,7 @@ async fn handle_submission_success(
     rate_limit_tracker: &NodeRateLimitTracker,
 ) {
     // Record successful submission to prevent duplicates
-    successful_tasks.insert(task.task_id.clone());
+    let _ = successful_tasks.insert(task.task_id.clone()).await;
 
     // 解析节点ID - 从任务ID中提取
     let node_id_str = task.task_id.split('-').next().unwrap_or("0");

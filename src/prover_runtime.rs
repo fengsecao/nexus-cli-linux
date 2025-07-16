@@ -1519,7 +1519,7 @@ async fn run_memory_optimized_node(
     };
     
     // 发送事件到UI
-    let send_event = move |msg: String, event_type: crate::events::EventType| {
+    let _send_event = move |msg: String, event_type: crate::events::EventType| {
         let event_sender = event_sender.clone();
         tokio::spawn(async move {
             let _ = event_sender
@@ -1625,6 +1625,18 @@ async fn run_memory_optimized_node(
                                     let msg = format!("[{}] ✅ 缓存证明提交成功! 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
                                     
+                                    // 发送成功事件
+                                    let event_sender_clone = event_sender.clone();
+                                    let task_id_clone = task.task_id.clone();
+                                    tokio::spawn(async move {
+                                        let _ = event_sender_clone
+                                            .send(Event::proof_submitter(
+                                                format!("Proof submitted successfully for task {}", task_id_clone),
+                                                crate::events::EventType::ProofSubmitted,
+                                            ))
+                                            .await;
+                                    });
+                                    
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                     if rotation_data.is_some() {
                                         println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
@@ -1713,8 +1725,17 @@ async fn run_memory_optimized_node(
                                         let msg = format!("[{}] ✅ 证明已被接受 (409) (成功: {}次)", timestamp, success_count);
                                         update_status(msg.clone());
                                         
-                                        // 不再直接发送事件，由workers/online.rs的handle_submission_success处理
-                                        // 避免重复计数
+                                        // 发送成功事件
+                                        let event_sender_clone = event_sender.clone();
+                                        let task_id_clone = task.task_id.clone();
+                                        tokio::spawn(async move {
+                                            let _ = event_sender_clone
+                                                .send(Event::proof_submitter(
+                                                    format!("Proof already accepted for task {}", task_id_clone),
+                                                    crate::events::EventType::ProofSubmitted,
+                                                ))
+                                                .await;
+                                        });
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                         if rotation_data.is_some() {
@@ -1809,8 +1830,16 @@ async fn run_memory_optimized_node(
                                     let msg = format!("[{}] ✅ 证明 #{} 完成 (成功: {}次)", timestamp, proof_count, success_count);
                                     update_status(msg.clone());
                                     
-                                    // 不再直接发送事件，由workers/online.rs的handle_submission_success处理
-                                    // 避免重复计数
+                                    // 发送成功事件
+                                    let event_sender_clone = event_sender.clone();
+                                    tokio::spawn(async move {
+                                        let _ = event_sender_clone
+                                            .send(Event::proof_submitter(
+                                                format!("Proof submitted successfully for task {}", task.task_id),
+                                                crate::events::EventType::ProofSubmitted,
+                                            ))
+                                            .await;
+                                    });
                                     
                                     println!("\n🔍 节点-{}: 证明提交成功，准备轮转...", node_id);
                                     println!("🔍 节点-{}: rotation_data是否存在: {}\n", node_id, rotation_data.is_some());
@@ -1904,8 +1933,17 @@ async fn run_memory_optimized_node(
                                         let msg = format!("[{}] ✅ 证明已被接受 (409) (成功: {}次)", timestamp, success_count);
                                         update_status(msg.clone());
                                         
-                                        // 不再直接发送事件，由workers/online.rs的handle_submission_success处理
-                                        // 避免重复计数
+                                        // 发送成功事件
+                                        let event_sender_clone = event_sender.clone();
+                                        let task_id_clone = task.task_id.clone();
+                                        tokio::spawn(async move {
+                                            let _ = event_sender_clone
+                                                .send(Event::proof_submitter(
+                                                    format!("Proof already accepted for task {}", task_id_clone),
+                                                    crate::events::EventType::ProofSubmitted,
+                                                ))
+                                                .await;
+                                        });
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                         if rotation_data.is_some() {
