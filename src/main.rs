@@ -48,7 +48,7 @@ use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use std::collections::HashSet;
 use std::time::Duration;
-use crate::events::Event; // 修改为从events模块直接导入Event
+use crate::events::EventType; // 只导入EventType而不是整个Event
 
 // 导入全局活跃节点计数函数
 use crate::prover_runtime::get_global_active_node_count;
@@ -663,7 +663,7 @@ async fn start_batch_processing(
     });
     
     // 启动批处理工作线程
-    let (event_receiver, _join_handles) = crate::prover_runtime::start_optimized_batch_workers(
+    let (mut event_receiver, _join_handles) = crate::prover_runtime::start_optimized_batch_workers(
         nodes,
         orchestrator,
         workers_per_node,
@@ -692,10 +692,10 @@ async fn start_batch_processing(
         tokio::select! {
             Some(event) = event_receiver.recv() => {
                 // 根据事件类型更新计数
-                if event.event_type == events::EventType::Success {
+                if event.event_type == EventType::Success {
                     // 更新成功计数
                     display.success_count.fetch_add(1, Ordering::Relaxed);
-                } else if event.event_type == events::EventType::Error {
+                } else if event.event_type == EventType::Error {
                     // 更新失败计数
                     display.failure_count.fetch_add(1, Ordering::Relaxed);
                 }
