@@ -46,6 +46,7 @@ use std::collections::HashMap;
 use log::warn;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
+use std::collections::HashSet;
 
 // 导入全局活跃节点计数函数
 use crate::prover_runtime::get_global_active_node_count;
@@ -254,18 +255,30 @@ impl FixedLineDisplay {
             nodes.clone()
         };
         
-        // 过滤并按节点ID排序显示 - 只显示活跃节点
-        let mut sorted_lines: Vec<_> = lines.iter()
-            .filter(|(id, _)| active_node_ids.contains(id)) // 只保留活跃节点
-            .collect();
-        sorted_lines.sort_unstable_by_key(|(id, _)| *id);
-        
-        // 检查是否有活跃节点
-        if sorted_lines.is_empty() {
+        // 修改显示逻辑：确保显示所有全局活跃节点，不仅仅是有状态更新的节点
+        if active_node_ids.is_empty() {
             println!("⚠️ 警告: 没有检测到活跃节点，请检查节点状态");
         } else {
-            for (node_id, status) in sorted_lines {
+            // 首先显示已有状态信息的活跃节点
+            let mut sorted_lines: Vec<_> = lines.iter()
+                .filter(|(id, _)| active_node_ids.contains(id))
+                .collect();
+            sorted_lines.sort_unstable_by_key(|(id, _)| *id);
+            
+            for (node_id, status) in &sorted_lines {
                 println!("节点-{}: {}", node_id, status);
+            }
+            
+            // 然后显示没有状态信息的活跃节点
+            let nodes_with_status: HashSet<u64> = sorted_lines.iter().map(|(id, _)| **id).collect();
+            let mut missing_nodes: Vec<u64> = active_node_ids.iter()
+                .filter(|id| !nodes_with_status.contains(id))
+                .copied()
+                .collect();
+            missing_nodes.sort_unstable();
+            
+            for node_id in missing_nodes {
+                println!("节点-{}: 已添加到活跃列表，等待状态更新...", node_id);
             }
         }
         
