@@ -4,7 +4,6 @@
 
 ## 主要特性
 
-- **内存优化**：单节点比官方版节省 30%-50% 内存占用
 - **多节点管理**：支持从文件批量启动多个节点ID
 - **高级错误处理**：针对429限流错误进行优化处理
 - **节点轮转功能**：支持节点ID自动轮转，提高成功率
@@ -50,7 +49,6 @@ cargo build --release
 ### 代理列表文件格式
 在proxy.txt中，每行放置一个代理，格式为`host:port:username:password`，例如：
 ```
-proxy-as.packetstream.vip:31112:13413241:Cazq45dd6jbmZ_country-CHINA
 123.45.67.89:8080:user:pass
 ```
 
