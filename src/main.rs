@@ -144,7 +144,7 @@ enum Command {
         rotation: bool,
 
         /// Display refresh interval in seconds (0 for immediate updates)
-        #[arg(long, default_value = "3")]
+        #[arg(long, default_value = "1")]
         refresh_interval: u64,
     },
 }
