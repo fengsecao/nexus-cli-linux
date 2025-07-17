@@ -903,7 +903,7 @@ async fn node_manager(
     });
     
     // 添加定期状态更新功能，确保活跃节点的状态显示在UI上
-    if let Some(status_callback_arc_clone) = status_callback.clone() {
+    if let Some(status_callback_arc_clone) = status_callback_arc.clone() {
         let active_threads_for_status = active_threads.clone();
         let global_active_nodes_clone = Arc::new(parking_lot::Mutex::new(HashSet::<u64>::new()));
         
@@ -955,7 +955,7 @@ async fn node_manager(
     let node_tx_for_recovery = node_tx.clone();
     let environment_for_recovery = environment.clone();
     let proxy_file_for_recovery = proxy_file.clone();
-    let status_callback_arc_for_recovery = status_callback.clone();
+    let status_callback_arc_for_recovery = status_callback_arc.clone();
     let event_sender_for_recovery = event_sender.clone();
     let rotation_data_for_recovery = rotation_data.clone();
     let mut shutdown_for_recovery = shutdown.resubscribe(); // 确保这是可变的
