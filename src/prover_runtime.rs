@@ -1769,9 +1769,13 @@ async fn rotate_to_next_node(
                                 node_id, node_id, final_next_node_id);
                     }
                     
-                    // 发送特殊的启动命令给节点管理器，确保立即启动新节点
-                    let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
-                    println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
+                    // 最后再次确保活动节点列表不超过最大并发数
+                    if active_nodes_guard.len() > *max_concurrent {
+                        println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
+                                node_id, active_nodes_guard.len(), *max_concurrent);
+                        active_nodes_guard.truncate(*max_concurrent);
+                        println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
+                    }
                 } else {
                     // 当前节点不在列表中
                     println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
@@ -1796,9 +1800,13 @@ async fn rotate_to_next_node(
                                     node_id, node_id, final_next_node_id);
                         }
                         
-                        // 发送特殊的启动命令给节点管理器，确保立即启动新节点
-                        let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
-                        println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
+                        // 最后再次确保活动节点列表不超过最大并发数
+                        if active_nodes_guard.len() > *max_concurrent {
+                            println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
+                                    node_id, active_nodes_guard.len(), *max_concurrent);
+                            active_nodes_guard.truncate(*max_concurrent);
+                            println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
+                        }
                     } else {
                         // 列表已满，尝试替换一个节点
                         println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 尝试替换一个节点", node_id, *max_concurrent);
@@ -1828,9 +1836,13 @@ async fn rotate_to_next_node(
                                         node_id, node_id, replaced_node, final_next_node_id);
                             }
                             
-                            // 发送特殊的启动命令给节点管理器，确保立即启动新节点
-                            let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
-                            println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
+                            // 最后再次确保活动节点列表不超过最大并发数
+                            if active_nodes_guard.len() > *max_concurrent {
+                                println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
+                                        node_id, active_nodes_guard.len(), *max_concurrent);
+                                active_nodes_guard.truncate(*max_concurrent);
+                                println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
+                            }
                         } else {
                             println!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id);
                             return (false, Some(format!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id)));
@@ -1838,13 +1850,9 @@ async fn rotate_to_next_node(
                     }
                 }
                 
-                // 最后再次确保活动节点列表不超过最大并发数
-                if active_nodes_guard.len() > *max_concurrent {
-                    println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
-                            node_id, active_nodes_guard.len(), *max_concurrent);
-                    active_nodes_guard.truncate(*max_concurrent);
-                    println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
-                }
+                // 在锁释放后再发送PriorityStartNode命令
+                let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
+                println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
             }
             
             // 通知节点管理器当前节点已停止
@@ -2056,17 +2064,21 @@ async fn start_node_worker(
     
     // 启动节点工作线程
     println!("\n🚀 节点-{}: 正式启动节点工作线程", node_id);
+    
+    // 预先设置节点状态，而不是在tokio::spawn内部
+    {
+        let mut threads_guard = active_threads.lock();
+        threads_guard.insert(node_id, true);
+        println!("📌 节点-{}: 预先设置为活跃", node_id);
+    }
+    
+    // 确保节点在全局活跃节点集合中
+    add_global_active_node(node_id);
+    println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
+    
     let handle = tokio::spawn(async move {
-        // 再次确保节点在active_threads中标记为活跃
-        {
-            let mut threads_guard = active_threads_clone.lock();
-            threads_guard.insert(node_id, true);
-            println!("📌 节点-{}: 工作线程中再次确认标记为活跃", node_id);
-        }
-        
-        // 确保节点在全局活跃节点集合中
-        add_global_active_node(node_id);
-        println!("🌍 节点-{}: 工作线程中再次确认添加到全局活跃节点集合", node_id);
+        // 确认节点状态而不重新获取锁
+        println!("📌 节点-{}: 工作线程已启动", node_id);
         
         // 发送一次明确的状态更新，确保显示在UI上
         if let Some(ref callback) = node_callback {
