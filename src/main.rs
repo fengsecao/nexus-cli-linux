@@ -48,7 +48,7 @@ use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use std::collections::HashSet;
 use std::time::Duration;
-use crate::prover_runtime::Event;
+use crate::events::Event; // 修改为从events模块直接导入Event
 
 // 导入全局活跃节点计数函数
 use crate::prover_runtime::get_global_active_node_count;
@@ -355,7 +355,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             proof_interval,
             max_concurrent,
             workers_per_node,
-            verbose,
+            verbose: _, // 忽略这个未使用的变量
             proxy_file,
             timeout,
             rotation,
