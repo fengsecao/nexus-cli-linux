@@ -1234,7 +1234,7 @@ async fn node_manager(
                                 shutdown.resubscribe(),
                                 rotation_data.clone(),
                                 active_threads.clone(),
-                                node_cmd_tx.clone(),
+                                node_tx_for_nodes.clone(), // 使用克隆的通信通道
                             ).await;
                             
                             // 不需要存储句柄，因为它们会在完成时自动清理
@@ -1296,7 +1296,7 @@ async fn node_manager(
                                 shutdown.resubscribe(),
                                 rotation_data.clone(),
                                 active_threads.clone(),
-                                node_cmd_tx.clone(),
+                                node_tx_for_nodes.clone(),
                             ).await;
                             
                             // 不需要存储句柄，因为它们会在完成时自动清理
@@ -1341,7 +1341,7 @@ async fn node_manager(
                             shutdown.resubscribe(),
                             rotation_data.clone(),
                             active_threads.clone(),
-                            node_cmd_tx.clone(),
+                            node_tx_for_nodes.clone(),
                         ).await;
                         
                         // 不需要存储句柄，因为它们会在完成时自动清理
@@ -1450,7 +1450,7 @@ async fn handle_node_command(
                         shutdown.resubscribe(),
                         rotation_data.clone(),
                         active_threads.clone(),
-                        node_cmd_tx.clone(),
+                        node_tx_for_nodes.clone(),
                     ).await;
                     
                     // 不需要存储句柄，因为它们会在完成时自动清理
@@ -1537,7 +1537,7 @@ async fn handle_node_command(
                 shutdown.resubscribe(),
                 rotation_data.clone(),
                 active_threads.clone(),
-                node_cmd_tx.clone(),
+                node_tx_for_nodes.clone(),
             ).await;
             
             // 不需要存储句柄，因为它们会在完成时自动清理
@@ -1734,8 +1734,8 @@ async fn rotate_to_next_node(
                 // 锁在这里释放
             }
             
-            // 更新活动节点列表
-            {
+            // 执行所有不需要await的操作，捕获结果
+            let result = {
                 let mut active_nodes_guard = active_nodes.lock();
                 
                 // 查找当前节点在活动列表中的位置
@@ -1776,6 +1776,9 @@ async fn rotate_to_next_node(
                         active_nodes_guard.truncate(*max_concurrent);
                         println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
                     }
+                    
+                    // 返回成功结果
+                    Ok(final_next_node_id)
                 } else {
                     // 当前节点不在列表中
                     println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
@@ -1807,6 +1810,9 @@ async fn rotate_to_next_node(
                             active_nodes_guard.truncate(*max_concurrent);
                             println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
                         }
+                        
+                        // 返回成功结果
+                        Ok(final_next_node_id)
                     } else {
                         // 列表已满，尝试替换一个节点
                         println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 尝试替换一个节点", node_id, *max_concurrent);
@@ -1843,17 +1849,28 @@ async fn rotate_to_next_node(
                                 active_nodes_guard.truncate(*max_concurrent);
                                 println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
                             }
+                            
+                            // 返回成功结果
+                            Ok(final_next_node_id)
                         } else {
                             println!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id);
-                            return (false, Some(format!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id)));
+                            Err("活动节点列表为空，无法替换")
                         }
                     }
                 }
-                
-                // 在锁释放后再发送PriorityStartNode命令
-                let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
-                println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
-            }
+            }; // 锁在这里释放
+            
+            // 处理结果，如果成功则继续处理
+            let final_next_node_id = match result {
+                Ok(id) => id,
+                Err(e) => {
+                    return (false, Some(format!("❌ 节点-{}: {}", node_id, e)));
+                }
+            };
+            
+            // 所有锁释放后再发送命令
+            let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
+            println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
             
             // 通知节点管理器当前节点已停止
             println!("📣 节点-{}: 正在通知节点管理器节点停止", node_id);
@@ -2014,36 +2031,6 @@ async fn start_node_worker(
     let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
     println!("🔑 节点-{}: 客户端ID: {}", node_id, client_id);
 
-    // 为每个任务克隆Arc包装的回调
-    let node_callback = match &status_callback_arc {
-        Some(callback_arc) => {
-            // 克隆Arc，不是内部的回调函数
-            let callback_arc_clone = Arc::clone(callback_arc);
-            // 创建一个新的闭包，捕获Arc克隆
-            Some(Box::new(move |node_id: u64, status: String| {
-                callback_arc_clone(node_id, status);
-            }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
-        }
-        None => None
-    };
-    
-    let event_sender_clone = event_sender.clone();
-    let node_tx_clone = node_tx.clone();
-    let active_threads_clone = active_threads.clone();
-    
-    // 更新全局活跃节点集合
-    println!("🌍 节点-{}: 添加到全局活跃节点集合", node_id);
-    add_global_active_node(node_id);
-    
-    // 在spawning前，预先更新活动线程状态
-    {
-        // 更新活动线程状态
-        println!("🧵 节点-{}: 更新活动线程状态", node_id);
-        let mut active_threads_guard = active_threads.lock();
-        active_threads_guard.insert(node_id, true);
-        // 锁在这里释放
-    }
-    
     // 先发送节点启动通知
     println!("📣 节点-{}: 发送启动通知到节点管理器", node_id);
     let node_tx_for_notify = node_tx.clone();
@@ -2062,9 +2049,6 @@ async fn start_node_worker(
         callback_arc(node_id, format!("🚀 节点已启动，准备获取任务"));
     }
     
-    // 启动节点工作线程
-    println!("\n🚀 节点-{}: 正式启动节点工作线程", node_id);
-    
     // 预先设置节点状态，而不是在tokio::spawn内部
     {
         let mut threads_guard = active_threads.lock();
@@ -2076,7 +2060,40 @@ async fn start_node_worker(
     add_global_active_node(node_id);
     println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
     
+    // 准备要传递给新线程的值，必须是Send + 'static
+    // 为了避免传递active_threads_clone但实际上是在新线程中await之前使用它，
+    // 我们显式地创建一个新的Arc<Mutex<HashMap>>
+
+    // 复制需要的回调函数
+    let node_callback = match &status_callback_arc {
+        Some(callback_arc) => {
+            // 克隆Arc，不是内部的回调函数
+            let callback_arc_clone = Arc::clone(callback_arc);
+            // 创建一个新的闭包，捕获Arc克隆
+            Some(Box::new(move |node_id: u64, status: String| {
+                callback_arc_clone(node_id, status);
+            }) as Box<dyn Fn(u64, String) + Send + Sync + 'static>)
+        }
+        None => None
+    };
+    
+    // 为新线程准备所需变量
+    let event_sender_clone = event_sender.clone();
+    let node_tx_clone = node_tx.clone();
+    
+    // 创建一个完全独立的活动线程状态映射
+    let active_threads_safe = Arc::new(parking_lot::Mutex::new(HashMap::<u64, bool>::new()));
+    {
+        let mut threads_guard = active_threads_safe.lock();
+        threads_guard.insert(node_id, true);
+    }
+    
+    // 启动节点工作线程
+    println!("\n🚀 节点-{}: 正式启动节点工作线程", node_id);
     let handle = tokio::spawn(async move {
+        // 在这里创建一个新的活动线程状态映射，而不是使用传入的映射
+        let active_threads_for_thread = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
+        
         // 确认节点状态而不重新获取锁
         println!("📌 节点-{}: 工作线程已启动", node_id);
         
@@ -2099,7 +2116,7 @@ async fn start_node_worker(
             node_callback,
             event_sender_clone,
             rotation_data,
-            active_threads_clone,
+            active_threads_for_thread, // 使用新创建的映射
             node_tx_clone,
         ).await;
         
@@ -3120,3 +3137,4 @@ mod tests {
         task_master_handle.abort();
     }
 }
+
