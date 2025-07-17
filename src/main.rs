@@ -691,16 +691,13 @@ async fn start_batch_processing(
     loop {
         tokio::select! {
             Some(event) = event_receiver.recv() => {
-                match &event {
-                    Event::Success(node_id, msg) => {
-                        // 更新成功计数
-                        display.success_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    Event::Error(node_id, msg) => {
-                        // 更新失败计数
-                        display.failure_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                    _ => {}
+                // 根据事件类型更新计数
+                if event.event_type == events::EventType::Success {
+                    // 更新成功计数
+                    display.success_count.fetch_add(1, Ordering::Relaxed);
+                } else if event.event_type == events::EventType::Error {
+                    // 更新失败计数
+                    display.failure_count.fetch_add(1, Ordering::Relaxed);
                 }
             }
             _ = shutdown_receiver.recv() => {
