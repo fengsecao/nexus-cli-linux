@@ -87,7 +87,9 @@ pub struct DefragmenterStats {
 pub struct DefragmentationResult {
     pub memory_before: f64,
     pub memory_after: f64,
+    #[allow(dead_code)]
     pub bytes_freed: u64,
+    #[allow(dead_code)]
     pub was_critical: bool,
 }
 

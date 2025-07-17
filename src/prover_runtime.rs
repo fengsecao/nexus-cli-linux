@@ -39,6 +39,9 @@ const MAX_COMPLETED_TASKS: usize = 500;
 // 对于有大量节点的情况，建议设置为false以减少输出
 static VERBOSE_OUTPUT: AtomicBool = AtomicBool::new(false);
 
+// 添加一个全局变量，用于完全禁止所有日志输出
+static DISABLE_ALL_LOGS: AtomicBool = AtomicBool::new(false);
+
 /// 设置全局输出详细程度
 pub fn set_verbose_output(verbose: bool) {
     VERBOSE_OUTPUT.store(verbose, Ordering::SeqCst);
@@ -47,6 +50,25 @@ pub fn set_verbose_output(verbose: bool) {
 /// 获取当前输出详细程度
 pub fn get_verbose_output() -> bool {
     VERBOSE_OUTPUT.load(Ordering::SeqCst)
+}
+
+/// 设置是否禁止所有日志输出
+pub fn set_disable_all_logs(disable: bool) {
+    DISABLE_ALL_LOGS.store(disable, Ordering::SeqCst);
+}
+
+/// 检查是否应该输出日志
+pub fn should_log() -> bool {
+    !DISABLE_ALL_LOGS.load(Ordering::SeqCst)
+}
+
+/// 条件性日志输出宏，只有在should_log()返回true时才输出
+macro_rules! log_println {
+    ($($arg:tt)*) => {
+        if should_log() {
+            println!($($arg)*);
+        }
+    };
 }
 
 // 高性能时间戳缓存 - 避免重复格式化
@@ -224,7 +246,7 @@ pub fn get_global_active_node_count() -> usize {
 pub fn add_global_active_node(node_id: u64) -> bool {
     let mut nodes = GLOBAL_ACTIVE_NODES.lock();
     let result = nodes.insert(node_id);
-    println!("🌍 全局活跃节点: 添加节点-{} ({}), 当前活跃节点数量: {}", 
+    log_println!("🌍 全局活跃节点: 添加节点-{} ({}), 当前活跃节点数量: {}", 
             node_id, if result { "新增" } else { "已存在" }, nodes.len());
     result
 }
@@ -233,7 +255,7 @@ pub fn add_global_active_node(node_id: u64) -> bool {
 pub fn remove_global_active_node(node_id: u64) -> bool {
     let mut nodes = GLOBAL_ACTIVE_NODES.lock();
     let result = nodes.remove(&node_id);
-    println!("🌍 全局活跃节点: 移除节点-{} ({}), 当前活跃节点数量: {}", 
+    log_println!("🌍 全局活跃节点: 移除节点-{} ({}), 当前活跃节点数量: {}", 
             node_id, if result { "成功" } else { "不存在" }, nodes.len());
     result
 }
@@ -259,14 +281,14 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
     
     // 如果活跃节点为空但全局节点不为空，不再保留全局节点，而是进行警告并清空
     if active_nodes.is_empty() && !nodes.is_empty() {
-        println!("⚠️ 严重警告: 本地活跃节点为空，但全局有 {} 个活跃节点，执行强制清理", nodes.len());
+        log_println!("⚠️ 严重警告: 本地活跃节点为空，但全局有 {} 个活跃节点，执行强制清理", nodes.len());
         // 记录要清理的节点ID
         let nodes_to_clear: Vec<u64> = nodes.iter().copied().collect();
         for node_id in &nodes_to_clear {
             nodes.remove(node_id);
-            println!("🌍 全局活跃节点同步 - 强制移除节点: {}", node_id);
+            log_println!("🌍 全局活跃节点同步 - 强制移除节点: {}", node_id);
         }
-        println!("🌍 全局活跃节点同步 - 强制清理完成，当前活跃节点数量: 0");
+        log_println!("🌍 全局活跃节点同步 - 强制清理完成，当前活跃节点数量: 0");
         return;
     }
     
@@ -280,7 +302,7 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
     let removed_count = nodes_to_remove.len();
     for node_id in &nodes_to_remove {
         nodes.remove(node_id);
-        println!("🌍 全局活跃节点同步 - 移除不活跃节点: {}", node_id);
+        log_println!("🌍 全局活跃节点同步 - 移除不活跃节点: {}", node_id);
     }
     
     // 2. 添加新的活跃节点，但确保不超过max_concurrent
@@ -289,21 +311,21 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
         if !nodes.contains(&node_id) && nodes.len() < max_concurrent {
             nodes.insert(node_id);
             added_count += 1;
-            println!("🌍 全局活跃节点同步 - 添加新活跃节点: {}", node_id);
+            log_println!("🌍 全局活跃节点同步 - 添加新活跃节点: {}", node_id);
         }
     }
     
     // 如果全局活跃节点数量为0，但有本地活跃节点，强制添加
     if nodes.is_empty() && !active_nodes.is_empty() {
-        println!("⚠️ 全局活跃节点集合为空，但有本地活跃节点，强制添加");
+        log_println!("⚠️ 全局活跃节点集合为空，但有本地活跃节点，强制添加");
         for &node_id in active_nodes.iter().take(max_concurrent) {
             nodes.insert(node_id);
             added_count += 1;
-            println!("🌍 全局活跃节点同步 - 强制添加节点: {}", node_id);
+            log_println!("🌍 全局活跃节点同步 - 强制添加节点: {}", node_id);
         }
     }
     
-    println!("🌍 全局活跃节点同步 - 移除了 {} 个不活跃节点，添加了 {} 个新活跃节点，当前活跃节点数量: {}/{}", 
+    log_println!("🌍 全局活跃节点同步 - 移除了 {} 个不活跃节点，添加了 {} 个新活跃节点，当前活跃节点数量: {}/{}", 
             removed_count, added_count, nodes.len(), max_concurrent);
     
     // 确保节点真正启动 - 将全局活跃节点集合中的节点在active_threads中标记为需要启动
@@ -319,7 +341,7 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
         }
         
         if nodes_to_start > 0 {
-            println!("🚀 全局活跃节点同步 - 标记 {} 个节点需要启动", nodes_to_start);
+            log_println!("🚀 全局活跃节点同步 - 标记 {} 个节点需要启动", nodes_to_start);
         }
     }
 }
@@ -446,13 +468,13 @@ pub async fn start_optimized_batch_workers(
     
     // 增加初始延迟，避免一次性启动太多节点导致429错误
     let initial_delay = 3.0; // 3秒初始延迟
-    println!("等待初始延迟 {:.1}秒...", initial_delay);
+    log_println!("等待初始延迟 {:.1}秒...", initial_delay);
     tokio::time::sleep(std::time::Duration::from_secs_f64(initial_delay)).await;
     
     // 计算实际并发数（最大并发数与节点数量的较小值）
     let actual_concurrent = max_concurrent.min(nodes.len());
     if get_verbose_output() {
-        println!("🧮 设置的并发数: {}, 实际并发数: {}", max_concurrent, actual_concurrent);
+        log_println!("🧮 设置的并发数: {}, 实际并发数: {}", max_concurrent, actual_concurrent);
     }
     
     // 创建一个跟踪活跃线程的映射
@@ -476,7 +498,7 @@ pub async fn start_optimized_batch_workers(
     let all_nodes = Arc::new(nodes.clone());
     let rotation_data = if rotation {
         if get_verbose_output() {
-            println!("🔄 启用节点轮转功能 - 总节点数: {}", nodes.len());
+            log_println!("🔄 启用节点轮转功能 - 总节点数: {}", nodes.len());
         }
         // 创建一个共享的活动节点队列和下一个可用节点索引
         let active_nodes = Arc::new(Mutex::new(Vec::new()));
@@ -499,13 +521,13 @@ pub async fn start_optimized_batch_workers(
             let mut sorted_nodes: Vec<(usize, u64)> = nodes.iter().enumerate().map(|(idx, &id)| (idx, id)).collect();
             sorted_nodes.sort_by_key(|(idx, _)| *idx);
             
-            println!("🔄 初始化活动节点队列 - 最大并发数: {}, 总节点数: {}", actual_concurrent, nodes.len());
+            log_println!("🔄 初始化活动节点队列 - 最大并发数: {}, 总节点数: {}", actual_concurrent, nodes.len());
             
             // 只添加前actual_concurrent个节点到活动队列
             for (idx, node_id) in sorted_nodes.iter().take(actual_concurrent) {
                 // 确保不会添加超过最大并发数的节点
                 if active_nodes_guard.len() >= actual_concurrent {
-                    println!("⚠️ 活动节点队列已达到最大并发数 {}, 不再添加节点", actual_concurrent);
+                    log_println!("⚠️ 活动节点队列已达到最大并发数 {}, 不再添加节点", actual_concurrent);
                     break;
                 }
                 
@@ -513,10 +535,10 @@ pub async fn start_optimized_batch_workers(
                 if !active_nodes_guard.contains(node_id) {
                     active_nodes_guard.push(*node_id);
                     if get_verbose_output() {
-                        println!("🔄 添加节点-{} 到活动节点队列 (索引: {})", node_id, idx);
+                        log_println!("🔄 添加节点-{} 到活动节点队列 (索引: {})", node_id, idx);
                     }
                 } else {
-                    println!("⚠️ 节点-{} 已在活动队列中，跳过 (索引: {})", node_id, idx);
+                    log_println!("⚠️ 节点-{} 已在活动队列中，跳过 (索引: {})", node_id, idx);
                 }
                 
                 // 更新节点索引映射
@@ -539,23 +561,23 @@ pub async fn start_optimized_batch_workers(
             }
             
             if get_verbose_output() {
-                println!("🔄 初始活动节点队列: {:?} (大小: {})", *active_nodes_guard, active_nodes_guard.len());
-                println!("🔄 下一个节点索引: {}", next_node_index.load(std::sync::atomic::Ordering::SeqCst));
-                println!("🔄 最大并发数: {}, 总节点数: {}", actual_concurrent, nodes.len());
+                log_println!("🔄 初始活动节点队列: {:?} (大小: {})", *active_nodes_guard, active_nodes_guard.len());
+                log_println!("🔄 下一个节点索引: {}", next_node_index.load(std::sync::atomic::Ordering::SeqCst));
+                log_println!("🔄 最大并发数: {}, 总节点数: {}", actual_concurrent, nodes.len());
             }
             
             // 最后再次确认活动节点数量不超过最大并发数
             if active_nodes_guard.len() > actual_concurrent {
-                println!("⚠️ 活动节点队列超出最大并发数 ({} > {}), 进行截断", 
+                log_println!("⚠️ 活动节点队列超出最大并发数 ({} > {}), 进行截断", 
                         active_nodes_guard.len(), actual_concurrent);
                 active_nodes_guard.truncate(actual_concurrent);
-                println!("✅ 活动节点队列已截断至 {} 个节点", active_nodes_guard.len());
+                log_println!("✅ 活动节点队列已截断至 {} 个节点", active_nodes_guard.len());
             }
         } // 锁在这里释放
         
         Some((active_nodes.clone(), next_node_index.clone(), all_nodes.clone(), all_nodes_started.clone(), node_indices.clone(), actual_concurrent))
     } else {
-        println!("⚠️ 节点轮转功能未启用");
+        log_println!("⚠️ 节点轮转功能未启用");
         None
     };
     
@@ -574,12 +596,12 @@ pub async fn start_optimized_batch_workers(
             {
                 let active_nodes_guard = active_nodes_clone.lock();
                 if get_verbose_output() {
-                    println!("🔄 启动节点管理器线程 - 初始活动节点列表: {:?}", *active_nodes_guard);
+                    log_println!("🔄 启动节点管理器线程 - 初始活动节点列表: {:?}", *active_nodes_guard);
                 }
             }
             
             if get_verbose_output() {
-                println!("🔄 启动节点管理器线程");
+                log_println!("🔄 启动节点管理器线程");
             }
             
             // 创建一个新的通道，用于节点管理器
@@ -594,7 +616,7 @@ pub async fn start_optimized_batch_workers(
                 let active_nodes_guard = active_nodes_clone.lock();
                 
                 for node_id in active_nodes_guard.iter().copied().take(actual_concurrent) {
-                    println!("🚀 节点管理器: 初始启动节点-{}", node_id);
+                    log_println!("🚀 节点管理器: 初始启动节点-{}", node_id);
                     
                     let handle = start_node_worker(
                         node_id,
@@ -649,7 +671,7 @@ pub async fn start_optimized_batch_workers(
                 loop {
                     tokio::select! {
                         _ = shutdown_monitor.recv() => {
-                            println!("🛑 请求速率监控任务收到关闭信号，正在退出");
+                            log_println!("🛑 请求速率监控任务收到关闭信号，正在退出");
                             break;
                         }
                         _ = tokio::time::sleep(check_interval) => {
@@ -668,7 +690,7 @@ pub async fn start_optimized_batch_workers(
                                 current_rate = f64::max(current_rate * 0.9, 0.1); // 最低每10秒1个请求
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
-                                    println!("⚠️ 检测到429错误 ({}个)，降低请求速率至每秒{}个 (降低10%)", 
+                                    log_println!("⚠️ 检测到429错误 ({}个)，降低请求速率至每秒{}个 (降低10%)", 
                                             recent_429s, current_rate);
                                 }
                                 
@@ -683,7 +705,7 @@ pub async fn start_optimized_batch_workers(
                                 current_rate = f64::min(current_rate * 1.1, 5.0); // 最高每秒5个请求
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
-                                    println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
+                                    log_println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
                                 }
                                 
                                 // 重置成功计数，避免过大
@@ -694,7 +716,7 @@ pub async fn start_optimized_batch_workers(
                             
                             // 输出当前请求统计信息
                             if get_verbose_output() {
-                                println!("📊 请求速率监控: 当前速率 = 每秒{}个请求, 总请求数 = {}", rate, total_requests);
+                                log_println!("📊 请求速率监控: 当前速率 = 每秒{}个请求, 总请求数 = {}", rate, total_requests);
                             }
                         }
                     }
@@ -730,7 +752,7 @@ pub async fn start_optimized_batch_workers(
                     
                     // 输出当前活动线程信息
                     if attempts % 5 == 0 || attempts == 1 { // 减少日志输出频率
-                        println!("🔄 节点启动监控: 当前活动节点数量: {}/{}, 全局活跃: {}, 尝试次数: {}/{}", 
+                        log_println!("🔄 节点启动监控: 当前活动节点数量: {}/{}, 全局活跃: {}, 尝试次数: {}/{}", 
                                 active_count, total_active_threads, global_active_count, attempts, max_attempts);
                     }
                     
@@ -738,7 +760,7 @@ pub async fn start_optimized_batch_workers(
                     if active_count >= max_concurrent {
                         // 设置所有节点已启动标志
                         all_nodes_started_monitor.store(true, std::sync::atomic::Ordering::SeqCst);
-                        println!("🚀 所有初始节点已启动 ({}/{}), 可以开始轮转", 
+                        log_println!("🚀 所有初始节点已启动 ({}/{}), 可以开始轮转", 
                                 active_count, max_concurrent);
                         break;
                     }
@@ -746,7 +768,7 @@ pub async fn start_optimized_batch_workers(
                     // 如果尝试次数过多，强制标记为已启动
                     if attempts >= max_attempts {
                         all_nodes_started_monitor.store(true, std::sync::atomic::Ordering::SeqCst);
-                        println!("⚠️ 节点启动监控: 达到最大尝试次数 ({}), 强制标记所有节点已启动", max_attempts);
+                        log_println!("⚠️ 节点启动监控: 达到最大尝试次数 ({}), 强制标记所有节点已启动", max_attempts);
                         break;
                     }
                     
@@ -769,13 +791,13 @@ pub async fn start_optimized_batch_workers(
         nodes.iter().take(actual_concurrent).copied().collect::<Vec<u64>>()
     };
     
-    println!("🔄 准备按顺序启动以下节点: {:?}", active_nodes_list);
+    log_println!("🔄 准备按顺序启动以下节点: {:?}", active_nodes_list);
 
     // 按序启动各节点
     for (index, node_id) in active_nodes_list.iter().enumerate() {
         // 减少输出，只显示关键信息
         if index % 10 == 0 || index == active_nodes_list.len() - 1 {
-            println!("启动节点 {} (第{}/{}个)", 
+            log_println!("启动节点 {} (第{}/{}个)", 
                     node_id, index + 1, actual_concurrent);
         }
         
@@ -784,14 +806,14 @@ pub async fn start_optimized_batch_workers(
             let mut threads_guard = active_threads.lock();
             threads_guard.insert(*node_id, true);
             if get_verbose_output() {
-                println!("📌 节点-{}: 已在active_threads中标记为活跃", node_id);
+                log_println!("📌 节点-{}: 已在active_threads中标记为活跃", node_id);
             }
         }
         
         // 确保节点在全局活跃节点集合中
         add_global_active_node(*node_id);
         if get_verbose_output() {
-            println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
+            log_println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
         }
         
         // 检查内存压力，如果需要则等待更长时间
@@ -812,7 +834,7 @@ pub async fn start_optimized_batch_workers(
         
         // 添加延迟，确保节点启动间隔
         if index > 0 {
-            println!("⏱️ 节点-{}: 添加1秒启动延迟，避免同时启动过多节点", node_id);
+            log_println!("⏱️ 节点-{}: 添加1秒启动延迟，避免同时启动过多节点", node_id);
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         
@@ -980,21 +1002,21 @@ async fn node_manager(
                     // 如果本地和全局都没有活跃节点，增加计数
                     if active_count == 0 && global_active_count == 0 {
                         no_active_nodes_count += 1;
-                        println!("⚠️ 紧急恢复监控: 没有检测到活跃节点 (连续{}次)", no_active_nodes_count);
+                        log_println!("⚠️ 紧急恢复监控: 没有检测到活跃节点 (连续{}次)", no_active_nodes_count);
                         
                         // 如果连续3次检测到没有活跃节点，启动紧急恢复
                         if no_active_nodes_count >= 3 {
-                            println!("🚨 紧急恢复: 连续{}次没有检测到活跃节点，启动紧急恢复流程", no_active_nodes_count);
+                            log_println!("🚨 紧急恢复: 连续{}次没有检测到活跃节点，启动紧急恢复流程", no_active_nodes_count);
                             
                             // 如果有all_nodes，从中选择节点启动
                             if let Some(all_nodes) = &all_nodes_for_recovery {
                                 // 选择前3个节点进行紧急启动
                                 let emergency_nodes: Vec<u64> = all_nodes.iter().take(3).copied().collect();
                                 
-                                println!("🚨 紧急恢复: 将启动以下节点: {:?}", emergency_nodes);
+                                log_println!("🚨 紧急恢复: 将启动以下节点: {:?}", emergency_nodes);
                                 
                                 for &node_id in &emergency_nodes {
-                                    println!("🚨 紧急恢复: 启动节点-{}", node_id);
+                                    log_println!("🚨 紧急恢复: 启动节点-{}", node_id);
                                     
                                     // 确保节点在active_threads中标记为活跃
                                     {
@@ -1029,20 +1051,20 @@ async fn node_manager(
                                 // 重置计数器
                                 no_active_nodes_count = 0;
                             } else {
-                                println!("🚨 紧急恢复: 没有可用的节点列表，无法启动紧急恢复");
+                                log_println!("🚨 紧急恢复: 没有可用的节点列表，无法启动紧急恢复");
                             }
                         }
                     } else {
                         // 如果有活跃节点，重置计数器
                         if no_active_nodes_count > 0 {
-                            println!("✅ 紧急恢复监控: 检测到活跃节点，重置计数器 (本地: {}, 全局: {})", 
+                            log_println!("✅ 紧急恢复监控: 检测到活跃节点，重置计数器 (本地: {}, 全局: {})", 
                                     active_count, global_active_count);
                             no_active_nodes_count = 0;
                         }
                     }
                 }
                 _ = shutdown_for_recovery.recv() => {
-                    println!("🛑 紧急恢复监控: 收到关闭信号，正在停止");
+                    log_println!("🛑 紧急恢复监控: 收到关闭信号，正在停止");
                     break;
                 }
             }
@@ -1057,7 +1079,7 @@ async fn node_manager(
         tokio::select! {
             // 处理关闭信号
             _ = shutdown.recv() => {
-                println!("🛑 节点管理器: 收到关闭信号，停止所有节点");
+                log_println!("🛑 节点管理器: 收到关闭信号，停止所有节点");
                 break;
             }
             
@@ -1065,7 +1087,7 @@ async fn node_manager(
             Some(cmd) = node_rx.recv() => {
                 match &cmd {
                     NodeManagerCommand::PriorityStartNode(node_id) => {
-                        println!("🚀 节点管理器: 收到优先启动节点-{} 的命令", node_id);
+                        log_println!("🚀 节点管理器: 收到优先启动节点-{} 的命令", node_id);
                         
                         // 直接调用处理函数
                         handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, 
@@ -1087,7 +1109,7 @@ async fn node_manager(
             Some(cmd) = node_cmd_rx.recv() => {
                 match &cmd {
                     NodeManagerCommand::PriorityStartNode(node_id) => {
-                        println!("🚀 节点管理器: 收到优先启动节点-{} 的命令 (内部通道)", node_id);
+                        log_println!("🚀 节点管理器: 收到优先启动节点-{} 的命令 (内部通道)", node_id);
                         
                         // 直接调用处理函数
                         handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, 
@@ -1133,13 +1155,13 @@ async fn node_manager(
                 };
                 
                 if get_verbose_output() {
-                    println!("📊 节点管理器: 定期检查 - 当前活动节点数量: {}, 活动列表长度: {}, 全局活跃数量: {}, 最大并发数: {}", 
+                    log_println!("📊 节点管理器: 定期检查 - 当前活动节点数量: {}, 活动列表长度: {}, 全局活跃数量: {}, 最大并发数: {}", 
                             current_active_count, active_nodes_count, global_active_count, max_concurrent);
                 }
                 
                 // 如果活动节点数量或活动列表长度超过最大并发数，执行强制清理
                 if current_active_count > max_concurrent || active_nodes_count > max_concurrent || global_active_count > max_concurrent {
-                    println!("⚠️ 节点管理器: 状态不一致或超出限制，执行强制清理");
+                    log_println!("⚠️ 节点管理器: 状态不一致或超出限制，执行强制清理");
                     
                     // 强制同步全局活跃节点集合
                     sync_global_active_nodes(&active_threads, max_concurrent);
@@ -1161,7 +1183,7 @@ async fn node_manager(
                     
                     // 减少输出，只显示总数
                     if get_verbose_output() {
-                        println!("🔍 节点状态检查: 总节点数: {}, 活跃节点数: {}", threads_guard.len(), active_count);
+                        log_println!("🔍 节点状态检查: 总节点数: {}, 活跃节点数: {}", threads_guard.len(), active_count);
                     }
                     
                     active_count
@@ -1194,7 +1216,7 @@ async fn node_manager(
                 
                 // 如果有节点需要启动，优先启动这些节点
                 if !nodes_needing_start.is_empty() && available_slots > 0 {
-                    println!("�� 节点管理器: 发现 {} 个节点需要启动，有 {} 个可用槽位", 
+                    log_println!("🚀 节点管理器: 发现 {} 个节点需要启动，有 {} 个可用槽位", 
                             nodes_needing_start.len(), available_slots);
                     
                     // 只启动可用槽位数量的节点
@@ -1204,24 +1226,24 @@ async fn node_manager(
                         .collect::<Vec<_>>();
                     
                     if !nodes_to_launch.is_empty() {
-                        println!("🚀 节点管理器: 准备启动 {} 个标记为需要启动的节点", nodes_to_launch.len());
+                        log_println!("🚀 节点管理器: 准备启动 {} 个标记为需要启动的节点", nodes_to_launch.len());
                         
                         // 标记这些节点为正在启动
                         for &node_id in &nodes_to_launch {
                             starting_nodes.insert(node_id);
-                            println!("🚀 节点管理器: 节点-{} 标记为正在启动", node_id);
+                            log_println!("🚀 节点管理器: 节点-{} 标记为正在启动", node_id);
                         }
                         
                         // 启动节点
                         for node_id in nodes_to_launch {
                             // 再次确认全局活跃节点数量未超限
                             if get_global_active_node_count() >= max_concurrent {
-                                println!("⚠️ 节点管理器: 全局活跃节点数量已达到最大并发数，取消启动剩余节点");
+                                log_println!("⚠️ 节点管理器: 全局活跃节点数量已达到最大并发数，取消启动剩余节点");
                                 break;
                             }
                             
                             // 启动新节点
-                            println!("🚀 节点管理器: 启动节点-{}", node_id);
+                            log_println!("🚀 节点管理器: 启动节点-{}", node_id);
                             
                             // 确保节点在active_threads中标记为活跃
                             {
@@ -1258,7 +1280,7 @@ async fn node_manager(
                 }
                 // 如果没有节点需要启动，但有可用槽位和待启动节点，则启动这些节点
                 else if available_slots > 0 && !nodes_to_start.is_empty() {
-                    println!("📊 节点管理器: 有 {} 个可用槽位，可以启动新节点", available_slots);
+                    log_println!("📊 节点管理器: 有 {} 个可用槽位，可以启动新节点", available_slots);
                     
                     // 只启动可用槽位数量的节点
                     let nodes_to_start = nodes_to_start.into_iter()
@@ -1267,7 +1289,7 @@ async fn node_manager(
                         .collect::<Vec<_>>();
                     
                     if !nodes_to_start.is_empty() {
-                        println!("🚀 节点管理器: 准备启动 {} 个新节点", nodes_to_start.len());
+                        log_println!("🚀 节点管理器: 准备启动 {} 个新节点", nodes_to_start.len());
                         
                         // 标记这些节点为正在启动
                         for &node_id in &nodes_to_start {
@@ -1278,12 +1300,12 @@ async fn node_manager(
                         for node_id in nodes_to_start {
                             // 再次确认全局活跃节点数量未超限
                             if get_global_active_node_count() >= max_concurrent {
-                                println!("⚠️ 节点管理器: 全局活跃节点数量已达到最大并发数，取消启动剩余节点");
+                                log_println!("⚠️ 节点管理器: 全局活跃节点数量已达到最大并发数，取消启动剩余节点");
                                 break;
                             }
                             
                             // 启动新节点
-                            println!("🚀 节点管理器: 启动节点-{}", node_id);
+                            log_println!("🚀 节点管理器: 启动节点-{}", node_id);
                             
                             // 确保节点在active_threads中标记为活跃
                             {
@@ -1319,7 +1341,7 @@ async fn node_manager(
                     }
                 }
                 else if current_active_count == 0 && global_active_count == 0 {
-                    println!("⚠️ 节点管理器: 没有活跃节点，尝试紧急启动");
+                    log_println!("⚠️ 节点管理器: 没有活跃节点，尝试紧急启动");
                     
                     // 从活动节点列表中选择一个节点启动
                     let emergency_node_opt = {
@@ -1328,7 +1350,7 @@ async fn node_manager(
                     };
                     
                     if let Some(node_id) = emergency_node_opt {
-                        println!("🚨 紧急启动: 选择节点-{}", node_id);
+                        log_println!("🚨 紧急启动: 选择节点-{}", node_id);
                         
                         // 确保节点在active_threads中标记为活跃
                         {
@@ -1405,7 +1427,7 @@ async fn handle_node_command(
                 guard.remove(&node_id_clone);
             });
             
-            println!("🛑 节点管理器: 节点-{} 已停止", node_id);
+            log_println!("🛑 节点管理器: 节点-{} 已停止", node_id);
             
             // 更新节点状态
             {
@@ -1413,7 +1435,7 @@ async fn handle_node_command(
                 threads_guard.insert(node_id, false);
             }
             
-            println!("🔄 节点管理器: 节点-{} 已停止，准备启动新节点", node_id);
+            log_println!("🔄 节点管理器: 节点-{} 已停止，准备启动新节点", node_id);
             
             // 获取需要启动的节点
             let nodes_to_start = get_nodes_to_start(active_nodes, active_threads).await;
@@ -1446,7 +1468,7 @@ async fn handle_node_command(
                 // 启动节点
                 for node_id in nodes_to_start {
                     // 启动新节点
-                    println!("🚀 节点管理器: 启动节点-{}", node_id);
+                    log_println!("🚀 节点管理器: 启动节点-{}", node_id);
                     
                     let handle = start_node_worker(
                         node_id,
@@ -1469,16 +1491,16 @@ async fn handle_node_command(
                 }
             } else {
                 if get_verbose_output() {
-                    println!("⚠️ 节点管理器: 已达到最大并发数 {}, 暂不启动新节点", max_concurrent);
+                    log_println!("⚠️ 节点管理器: 已达到最大并发数 {}, 暂不启动新节点", max_concurrent);
                 }
             }
         }
         NodeManagerCommand::PriorityStartNode(node_id) => {
-            println!("🚀 节点管理器: 收到优先启动节点-{} 的命令", node_id);
+            log_println!("🚀 节点管理器: 收到优先启动节点-{} 的命令", node_id);
             
             // 如果节点已经在启动中，不重复启动
             if starting_nodes.contains(&node_id) {
-                println!("⚠️ 节点管理器: 节点-{} 已在启动中，跳过", node_id);
+                log_println!("⚠️ 节点管理器: 节点-{} 已在启动中，跳过", node_id);
                 return;
             }
             
@@ -1489,7 +1511,7 @@ async fn handle_node_command(
             };
             
             if is_active {
-                println!("⚠️ 节点管理器: 节点-{} 已经活跃，跳过启动", node_id);
+                log_println!("⚠️ 节点管理器: 节点-{} 已经活跃，跳过启动", node_id);
                 return;
             }
             
@@ -1500,19 +1522,19 @@ async fn handle_node_command(
             {
                 let mut threads_guard = active_threads.lock();
                 threads_guard.insert(node_id, true);
-                println!("📌 节点-{}: 已在active_threads中标记为活跃", node_id);
+                log_println!("📌 节点-{}: 已在active_threads中标记为活跃", node_id);
             }
             
             // 确保节点在全局活跃节点集合中
             add_global_active_node(node_id);
-            println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
+            log_println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
             
             // 确保节点在活动节点列表中
             {
                 let mut active_nodes_guard = active_nodes.lock();
                 if !active_nodes_guard.contains(&node_id) && active_nodes_guard.len() < max_concurrent {
                     active_nodes_guard.push(node_id);
-                    println!("📋 节点-{}: 已添加到活动节点列表", node_id);
+                    log_println!("📋 节点-{}: 已添加到活动节点列表", node_id);
                 }
             }
             
@@ -1533,7 +1555,7 @@ async fn handle_node_command(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             
-            println!("🚀 节点管理器: 正在启动优先节点-{}", node_id);
+            log_println!("🚀 节点管理器: 正在启动优先节点-{}", node_id);
             
             let handle = start_node_worker(
                 node_id,
@@ -1559,7 +1581,7 @@ async fn handle_node_command(
             
             // 从启动中列表移除
             starting_nodes.remove(&node_id);
-            println!("✅ 节点管理器: 已启动优先节点-{}", node_id);
+            log_println!("✅ 节点管理器: 已启动优先节点-{}", node_id);
         }
     }
 }
@@ -1584,7 +1606,7 @@ async fn get_nodes_to_start(
         let active_thread_count = active_threads_guard.values().filter(|&&active| active).count();
         
         if get_verbose_output() {
-            println!("\n🔍 get_nodes_to_start: 活动节点列表大小: {}, 活跃线程数: {}, 全局活跃: {}", 
+            log_println!("\n🔍 get_nodes_to_start: 活动节点列表大小: {}, 活跃线程数: {}, 全局活跃: {}", 
                     active_node_count, active_thread_count, global_active_count);
         }
         
@@ -1594,7 +1616,7 @@ async fn get_nodes_to_start(
                 let is_active = active_threads_guard.get(&node_id).copied().unwrap_or(false);
                 // 只在详细模式下输出单个节点状态
                 if !is_active && get_verbose_output() {
-                    println!("  - 节点-{}: 未在active_threads中标记为活跃，需要启动", node_id);
+                    log_println!("  - 节点-{}: 未在active_threads中标记为活跃，需要启动", node_id);
                 }
                 !is_active
             })
@@ -1609,19 +1631,19 @@ async fn get_nodes_to_start(
     
     // 减少输出，只显示关键信息
     if to_start.len() > 0 {
-        println!("🔍 需要启动 {} 个节点, 当前活跃节点数: {}, 全局活跃节点数: {}", 
+        log_println!("🔍 需要启动 {} 个节点, 当前活跃节点数: {}, 全局活跃节点数: {}", 
                 to_start.len(), active_count, global_active_count);
     }
     
     // 只在详细模式下显示完整节点列表
     if get_verbose_output() {
-        println!("🔄 节点列表: {:?}", to_start);
+        log_println!("🔄 节点列表: {:?}", to_start);
     } else if to_start.len() <= 5 && to_start.len() > 0 {
         // 非详细模式下，如果节点数量较少，仍然显示节点列表
-        println!("🔄 节点列表: {:?}", to_start);
+        log_println!("🔄 节点列表: {:?}", to_start);
     }
     
-    println!("🔄 节点管理器: 当前活动节点数量: {}, 全局活跃节点数量: {}", active_count, global_active_count);
+    log_println!("🔄 节点管理器: 当前活动节点数量: {}, 全局活跃节点数量: {}", active_count, global_active_count);
     
     // 如果没有找到需要启动的节点，但活动节点列表不为空且活动节点数量为0，
     // 尝试从活动节点列表中获取一个节点来启动
@@ -1639,7 +1661,7 @@ async fn get_nodes_to_start(
             let emergency_node = active_nodes_list[0];
             emergency_nodes.push(emergency_node);
             
-            println!("⚠️ 节点管理器: 紧急情况 - 没有活跃节点，选择节点-{} 进行紧急启动", emergency_node);
+            log_println!("⚠️ 节点管理器: 紧急情况 - 没有活跃节点，选择节点-{} 进行紧急启动", emergency_node);
             
             // 确保这个节点在active_threads中标记为非活跃
             {
@@ -1663,19 +1685,19 @@ async fn rotate_to_next_node(
     active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
 ) -> (bool, Option<String>) {
     if get_verbose_output() {
-        println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
+        log_println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
     }
     
     // 从全局活跃节点集合移除当前节点
     remove_global_active_node(node_id);
     if get_verbose_output() {
-        println!("🌍 节点-{}: 已从全局活跃节点集合移除", node_id);
+        log_println!("🌍 节点-{}: 已从全局活跃节点集合移除", node_id);
     }
     
     if let Some((active_nodes, _next_node_index, all_nodes, all_nodes_started, node_indices, max_concurrent)) = rotation_data {
         // 检查所有初始节点是否已启动
         if !all_nodes_started.load(std::sync::atomic::Ordering::SeqCst) {
-            println!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id);
+            log_println!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id);
             return (false, Some(format!("⚠️ 节点-{}: 所有初始节点尚未启动完成，暂不轮转", node_id)));
         }
         
@@ -1683,7 +1705,7 @@ async fn rotate_to_next_node(
         {
             let mut threads_guard = active_threads.lock();
             if !threads_guard.get(&node_id).copied().unwrap_or(false) {
-                println!("⚠️ 节点-{}: 在active_threads中未标记为活跃，正在修复", node_id);
+                log_println!("⚠️ 节点-{}: 在active_threads中未标记为活跃，正在修复", node_id);
                 threads_guard.insert(node_id, true);
             }
         }
@@ -1694,7 +1716,7 @@ async fn rotate_to_next_node(
             threads_guard.len()
         };
         
-        println!("📊 节点-{}: 当前活跃节点数量: {}/{}", node_id, current_active_count, *max_concurrent);
+        log_println!("📊 节点-{}: 当前活跃节点数量: {}/{}", node_id, current_active_count, *max_concurrent);
         
         // 获取当前节点的索引
         let node_idx_opt = {
@@ -1712,7 +1734,7 @@ async fn rotate_to_next_node(
             let final_next_idx = if next_node_id == node_id && all_nodes.len() > 1 {
                 // 如果轮转到自己且有其他节点可用，则选择下一个节点
                 let alternative_idx = (next_idx + 1) % all_nodes.len();
-                println!("⚠️ 节点-{}: 避免轮转到自己，改为使用索引 {}", node_id, alternative_idx);
+                log_println!("⚠️ 节点-{}: 避免轮转到自己，改为使用索引 {}", node_id, alternative_idx);
                 alternative_idx
             } else {
                 next_idx
@@ -1720,13 +1742,13 @@ async fn rotate_to_next_node(
             
             let final_next_node_id = all_nodes[final_next_idx];
             
-            println!("📊 节点-{}: 当前索引: {}, 下一个索引: {}, 总节点数: {}", 
+            log_println!("📊 节点-{}: 当前索引: {}, 下一个索引: {}, 总节点数: {}", 
                     node_id, node_idx, final_next_idx, all_nodes.len());
-            println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, final_next_node_id, final_next_idx);
+            log_println!("🔄 节点-{}: 将轮转到节点-{} (索引: {})", node_id, final_next_node_id, final_next_idx);
             
             // 检查新节点是否已经在全局活跃节点集合中
             if is_node_globally_active(final_next_node_id) {
-                println!("⚠️ 节点-{}: 新节点-{} 已经在全局活跃节点集合中，不重复添加", 
+                log_println!("⚠️ 节点-{}: 新节点-{} 已经在全局活跃节点集合中，不重复添加", 
                         node_id, final_next_node_id);
                 
                 // 通知节点管理器当前节点已停止
@@ -1739,8 +1761,8 @@ async fn rotate_to_next_node(
             // 获取当前活跃节点列表并打印（在一个独立的作用域内）
             {
                 let active_nodes_guard = active_nodes.lock();
-                println!("📋 节点-{}: 轮转前活动节点列表: {:?}", node_id, *active_nodes_guard);
-                println!("📋 节点-{}: 活动节点数量: {}, 最大并发数: {}", node_id, active_nodes_guard.len(), *max_concurrent);
+                log_println!("📋 节点-{}: 轮转前活动节点列表: {:?}", node_id, *active_nodes_guard);
+                log_println!("📋 节点-{}: 活动节点数量: {}, 最大并发数: {}", node_id, active_nodes_guard.len(), *max_concurrent);
                 // 锁在这里释放
             }
             
@@ -1753,20 +1775,20 @@ async fn rotate_to_next_node(
                 
                 if let Some(pos) = pos {
                     // 当前节点在列表中，直接替换
-                    println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
+                    log_println!("✅ 节点-{}: 在活动列表中找到位置 {}", node_id, pos);
                     active_nodes_guard[pos] = final_next_node_id;
-                    println!("✅ 节点-{}: 已替换为节点-{}", node_id, final_next_node_id);
+                    log_println!("✅ 节点-{}: 已替换为节点-{}", node_id, final_next_node_id);
                     
                     // 确保当前节点已从全局活跃节点集合中移除
                     remove_global_active_node(node_id);
-                    println!("🌍 节点-{}: 已从全局活跃节点集合中移除", node_id);
+                    log_println!("🌍 节点-{}: 已从全局活跃节点集合中移除", node_id);
                     
                     // 将新节点添加到全局活跃节点集合
                     add_global_active_node(final_next_node_id);
-                    println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
+                    log_println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
                     
                     // 创建一个任务来启动新节点
-                    println!("🚀 节点-{}: 正在触发新节点-{} 的启动", node_id, final_next_node_id);
+                    log_println!("🚀 节点-{}: 正在触发新节点-{} 的启动", node_id, final_next_node_id);
 
                     // 同时更新active_threads映射
                     {
@@ -1775,32 +1797,32 @@ async fn rotate_to_next_node(
                         threads_guard.insert(node_id, false);
                         // 将新节点标记为活跃
                         threads_guard.insert(final_next_node_id, true);
-                        println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
+                        log_println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
                                 node_id, node_id, final_next_node_id);
                     }
                     
                     // 最后再次确保活动节点列表不超过最大并发数
                     if active_nodes_guard.len() > *max_concurrent {
-                        println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
+                        log_println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
                                 node_id, active_nodes_guard.len(), *max_concurrent);
                         active_nodes_guard.truncate(*max_concurrent);
-                        println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
+                        log_println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
                     }
                     
                     // 返回成功结果
                     Ok(final_next_node_id)
                 } else {
                     // 当前节点不在列表中
-                    println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
+                    log_println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
                     
                     // 如果列表未满，尝试添加新节点
                     if active_nodes_guard.len() < *max_concurrent {
                         active_nodes_guard.push(final_next_node_id);
-                        println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, final_next_node_id);
+                        log_println!("✅ 节点-{}: 已添加新节点-{} 到活动列表", node_id, final_next_node_id);
                         
                         // 将新节点添加到全局活跃节点集合
                         add_global_active_node(final_next_node_id);
-                        println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
+                        log_println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
                         
                         // 同时更新active_threads映射
                         {
@@ -1809,36 +1831,36 @@ async fn rotate_to_next_node(
                             threads_guard.insert(node_id, false);
                             // 将新节点标记为活跃
                             threads_guard.insert(final_next_node_id, true);
-                            println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
+                            log_println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
                                     node_id, node_id, final_next_node_id);
                         }
                         
                         // 最后再次确保活动节点列表不超过最大并发数
                         if active_nodes_guard.len() > *max_concurrent {
-                            println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
+                            log_println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
                                     node_id, active_nodes_guard.len(), *max_concurrent);
                             active_nodes_guard.truncate(*max_concurrent);
-                            println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
+                            log_println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
                         }
                         
                         // 返回成功结果
                         Ok(final_next_node_id)
                     } else {
                         // 列表已满，尝试替换一个节点
-                        println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 尝试替换一个节点", node_id, *max_concurrent);
+                        log_println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 尝试替换一个节点", node_id, *max_concurrent);
                         
                         // 选择第一个节点进行替换
                         if !active_nodes_guard.is_empty() {
                             let replaced_node = active_nodes_guard[0];
                             active_nodes_guard[0] = final_next_node_id;
-                            println!("✅ 节点-{}: 已替换节点-{} 为节点-{}", node_id, replaced_node, final_next_node_id);
+                            log_println!("✅ 节点-{}: 已替换节点-{} 为节点-{}", node_id, replaced_node, final_next_node_id);
                             
                             // 从全局活跃节点集合中移除被替换的节点
                             remove_global_active_node(replaced_node);
                             
                             // 将新节点添加到全局活跃节点集合
                             add_global_active_node(final_next_node_id);
-                            println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
+                            log_println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
                             
                             // 同时更新active_threads映射
                             {
@@ -1848,22 +1870,22 @@ async fn rotate_to_next_node(
                                 threads_guard.insert(replaced_node, false);
                                 // 将新节点标记为活跃
                                 threads_guard.insert(final_next_node_id, true);
-                                println!("📊 节点-{}: 已在active_threads中将节点-{} 和节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
+                                log_println!("📊 节点-{}: 已在active_threads中将节点-{} 和节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
                                         node_id, node_id, replaced_node, final_next_node_id);
                             }
                             
                             // 最后再次确保活动节点列表不超过最大并发数
                             if active_nodes_guard.len() > *max_concurrent {
-                                println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
+                                log_println!("⚠️ 节点-{}: 轮转后强制检查 - 活动节点列表超出限制 ({} > {}), 进行截断", 
                                         node_id, active_nodes_guard.len(), *max_concurrent);
                                 active_nodes_guard.truncate(*max_concurrent);
-                                println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
+                                log_println!("✅ 节点-{}: 已强制截断活动节点列表至 {} 个节点", node_id, active_nodes_guard.len());
                             }
                             
                             // 返回成功结果
                             Ok(final_next_node_id)
                         } else {
-                            println!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id);
+                            log_println!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id);
                             Err("活动节点列表为空，无法替换")
                         }
                     }
@@ -1880,10 +1902,10 @@ async fn rotate_to_next_node(
             
             // 所有锁释放后再发送命令
             let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
-            println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
+            log_println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
             
             // 通知节点管理器当前节点已停止
-            println!("📣 节点-{}: 正在通知节点管理器节点停止", node_id);
+            log_println!("📣 节点-{}: 正在通知节点管理器节点停止", node_id);
             
             // 添加重试机制，确保消息能够发送成功
             let mut retry_count = 0;
@@ -1897,16 +1919,16 @@ async fn rotate_to_next_node(
                     node_tx.send(NodeManagerCommand::NodeStopped(node_id))
                 ).await {
                     Ok(Ok(_)) => {
-                        println!("📣 节点-{}: 已成功通知节点管理器节点停止", node_id);
+                        log_println!("📣 节点-{}: 已成功通知节点管理器节点停止", node_id);
                         // 成功发送消息，直接退出循环
                         break;
                     },
                     Ok(Err(e)) => {
                         retry_count += 1;
-                        println!("⚠️ 节点-{}: 通知节点管理器失败 (尝试 {}/{}): {}", node_id, retry_count, max_retries, e);
+                        log_println!("⚠️ 节点-{}: 通知节点管理器失败 (尝试 {}/{}): {}", node_id, retry_count, max_retries, e);
                         
                         if retry_count >= max_retries {
-                            println!("⚠️ 节点-{}: 通知节点管理器失败，达到最大重试次数", node_id);
+                            log_println!("⚠️ 节点-{}: 通知节点管理器失败，达到最大重试次数", node_id);
                         } else {
                             // 短暂等待后重试
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1914,10 +1936,10 @@ async fn rotate_to_next_node(
                     },
                     Err(_) => {
                         retry_count += 1;
-                        println!("⚠️ 节点-{}: 通知节点管理器超时 (尝试 {}/{})", node_id, retry_count, max_retries);
+                        log_println!("⚠️ 节点-{}: 通知节点管理器超时 (尝试 {}/{})", node_id, retry_count, max_retries);
                         
                         if retry_count >= max_retries {
-                            println!("⚠️ 节点-{}: 通知节点管理器超时，达到最大重试次数", node_id);
+                            log_println!("⚠️ 节点-{}: 通知节点管理器超时，达到最大重试次数", node_id);
                         } else {
                             // 短暂等待后重试
                             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1941,27 +1963,27 @@ async fn rotate_to_next_node(
             // 确保新节点在全局活跃节点集合中
             if !is_node_globally_active(final_next_node_id) {
                 add_global_active_node(final_next_node_id);
-                println!("🌍 节点-{}: 确保新节点-{} 在全局活跃节点集合中", node_id, final_next_node_id);
+                log_println!("🌍 节点-{}: 确保新节点-{} 在全局活跃节点集合中", node_id, final_next_node_id);
             }
             
             // 生成状态消息
             let status_msg = format!("🔄 节点轮转: {} → {} (原因: {}) - 当前节点已处理完毕", node_id, final_next_node_id, reason);
             
-            println!("\n{}\n", status_msg); // 添加明显的控制台输出
+            log_println!("\n{}\n", status_msg); // 添加明显的控制台输出
             
             // 等待一小段时间，确保节点管理器有时间处理消息
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             
             return (true, Some(status_msg));
         } else {
-            println!("⚠️ 节点-{}: 未找到节点索引，无法轮转", node_id);
+            log_println!("⚠️ 节点-{}: 未找到节点索引，无法轮转", node_id);
             return (false, None);
         }
     } else {
         // 轮转功能未启用
-        println!("\n⚠️ 节点-{}: 轮转功能未启用或配置错误，无法轮转 (原因: {})\n", node_id, reason);
+        log_println!("\n⚠️ 节点-{}: 轮转功能未启用或配置错误，无法轮转 (原因: {})\n", node_id, reason);
     }
-    println!("❌ 节点-{}: 轮转失败", node_id);
+    log_println!("❌ 节点-{}: 轮转失败", node_id);
     (false, None)
 }
 
@@ -1987,12 +2009,12 @@ async fn start_node_worker(
     };
 
     // 输出节点启动详细日志
-    println!("\n🚀 开始启动节点-{} (最大并发: {})", node_id, max_concurrent);
+    log_println!("\n🚀 开始启动节点-{} (最大并发: {})", node_id, max_concurrent);
 
     // 全局并发检查 - 如果已达到最大并发数且该节点不在活跃列表中，则不启动
     let global_active_count = get_global_active_node_count();
     if global_active_count >= max_concurrent && !is_node_globally_active(node_id) {
-        println!("⚠️ 节点-{}: 全局活跃节点数量 ({}) 已达到最大并发数 ({}), 拒绝启动", 
+        log_println!("⚠️ 节点-{}: 全局活跃节点数量 ({}) 已达到最大并发数 ({}), 拒绝启动", 
                 node_id, global_active_count, max_concurrent);
                 
         // 使用Arc包装的回调
@@ -2002,21 +2024,21 @@ async fn start_node_worker(
         
         // 返回一个已完成的JoinHandle
         return tokio::spawn(async move {
-            println!("🛑 节点-{}: 启动被拒绝，返回空任务", node_id);
+            log_println!("🛑 节点-{}: 启动被拒绝，返回空任务", node_id);
         });
     }
 
-    println!("✅ 节点-{}: 并发检查通过，当前活跃节点: {}/{}", node_id, global_active_count, max_concurrent);
+    log_println!("✅ 节点-{}: 并发检查通过，当前活跃节点: {}/{}", node_id, global_active_count, max_concurrent);
 
     // 获取密钥
-    println!("🔑 节点-{}: 正在加载密钥...", node_id);
+    log_println!("🔑 节点-{}: 正在加载密钥...", node_id);
     let signing_key = match crate::key_manager::load_or_generate_signing_key() {
         Ok(key) => {
-            println!("✅ 节点-{}: 密钥加载成功", node_id);
+            log_println!("✅ 节点-{}: 密钥加载成功", node_id);
             key
         },
         Err(e) => {
-            println!("❌ 节点-{}: 密钥加载失败: {}", node_id, e);
+            log_println!("❌ 节点-{}: 密钥加载失败: {}", node_id, e);
             warn!("节点-{} 加载签名密钥失败: {}", node_id, e);
             // 使用Arc包装的回调
             if let Some(callback_arc) = &status_callback_arc {
@@ -2029,32 +2051,32 @@ async fn start_node_worker(
     };
     
     // 使用增强版客户端
-    println!("🌐 节点-{}: 创建客户端...", node_id);
+    log_println!("🌐 节点-{}: 创建客户端...", node_id);
     let enhanced_orchestrator = if let Some(ref proxy_file) = proxy_file {
-        println!("🌐 节点-{}: 使用代理文件: {}", node_id, proxy_file);
+        log_println!("🌐 节点-{}: 使用代理文件: {}", node_id, proxy_file);
         EnhancedOrchestratorClient::new_with_proxy(environment.clone(), Some(proxy_file.as_str()))
     } else {
-        println!("🌐 节点-{}: 不使用代理", node_id);
+        log_println!("🌐 节点-{}: 不使用代理", node_id);
         EnhancedOrchestratorClient::new(environment.clone())
     };
     
     let client_id = format!("{:x}", md5::compute(node_id.to_le_bytes()));
-    println!("🔑 节点-{}: 客户端ID: {}", node_id, client_id);
+    log_println!("🔑 节点-{}: 客户端ID: {}", node_id, client_id);
 
     // 先发送节点启动通知
-    println!("📣 节点-{}: 发送启动通知到节点管理器", node_id);
+    log_println!("📣 节点-{}: 发送启动通知到节点管理器", node_id);
     let node_tx_for_notify = node_tx.clone();
     let notify_future = node_tx_for_notify.send(NodeManagerCommand::NodeStarted(node_id));
     
     // 等待通知完成
     match tokio::time::timeout(Duration::from_secs(2), notify_future).await {
-        Ok(Ok(_)) => println!("📣 节点-{}: 已成功通知节点管理器节点启动", node_id),
-        Ok(Err(e)) => println!("⚠️ 节点-{}: 通知节点管理器启动失败: {}", node_id, e),
-        Err(_) => println!("⚠️ 节点-{}: 通知节点管理器启动超时", node_id),
+        Ok(Ok(_)) => log_println!("📣 节点-{}: 已成功通知节点管理器节点启动", node_id),
+        Ok(Err(e)) => log_println!("⚠️ 节点-{}: 通知节点管理器启动失败: {}", node_id, e),
+        Err(_) => log_println!("⚠️ 节点-{}: 通知节点管理器启动超时", node_id),
     }
     
     // 立即发送一次初始状态更新，确保节点在UI上显示
-    println!("📱 节点-{}: 发送初始状态更新到UI", node_id);
+    log_println!("📱 节点-{}: 发送初始状态更新到UI", node_id);
     if let Some(callback_arc) = &status_callback_arc {
         callback_arc(node_id, format!("🚀 节点已启动，准备获取任务"));
     }
@@ -2063,12 +2085,12 @@ async fn start_node_worker(
     {
         let mut threads_guard = active_threads.lock();
         threads_guard.insert(node_id, true);
-        println!("📌 节点-{}: 预先设置为活跃", node_id);
+        log_println!("📌 节点-{}: 预先设置为活跃", node_id);
     }
     
     // 确保节点在全局活跃节点集合中
     add_global_active_node(node_id);
-    println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
+    log_println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
     
     // 准备要传递给新线程的值，必须是Send + 'static
     // 为了避免传递active_threads_clone但实际上是在新线程中await之前使用它，
@@ -2099,13 +2121,13 @@ async fn start_node_worker(
     }
     
     // 启动节点工作线程
-    println!("\n🚀 节点-{}: 正式启动节点工作线程", node_id);
+    log_println!("\n🚀 节点-{}: 正式启动节点工作线程", node_id);
     let handle = tokio::spawn(async move {
         // 在这里创建一个新的活动线程状态映射，而不是使用传入的映射
         let active_threads_for_thread = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
         
         // 确认节点状态而不重新获取锁
-        println!("📌 节点-{}: 工作线程已启动", node_id);
+        log_println!("📌 节点-{}: 工作线程已启动", node_id);
         
         // 发送一次明确的状态更新，确保显示在UI上
         if let Some(ref callback) = node_callback {
@@ -2113,7 +2135,7 @@ async fn start_node_worker(
         }
         
         // 运行节点
-        println!("🚀 节点-{}: 即将运行主任务循环", node_id);
+        log_println!("🚀 节点-{}: 即将运行主任务循环", node_id);
         run_memory_optimized_node(
             node_id,
             signing_key,
@@ -2132,10 +2154,10 @@ async fn start_node_worker(
         
         // 节点完成时从全局活跃节点集合中移除
         remove_global_active_node(node_id);
-        println!("🔴 节点-{}: 已从全局活跃节点集合中移除", node_id);
+        log_println!("🔴 节点-{}: 已从全局活跃节点集合中移除", node_id);
     });
     
-    println!("✅ 节点-{}: 启动完成，已返回任务句柄", node_id);
+    log_println!("✅ 节点-{}: 启动完成，已返回任务句柄", node_id);
     handle
 }
 
@@ -2206,7 +2228,7 @@ async fn run_memory_optimized_node(
     let _ = node_tx.send(NodeManagerCommand::NodeStarted(node_id)).await;
     
     // 不再需要额外输出大量启动日志
-    println!("🌐 节点-{}: 启动并运行中", node_id);
+    log_println!("🌐 节点-{}: 启动并运行中", node_id);
     
     // 确保节点在active_threads中标记为活跃
     {
@@ -2218,11 +2240,11 @@ async fn run_memory_optimized_node(
     add_global_active_node(node_id);
     
     // 发送一个明确的状态更新
-    update_status(format!("🌐 节点已启动并运行中 - 准备获取任务"));
+    update_status(format!("�� 节点已启动并运行中 - 准备获取任务"));
     
     // 减少输出，只在详细模式下显示
     if get_verbose_output() {
-        println!("🚀 节点-{}: 真正开始运行任务循环", node_id);
+        log_println!("🚀 节点-{}: 真正开始运行任务循环", node_id);
     }
     
     // 发送一个明确的状态更新到UI
@@ -2234,7 +2256,7 @@ async fn run_memory_optimized_node(
             update_status("🛑 收到停止信号，正在停止...".to_string());
             // 通知节点管理器当前节点已停止
             let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-            println!("🛑 节点-{}: 强制停止", node_id);
+            log_println!("🛑 节点-{}: 强制停止", node_id);
             break;
         }
         
@@ -2332,7 +2354,7 @@ async fn run_memory_optimized_node(
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                     if rotation_data.is_some() {
-                                        println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
+                                        log_println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
                                         let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx, &active_threads).await;
                                         if should_rotate {
                                             if let Some(msg) = status_msg {
@@ -2340,10 +2362,10 @@ async fn run_memory_optimized_node(
                                             }
                                             return; // 结束当前节点的处理
                                         } else {
-                                            println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                            log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                         }
                                     } else {
-                                        println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
+                                        log_println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                                     }
                                     
                                     break;
@@ -2364,10 +2386,10 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                                            println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
+                                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                                             
-                                            println!("🔄 节点-{}: 429错误，触发轮转", node_id);
+                                            log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
                                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
@@ -2375,7 +2397,7 @@ async fn run_memory_optimized_node(
                                                 }
                                                 // 发送一个显式的停止消息，确保节点真正停止
                                                 let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                                println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
                                                 
                                                 // 设置停止标志
                                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2383,10 +2405,10 @@ async fn run_memory_optimized_node(
                                                 // 强制退出当前节点的处理循环
                                                 return;
                                             } else {
-                                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                             }
                                         } else {
-                                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
+                                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
                                         }
                                         
@@ -2424,7 +2446,7 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                         if rotation_data.is_some() {
-                                            println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
+                                            log_println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
                                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
@@ -2432,10 +2454,10 @@ async fn run_memory_optimized_node(
                                                 }
                                                 return; // 结束当前节点的处理
                                             } else {
-                                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                             }
                                         } else {
-                                            println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
+                                            log_println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                                         }
                                         
                                         break;
@@ -2528,13 +2550,13 @@ async fn run_memory_optimized_node(
                                     
                                     #[cfg(debug_assertions)]
                                     {
-                                        println!("\n🔍 节点-{}: 证明提交成功，准备轮转...", node_id);
-                                        println!("🔍 节点-{}: rotation_data是否存在: {}\n", node_id, rotation_data.is_some());
+                                        log_println!("\n🔍 节点-{}: 证明提交成功，准备轮转...", node_id);
+                                        log_println!("🔍 节点-{}: rotation_data是否存在: {}\n", node_id, rotation_data.is_some());
                                     }
                                     
                                     // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                     if rotation_data.is_some() {
-                                        println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
+                                        log_println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
                                         let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "成功提交证明", &node_tx, &active_threads).await;
                                         if should_rotate {
                                             if let Some(msg) = status_msg {
@@ -2542,7 +2564,7 @@ async fn run_memory_optimized_node(
                                             }
                                             // 发送一个显式的停止消息，确保节点真正停止
                                             let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                            println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                            log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
                                             
                                             // 设置停止标志
                                             should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2550,10 +2572,10 @@ async fn run_memory_optimized_node(
                                             // 强制退出当前节点的处理循环
                                             return;
                                         } else {
-                                            println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                            log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                         }
                                     } else {
-                                        println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
+                                        log_println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                                     }
                                     
                                     break;
@@ -2577,10 +2599,10 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                                            println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
+                                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                                             
-                                            println!("🔄 节点-{}: 429错误，触发轮转", node_id);
+                                            log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
                                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
@@ -2588,7 +2610,7 @@ async fn run_memory_optimized_node(
                                                 }
                                                 // 发送一个显式的停止消息，确保节点真正停止
                                                 let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                                println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
                                                 
                                                 // 设置停止标志
                                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2596,10 +2618,10 @@ async fn run_memory_optimized_node(
                                                 // 强制退出当前节点的处理循环
                                                 return;
                                             } else {
-                                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                             }
                                         } else {
-                                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
+                                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
                                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
                                         }
                                         
@@ -2635,7 +2657,7 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能，成功提交后轮转到下一个节点
                                         if rotation_data.is_some() {
-                                            println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
+                                            log_println!("🔄 节点-{}: 证明提交成功，触发轮转", node_id);
                                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "证明已被接受", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
@@ -2643,10 +2665,10 @@ async fn run_memory_optimized_node(
                                                 }
                                                 return; // 结束当前节点的处理
                                             } else {
-                                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                                             }
                                         } else {
-                                            println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
+                                            log_println!("⚠️ 节点-{}: 轮转功能未启用，继续使用当前节点", node_id);
                                         }
                                         
                                         break;
@@ -2724,10 +2746,10 @@ async fn run_memory_optimized_node(
                         
                         // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
                         if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                            println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
+                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
                             
-                            println!("🔄 节点-{}: 429错误，触发轮转", node_id);
+                            log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
@@ -2735,7 +2757,7 @@ async fn run_memory_optimized_node(
                                 }
                                 // 发送一个显式的停止消息，确保节点真正停止
                                 let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
                                 
                                 // 设置停止标志
                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2743,10 +2765,10 @@ async fn run_memory_optimized_node(
                                 // 强制退出当前节点的处理循环
                                 return;
                             } else {
-                                println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                             }
                         } else {
-                            println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
+                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
                                 node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
                         }
                         
@@ -2786,10 +2808,10 @@ async fn run_memory_optimized_node(
             
             // 检查是否需要触发轮转 - 如果连续获取任务失败次数达到阈值
             if task_fetch_failures >= MAX_TASK_FETCH_FAILURES_BEFORE_ROTATION && rotation_data.is_some() {
-                println!("\n⚠️ 节点-{}: 连续获取任务失败{}次，触发轮转 (阈值: {})\n", 
+                log_println!("\n⚠️ 节点-{}: 连续获取任务失败{}次，触发轮转 (阈值: {})\n", 
                     node_id, task_fetch_failures, MAX_TASK_FETCH_FAILURES_BEFORE_ROTATION);
                 
-                println!("🔄 节点-{}: 任务获取失败，触发轮转", node_id);
+                log_println!("🔄 节点-{}: 任务获取失败，触发轮转", node_id);
                 let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续获取任务失败", &node_tx, &active_threads).await;
                 if should_rotate {
                     if let Some(msg) = status_msg {
@@ -2797,7 +2819,7 @@ async fn run_memory_optimized_node(
                     }
                     // 发送一个显式的停止消息，确保节点真正停止
                     let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                    println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                    log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
                     
                     // 设置停止标志
                     should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2805,7 +2827,7 @@ async fn run_memory_optimized_node(
                     // 强制退出当前节点的处理循环
                     return;
                 } else {
-                    println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                    log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
                     // 重置失败计数，避免连续触发轮转
                     task_fetch_failures = 0;
                 }
@@ -2848,9 +2870,9 @@ async fn cleanup_active_nodes(
         // 检查全局活跃节点集合是否也为空
         let global_active_count = get_global_active_node_count();
         if global_active_count == 0 {
-            println!("⚠️ 警告: 没有检测到任何活跃节点，这可能是一个问题");
+            log_println!("⚠️ 警告: 没有检测到任何活跃节点，这可能是一个问题");
         } else {
-            println!("⚠️ 警告: 本地活跃节点列表为空，但全局有 {} 个活跃节点，执行强制同步", global_active_count);
+            log_println!("⚠️ 警告: 本地活跃节点列表为空，但全局有 {} 个活跃节点，执行强制同步", global_active_count);
             
             // 强制同步全局活跃节点集合 - 但不清空全局集合，而是尝试恢复本地状态
             {
@@ -2860,17 +2882,17 @@ async fn cleanup_active_nodes(
                 // 将全局活跃节点添加到本地active_threads中
                 for &node_id in global_nodes.iter() {
                     threads_guard.insert(node_id, true);
-                    println!("🔄 强制同步 - 将全局节点 {} 标记为本地活跃", node_id);
+                    log_println!("🔄 强制同步 - 将全局节点 {} 标记为本地活跃", node_id);
                 }
                 
-                println!("🔄 强制同步完成 - 从全局恢复了 {} 个活跃节点", global_nodes.len());
+                log_println!("🔄 强制同步完成 - 从全局恢复了 {} 个活跃节点", global_nodes.len());
             }
         }
     }
     
     // 如果活跃节点数量超过最大并发数，强制限制
     let active_node_ids_limited = if active_node_ids.len() > max_concurrent {
-        println!("⚠️ 节点清理: 活跃节点数量 ({}) 超过最大并发数 ({}), 进行限制", 
+        log_println!("⚠️ 节点清理: 活跃节点数量 ({}) 超过最大并发数 ({}), 进行限制", 
                 active_node_ids.len(), max_concurrent);
         
         // 只保留前max_concurrent个节点
@@ -2884,7 +2906,7 @@ async fn cleanup_active_nodes(
     
     // 如果全局活跃节点数量与实际活跃节点数量不一致，打印警告
     if global_active_count != active_node_ids_limited.len() {
-        println!("⚠️ 节点清理: 全局活跃节点数量 ({}) 与实际活跃节点数量 ({}) 不一致，执行强制同步", 
+        log_println!("⚠️ 节点清理: 全局活跃节点数量 ({}) 与实际活跃节点数量 ({}) 不一致，执行强制同步", 
                 global_active_count, active_node_ids_limited.len());
         
         // 强制同步全局活跃节点集合
@@ -2897,10 +2919,10 @@ async fn cleanup_active_nodes(
         
         // 检查当前活动节点列表状态
         if nodes_guard.len() < active_node_ids_limited.len() {
-            println!("⚠️ 节点清理: 活动节点列表 ({}) 小于实际活跃节点数量 ({}), 需要添加节点", 
+            log_println!("⚠️ 节点清理: 活动节点列表 ({}) 小于实际活跃节点数量 ({}), 需要添加节点", 
                     nodes_guard.len(), active_node_ids_limited.len());
         } else if nodes_guard.len() > max_concurrent {
-            println!("⚠️ 节点清理: 活动节点列表 ({}) 超过最大并发数 ({}), 需要减少节点", 
+            log_println!("⚠️ 节点清理: 活动节点列表 ({}) 超过最大并发数 ({}), 需要减少节点", 
                     nodes_guard.len(), max_concurrent);
         }
         
@@ -2915,7 +2937,7 @@ async fn cleanup_active_nodes(
         if should_rebuild {
             // 强制清空活动节点列表，以确保下面的操作从零开始，避免累积
             nodes_guard.clear();
-            println!("🧹 节点清理: 已清空活动节点列表，重新填充");
+            log_println!("🧹 节点清理: 已清空活动节点列表，重新填充");
             
             // 填充最多max_concurrent个活跃节点
             let nodes_to_add = active_node_ids_limited.iter()
@@ -2925,24 +2947,24 @@ async fn cleanup_active_nodes(
             
             if !nodes_to_add.is_empty() {
                 nodes_guard.extend(nodes_to_add.clone());
-                println!("✅ 节点清理: 已添加{}个活跃节点到活动列表 (完全重建)", nodes_guard.len());
+                log_println!("✅ 节点清理: 已添加{}个活跃节点到活动列表 (完全重建)", nodes_guard.len());
                 
                 // 确保这些节点真正启动 - 添加一个标记，表示这些节点需要启动
-                println!("🚀 节点清理: 标记这些节点需要重新启动");
+                log_println!("🚀 节点清理: 标记这些节点需要重新启动");
                 
                 // 将这些节点在active_threads中标记为非活跃，以便后续启动
                 {
                     let mut threads_guard = active_threads.lock();
                     for &node_id in &nodes_to_add {
                         threads_guard.insert(node_id, false);
-                        println!("🚀 节点清理: 节点-{} 标记为需要启动", node_id);
+                        log_println!("🚀 节点清理: 节点-{} 标记为需要启动", node_id);
                     }
                 }
             } else {
-                println!("⚠️ 节点清理: 没有活跃节点可添加，活动列表为空");
+                log_println!("⚠️ 节点清理: 没有活跃节点可添加，活动列表为空");
                 
                 // 如果没有活跃节点，尝试启动紧急恢复
-                println!("🚨 紧急情况: 没有活跃节点，尝试启动紧急恢复流程");
+                log_println!("🚨 紧急情况: 没有活跃节点，尝试启动紧急恢复流程");
                 
                 // 从全局活跃节点集合中获取节点
                 let global_nodes = GLOBAL_ACTIVE_NODES.lock();
@@ -2954,14 +2976,14 @@ async fn cleanup_active_nodes(
                         .collect();
                     
                     nodes_guard.extend(emergency_nodes.iter());
-                    println!("🚨 紧急恢复: 从全局活跃节点集合中添加了 {} 个节点到活动列表", emergency_nodes.len());
+                    log_println!("🚨 紧急恢复: 从全局活跃节点集合中添加了 {} 个节点到活动列表", emergency_nodes.len());
                     
                     // 将这些节点在active_threads中标记为非活跃，以便后续启动
                     {
                         let mut threads_guard = active_threads.lock();
                         for &node_id in &emergency_nodes {
                             threads_guard.insert(node_id, false);
-                            println!("🚨 紧急恢复: 节点-{} 标记为需要启动", node_id);
+                            log_println!("🚨 紧急恢复: 节点-{} 标记为需要启动", node_id);
                         }
                     }
                 }
@@ -2989,16 +3011,16 @@ async fn cleanup_active_nodes(
                     nodes_guard.push(node_id);
                 }
                 
-                println!("✅ 节点清理: 增量更新 - 当前活动节点数量: {}", nodes_guard.len());
+                log_println!("✅ 节点清理: 增量更新 - 当前活动节点数量: {}", nodes_guard.len());
             }
         }
         
         // 再次确保活动节点列表不超过最大并发数
         if nodes_guard.len() > max_concurrent {
-            println!("⚠️ 节点清理: 活动节点列表仍然超出限制 ({} > {}), 强制截断", 
+            log_println!("⚠️ 节点清理: 活动节点列表仍然超出限制 ({} > {}), 强制截断", 
                     nodes_guard.len(), max_concurrent);
             nodes_guard.truncate(max_concurrent);
-            println!("✅ 节点清理: 已强制截断活动节点列表至 {} 个节点", nodes_guard.len());
+            log_println!("✅ 节点清理: 已强制截断活动节点列表至 {} 个节点", nodes_guard.len());
         }
         
         // 获取当前真正活跃的节点
@@ -3012,16 +3034,16 @@ async fn cleanup_active_nodes(
         
         // 如果活动节点列表为空但有活跃节点，这是一个严重问题
         if nodes_guard.is_empty() && !current_active_node_ids.is_empty() {
-            println!("🚨 严重错误: 活动节点列表为空，但有 {} 个活跃节点", current_active_node_ids.len());
+            log_println!("🚨 严重错误: 活动节点列表为空，但有 {} 个活跃节点", current_active_node_ids.len());
             // 紧急添加活跃节点
             nodes_guard.extend(current_active_node_ids.iter().take(max_concurrent).cloned());
-            println!("🚨 紧急修复: 已添加 {} 个活跃节点到活动列表", nodes_guard.len());
+            log_println!("🚨 紧急修复: 已添加 {} 个活跃节点到活动列表", nodes_guard.len());
         }
         
         // 检查全局活跃节点集合是否为空或数量不足，如果是但活动节点列表不为空，则同步
         let global_active_count = get_global_active_node_count();
         if (global_active_count == 0 || global_active_count < max_concurrent / 2) && !nodes_guard.is_empty() {
-            println!("🚨 紧急情况: 全局活跃节点数量不足 ({}), 但活动节点列表有 {} 个节点", 
+            log_println!("🚨 紧急情况: 全局活跃节点数量不足 ({}), 但活动节点列表有 {} 个节点", 
                     global_active_count, nodes_guard.len());
             
             // 紧急同步全局活跃节点集合
@@ -3035,9 +3057,9 @@ async fn cleanup_active_nodes(
                     // 同时确保节点在active_threads中标记为非活跃，以便后续启动
                     let mut threads_guard = active_threads.lock();
                     threads_guard.insert(node_id, false);
-                    println!("🚨 紧急恢复: 节点-{} 添加到全局活跃节点集合并标记为需要启动", node_id);
+                    log_println!("🚨 紧急恢复: 节点-{} 添加到全局活跃节点集合并标记为需要启动", node_id);
                 }
-                println!("🚨 紧急修复: 已添加 {} 个节点到空的全局活跃节点集合", global_nodes.len());
+                log_println!("🚨 紧急修复: 已添加 {} 个节点到空的全局活跃节点集合", global_nodes.len());
             } 
             // 如果全局活跃节点数量不足，则补充
             else if global_nodes.len() < max_concurrent / 2 {
@@ -3055,20 +3077,20 @@ async fn cleanup_active_nodes(
                     // 同时确保节点在active_threads中标记为非活跃，以便后续启动
                     let mut threads_guard = active_threads.lock();
                     threads_guard.insert(node_id, false);
-                    println!("🚨 紧急恢复: 节点-{} 添加到全局活跃节点集合并标记为需要启动", node_id);
+                    log_println!("🚨 紧急恢复: 节点-{} 添加到全局活跃节点集合并标记为需要启动", node_id);
                 }
                 
-                println!("🚨 紧急修复: 已添加 {} 个节点到全局活跃节点集合，现有 {} 个", 
+                log_println!("🚨 紧急修复: 已添加 {} 个节点到全局活跃节点集合，现有 {} 个", 
                         nodes_to_sync.len(), global_nodes.len());
             }
             
             // 打印当前活跃节点状态
-            println!("📊 节点清理后状态: 活动节点列表 {} 个, 全局活跃节点集合 {} 个", 
+            log_println!("📊 节点清理后状态: 活动节点列表 {} 个, 全局活跃节点集合 {} 个", 
                     nodes_guard.len(), global_nodes.len());
             
             // 打印所有活跃节点ID，便于调试
-            println!("📋 活动节点列表: {:?}", *nodes_guard);
-            println!("📋 全局活跃节点: {:?}", global_nodes.iter().collect::<Vec<&u64>>());
+            log_println!("📋 活动节点列表: {:?}", *nodes_guard);
+            log_println!("📋 全局活跃节点: {:?}", global_nodes.iter().collect::<Vec<&u64>>());
         }
     }
 }
@@ -3130,7 +3152,7 @@ mod tests {
         for _i in 0..task_queue_size {
             match tokio::time::timeout(Duration::from_secs(2), task_receiver.recv()).await {
                 Ok(Some(task)) => {
-                    println!("Received task {}: {:?}", received, task);
+                    log_println!("Received task {}: {:?}", received, task);
                     received += 1;
                 }
                 Ok(None) => {

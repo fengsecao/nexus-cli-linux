@@ -613,6 +613,9 @@ async fn start_batch_processing(
     // 设置日志输出详细程度
     crate::prover_runtime::set_verbose_output(verbose);
     
+    // 禁止所有日志输出，只显示我们的简洁界面
+    crate::prover_runtime::set_disable_all_logs(true);
+    
     // 设置429超时参数
     if let Some(timeout_value) = timeout {
         // 设置全局429超时参数
