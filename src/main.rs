@@ -47,6 +47,8 @@ use log::warn;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use std::collections::HashSet;
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 // 导入全局活跃节点计数函数
 use crate::prover_runtime::get_global_active_node_count;
@@ -139,6 +141,10 @@ enum Command {
         /// Enable node rotation (switch to next node after success or consecutive 429 error)
         #[arg(long, action = ArgAction::SetTrue)]
         rotation: bool,
+
+        /// Display refresh interval in seconds (0 for immediate updates)
+        #[arg(long, default_value = "3")]
+        refresh_interval: u64,
     },
 }
 
@@ -152,60 +158,57 @@ struct FixedLineDisplay {
     failure_count: Arc<AtomicU64>,
     // 记录启动时间
     start_time: std::time::Instant,
+    // 刷新控制
+    refresh_interval: Duration,
+    last_refresh: Arc<Mutex<std::time::Instant>>,
 }
 
 impl FixedLineDisplay {
-    fn new() -> Self {
+    fn new(refresh_interval_secs: u64) -> Self {
         Self {
             node_lines: Arc::new(RwLock::new(HashMap::new())),
             defragmenter: crate::prover::get_defragmenter(),
             success_count: Arc::new(AtomicU64::new(0)),
             failure_count: Arc::new(AtomicU64::new(0)),
             start_time: std::time::Instant::now(),
+            refresh_interval: Duration::from_secs(refresh_interval_secs),
+            // 设置为过去的时间，确保首次更新时会立即刷新
+            last_refresh: Arc::new(Mutex::new(std::time::Instant::now() - Duration::from_secs(60))),
         }
     }
 
     async fn update_node_status(&self, node_id: u64, status: String) {
-        // 移除此处的成功/失败计数逻辑，避免重复计数
-        // 计数由事件监听器统一处理
+        // 更新节点状态
+        {
+            let mut lines = self.node_lines.write().await;
+            lines.insert(node_id, status);
+        }
         
-        let needs_update = {
-            let lines = self.node_lines.read().await;
-            // 对于429错误，始终更新显示
-            if status.contains("速率限制") || status.contains("429") {
+        // 检查是否应该刷新显示
+        let should_refresh = {
+            // 如果刷新间隔为0，则始终刷新
+            if self.refresh_interval.as_secs() == 0 {
                 true
             } else {
-            lines.get(&node_id) != Some(&status)
+                let mut last_refresh = self.last_refresh.lock();
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(*last_refresh);
+                
+                if elapsed >= self.refresh_interval {
+                    *last_refresh = now;
+                    true
+                } else {
+                    false
+                }
             }
         };
         
-        if needs_update {
-            {
-                let mut lines = self.node_lines.write().await;
-                lines.insert(node_id, status);
-            }
+        if should_refresh {
             self.render_display().await;
         }
     }
 
     async fn render_display(&self) {
-        // 检查内存碎片整理
-        if self.defragmenter.should_defragment().await {
-            println!("🧹 执行内存碎片整理...");
-            let result = self.defragmenter.defragment().await;
-            
-            if result.was_critical {
-                println!("🚨 关键内存清理完成:");
-            } else {
-                println!("🔧 常规内存清理完成:");
-            }
-            println!("   内存: {:.1}% → {:.1}% (释放 {:.1}%)", 
-                     result.memory_before * 100.0, 
-                     result.memory_after * 100.0,
-                     result.memory_freed_percentage());
-            println!("   释放空间: {} KB", result.bytes_freed / 1024);
-        }
-
         // 渲染当前状态
         print!("\x1b[2J\x1b[H"); // 清屏并移动到顶部
         
@@ -265,11 +268,12 @@ impl FixedLineDisplay {
                 .collect();
             sorted_lines.sort_unstable_by_key(|(id, _)| *id);
             
-            for (node_id, status) in &sorted_lines {
+            // 只显示最近有更新的10个节点
+            for (node_id, status) in sorted_lines.iter().take(10) {
                 println!("节点-{}: {}", node_id, status);
             }
             
-            // 然后显示没有状态信息的活跃节点
+            // 然后显示没有状态信息的活跃节点，但最多只显示10-已显示节点数量个
             let nodes_with_status: HashSet<u64> = sorted_lines.iter().map(|(id, _)| **id).collect();
             let mut missing_nodes: Vec<u64> = active_node_ids.iter()
                 .filter(|id| !nodes_with_status.contains(id))
@@ -277,12 +281,22 @@ impl FixedLineDisplay {
                 .collect();
             missing_nodes.sort_unstable();
             
-            for node_id in missing_nodes {
+            let displayed_count = sorted_lines.len().min(10);
+            let remaining_slots = 10 - displayed_count;
+            
+            for node_id in missing_nodes.iter().take(remaining_slots) {
                 println!("节点-{}: 已添加到活跃列表，等待状态更新...", node_id);
+            }
+            
+            // 如果有更多节点，显示一个摘要
+            let total_active = active_node_ids.len();
+            if total_active > 10 {
+                println!("... 以及 {} 个其他节点 (总共 {} 个活跃节点)", total_active - 10, total_active);
             }
         }
         
         println!("───────────────────────────────────────────");
+        println!("刷新间隔: {}秒 | 按Ctrl+C退出", self.refresh_interval.as_secs());
         
         // 归还缓存字符串
         self.defragmenter.return_string(time_str).await;
@@ -353,6 +367,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             proxy_file,
             timeout,
             rotation,
+            refresh_interval,
         } => {
             if verbose {
                 // 设置详细日志级别
@@ -402,6 +417,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 proxy_file,
                 timeout,
                 rotation,
+                refresh_interval,
             )
             .await
         }
@@ -591,6 +607,7 @@ async fn start_batch_processing(
     proxy_file: Option<String>,
     timeout: Option<u64>,
     rotation: bool,
+    refresh_interval: u64,
 ) -> Result<(), Box<dyn Error>> {
     // 设置日志输出详细程度
     crate::prover_runtime::set_verbose_output(verbose);
@@ -629,6 +646,7 @@ async fn start_batch_processing(
     println!("🧵 每节点工作线程: {}", workers_per_node);
     println!("🧠 内存优化: 已启用");
     println!("📝 详细日志: {}", if verbose { "已启用" } else { "已禁用" });
+    println!("🔄 显示刷新间隔: {}秒", refresh_interval);
     if rotation {
         println!("🔄 节点轮转: 已启用 (成功提交或连续1次429错误后立即轮转)");
     } else {
@@ -637,7 +655,7 @@ async fn start_batch_processing(
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
-    let display = Arc::new(FixedLineDisplay::new());
+    let display = Arc::new(FixedLineDisplay::new(refresh_interval));
     display.render_display().await;
     
     // 创建批处理工作器
