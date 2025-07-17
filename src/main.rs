@@ -47,6 +47,8 @@ use log::warn;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use std::collections::HashSet;
+use std::time::Duration;
+use crate::prover_runtime::Event;
 
 // 导入全局活跃节点计数函数
 use crate::prover_runtime::get_global_active_node_count;
@@ -139,6 +141,10 @@ enum Command {
         /// Enable node rotation (switch to next node after success or consecutive 429 error)
         #[arg(long, action = ArgAction::SetTrue)]
         rotation: bool,
+        
+        /// 启用详细日志输出（默认为静默模式，只显示关键信息）
+        #[arg(long, short, action = ArgAction::SetTrue)]
+        verbose_log: bool,
     },
 }
 
@@ -353,8 +359,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             proxy_file,
             timeout,
             rotation,
+            verbose_log,
         } => {
-            if verbose {
+            if verbose_log {
                 // 设置详细日志级别
                 unsafe {
                 std::env::set_var("RUST_LOG", "debug");
@@ -401,6 +408,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 proxy_file,
                 timeout,
                 rotation,
+                verbose_log,
             )
             .await
         }
@@ -589,114 +597,118 @@ async fn start_batch_processing(
     proxy_file: Option<String>,
     timeout: Option<u64>,
     rotation: bool,
+    verbose_log: bool,
 ) -> Result<(), Box<dyn Error>> {
     // 设置429超时参数
     if let Some(timeout_value) = timeout {
         // 设置全局429超时参数
         crate::consts::set_retry_timeout(timeout_value);
     }
+
+    // 读取节点列表文件
+    let file_content = std::fs::read_to_string(file_path)?;
+    let lines: Vec<&str> = file_content.lines().collect();
     
-    // 加载节点列表
-    let node_ids = node_list::load_node_list(file_path)?;
-    if node_ids.is_empty() {
+    // 解析节点ID
+    let mut nodes = Vec::new();
+    for line in lines {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        
+        match line.parse::<u64>() {
+            Ok(node_id) => nodes.push(node_id),
+            Err(_) => {
+                eprintln!("无法解析节点ID: {}", line);
+                // 跳过无效的节点ID
+            }
+        }
+    }
+    
+    if nodes.is_empty() {
         return Err("节点列表为空".into());
     }
     
-    println!("📋 已加载 {} 个节点", node_ids.len());
+    println!("📋 加载了 {} 个节点", nodes.len());
     
-    // 创建增强型协调器客户端，传入代理文件
-    let orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(environment.clone(), proxy_file.as_deref());
+    // 创建协调器客户端
+    let orchestrator = OrchestratorClient::new(environment.clone());
     
-    // 计算实际并发数
-    let actual_concurrent = max_concurrent.min(node_ids.len());
-    
-    println!("🚀 Nexus 增强型批处理模式");
-    println!("📁 节点文件: {}", file_path);
-    println!("📊 节点总数: {}", node_ids.len());
-    println!("🔄 最大并发: {}", actual_concurrent);
-    println!("⏱️  启动延迟: {:.1}s, 证明间隔: {}s", start_delay, proof_interval);
-    if let Some(timeout_val) = timeout {
-        println!("⏰ 429错误超时: {}s (±10%)", timeout_val);
-    } else {
-        println!("⏰ 429错误超时: 默认值");
-    }
-    println!("🌍 环境: {:?}", environment);
-    println!("🧵 每节点工作线程: {}", workers_per_node);
-    println!("🧠 内存优化: 已启用");
-    if rotation {
-        println!("🔄 节点轮转: 已启用 (成功提交或连续1次429错误后立即轮转)");
-    } else {
-        println!("🔄 节点轮转: 已禁用 (添加 --rotation 参数可启用此功能)");
-    }
-    println!("───────────────────────────────────────");
-    
-    // 创建固定行显示管理器
-    let display = Arc::new(FixedLineDisplay::new());
-    display.render_display().await;
-    
-    // 创建批处理工作器
+    // 创建关闭信号通道
     let (shutdown_sender, _) = broadcast::channel(1);
     
-    // 使用所有节点，而不仅仅是前actual_concurrent个
-    // let current_batch: Vec<_> = node_ids.into_iter().take(actual_concurrent).collect();
-    let all_nodes = node_ids; // 使用所有加载的节点
-    
     // 创建状态回调
+    let display = Arc::new(FixedLineDisplay::new());
     let display_clone = display.clone();
-    let status_callback: Box<dyn Fn(u64, String) + Send + Sync> = Box::new(move |node_id: u64, status: String| {
+    
+    let status_callback: Box<dyn Fn(u64, String) + Send + Sync + 'static> = Box::new(move |node_id, status| {
         let display = display_clone.clone();
+        let node_id = node_id;
+        let status = status;
+        
         tokio::spawn(async move {
             display.update_node_status(node_id, status).await;
         });
     });
     
-    // 启动优化的批处理工作器
-    let (mut event_receiver, join_handles) = crate::prover_runtime::start_optimized_batch_workers(
-        all_nodes, // 传递所有节点，而不是current_batch
-        orchestrator.client.clone(),
+    // 创建渲染任务
+    let render_display = display.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        loop {
+            interval.tick().await;
+            render_display.render_display().await;
+        }
+    });
+    
+    // 启动批处理工作线程
+    let (event_receiver, _join_handles) = crate::prover_runtime::start_optimized_batch_workers(
+        nodes,
+        orchestrator,
         workers_per_node,
         start_delay,
         proof_interval,
-        environment.clone(),
+        environment,
         shutdown_sender.subscribe(),
         Some(status_callback),
         proxy_file,
         rotation,
         max_concurrent, // 添加max_concurrent参数
+        verbose_log,
     ).await;
     
-    // 创建消费事件的任务
-    let display_clone = display.clone();
+    // 设置Ctrl+C处理
+    let shutdown_sender_clone = shutdown_sender.clone();
     tokio::spawn(async move {
-        while let Some(event) = event_receiver.recv().await {
-            // 更新成功/失败计数
-            if event.event_type == crate::events::EventType::ProofSubmitted {
-                let _ = display_clone.success_count.fetch_add(1, Ordering::Relaxed);
-            } else if event.event_type == crate::events::EventType::Error &&
-                      (event.msg.contains("Error submitting proof") || 
-                       event.msg.contains("Failed to submit proof")) {
-                let _ = display_clone.failure_count.fetch_add(1, Ordering::Relaxed);
-            }
-            
-            // 只在调试模式下输出事件信息
-            #[cfg(debug_assertions)]
-            println!("📣 收到事件: 类型={:?}, 消息={}", event.event_type, event.msg);
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = shutdown_sender_clone.send(());
         }
     });
     
-    // 等待 Ctrl+C 信号
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            println!("\n接收到 Ctrl+C，正在停止所有节点...");
-            let _ = shutdown_sender.send(());
+    // 处理事件
+    let mut shutdown_receiver = shutdown_sender.subscribe();
+    loop {
+        tokio::select! {
+            Some(event) = event_receiver.recv() => {
+                match &event {
+                    Event::Success(node_id, msg) => {
+                        // 更新成功计数
+                        display.success_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Event::Error(node_id, msg) => {
+                        // 更新失败计数
+                        display.failure_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
+            _ = shutdown_receiver.recv() => {
+                println!("\n正在关闭...");
+                break;
+            }
         }
     }
     
-    // 等待所有工作器退出
-    for handle in join_handles {
-        let _ = handle.await;
-    }
-    
-    println!("所有节点已停止");
     Ok(())
 }
