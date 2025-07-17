@@ -838,6 +838,7 @@ pub async fn start_optimized_batch_workers(
 enum NodeManagerCommand {
     NodeStarted(u64),
     NodeStopped(u64),
+    PriorityStartNode(u64),
 }
 
 // 节点管理器函数
@@ -1053,12 +1054,46 @@ async fn node_manager(
             
             // 处理原始节点命令通道
             Some(cmd) = node_rx.recv() => {
-                handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, &active_nodes, &active_threads, &environment, &proxy_file, num_workers_per_node, proof_interval, &status_callback_arc, &event_sender, &shutdown, &node_cmd_tx, &rotation_data, max_concurrent).await;
+                match &cmd {
+                    NodeManagerCommand::PriorityStartNode(node_id) => {
+                        println!("🚀 节点管理器: 收到优先启动节点-{} 的命令", node_id);
+                        
+                        // 直接调用处理函数
+                        handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, 
+                                          &active_nodes, &active_threads, &environment, &proxy_file, 
+                                          num_workers_per_node, proof_interval, &status_callback_arc, 
+                                          &event_sender, &shutdown, &node_cmd_tx, &rotation_data, max_concurrent).await;
+                    },
+                    _ => {
+                        // 对于其他命令，使用原有的处理方式
+                        handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, 
+                                          &active_nodes, &active_threads, &environment, &proxy_file, 
+                                          num_workers_per_node, proof_interval, &status_callback_arc, 
+                                          &event_sender, &shutdown, &node_cmd_tx, &rotation_data, max_concurrent).await;
+                    }
+                }
             }
             
             // 处理新创建的节点命令通道
             Some(cmd) = node_cmd_rx.recv() => {
-                handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, &active_nodes, &active_threads, &environment, &proxy_file, num_workers_per_node, proof_interval, &status_callback_arc, &event_sender, &shutdown, &node_cmd_tx, &rotation_data, max_concurrent).await;
+                match &cmd {
+                    NodeManagerCommand::PriorityStartNode(node_id) => {
+                        println!("🚀 节点管理器: 收到优先启动节点-{} 的命令 (内部通道)", node_id);
+                        
+                        // 直接调用处理函数
+                        handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, 
+                                          &active_nodes, &active_threads, &environment, &proxy_file, 
+                                          num_workers_per_node, proof_interval, &status_callback_arc, 
+                                          &event_sender, &shutdown, &node_cmd_tx, &rotation_data, max_concurrent).await;
+                    },
+                    _ => {
+                        // 对于其他命令，使用原有的处理方式
+                        handle_node_command(cmd, &mut processed_stop_messages, &mut starting_nodes, 
+                                          &active_nodes, &active_threads, &environment, &proxy_file, 
+                                          num_workers_per_node, proof_interval, &status_callback_arc, 
+                                          &event_sender, &shutdown, &node_cmd_tx, &rotation_data, max_concurrent).await;
+                    }
+                }
             }
             
             // 定期检查是否有节点需要启动 - 更短的检查间隔
@@ -1429,6 +1464,94 @@ async fn handle_node_command(
                 }
             }
         }
+        NodeManagerCommand::PriorityStartNode(node_id) => {
+            println!("🚀 节点管理器: 收到优先启动节点-{} 的命令", node_id);
+            
+            // 如果节点已经在启动中，不重复启动
+            if starting_nodes.contains(&node_id) {
+                println!("⚠️ 节点管理器: 节点-{} 已在启动中，跳过", node_id);
+                return;
+            }
+            
+            // 如果节点已经活跃，不重复启动
+            let is_active = {
+                let threads_guard = active_threads.lock();
+                threads_guard.get(&node_id).copied().unwrap_or(false)
+            };
+            
+            if is_active {
+                println!("⚠️ 节点管理器: 节点-{} 已经活跃，跳过启动", node_id);
+                return;
+            }
+            
+            // 标记为正在启动
+            starting_nodes.insert(node_id);
+            
+            // 确保节点在active_threads中标记为活跃
+            {
+                let mut threads_guard = active_threads.lock();
+                threads_guard.insert(node_id, true);
+                println!("📌 节点-{}: 已在active_threads中标记为活跃", node_id);
+            }
+            
+            // 确保节点在全局活跃节点集合中
+            add_global_active_node(node_id);
+            println!("🌍 节点-{}: 已添加到全局活跃节点集合", node_id);
+            
+            // 确保节点在活动节点列表中
+            {
+                let mut active_nodes_guard = active_nodes.lock();
+                if !active_nodes_guard.contains(&node_id) && active_nodes_guard.len() < max_concurrent {
+                    active_nodes_guard.push(node_id);
+                    println!("📋 节点-{}: 已添加到活动节点列表", node_id);
+                }
+            }
+            
+            // 检查内存压力，如果需要则等待更长时间
+            let defragmenter = get_defragmenter();
+            if check_memory_pressure() {
+                debug!("节点 {} 启动前检测到内存压力，执行清理...", node_id);
+                perform_memory_cleanup();
+                
+                // 在节点启动前进行内存碎片整理
+                if defragmenter.should_defragment().await {
+                    let result = defragmenter.defragment().await;
+                    debug!("节点 {} 启动前内存碎片整理: {:.1}% → {:.1}%", 
+                          node_id, result.memory_before * 100.0, result.memory_after * 100.0);
+                }
+                
+                // 额外等待让内存清理生效
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            
+            println!("🚀 节点管理器: 正在启动优先节点-{}", node_id);
+            
+            let handle = start_node_worker(
+                node_id,
+                environment.clone(),
+                proxy_file.clone(),
+                num_workers_per_node,
+                proof_interval,
+                status_callback_arc.clone(),
+                event_sender.clone(),
+                shutdown.resubscribe(),
+                rotation_data.clone(),
+                active_threads.clone(),
+                node_cmd_tx.clone(),
+            ).await;
+            
+            // 不需要存储句柄，因为它们会在完成时自动清理
+            tokio::spawn(async move {
+                let _ = handle.await;
+            });
+            
+            // 等待短暂时间，确保节点有时间启动
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            
+            // 从启动中列表移除
+            starting_nodes.remove(&node_id);
+            println!("✅ 节点管理器: 已启动优先节点-{}", node_id);
+        }
     }
 }
 
@@ -1527,7 +1650,7 @@ async fn rotate_to_next_node(
     rotation_data: &Option<(Arc<Mutex<Vec<u64>>>, Arc<AtomicU64>, Arc<Vec<u64>>, Arc<std::sync::atomic::AtomicBool>, Arc<Mutex<HashMap<u64, usize>>>, usize)>,
     reason: &str,
     node_tx: &mpsc::Sender<NodeManagerCommand>,
-    active_threads: &Arc<Mutex<HashMap<u64, bool>>>, // 添加active_threads参数
+    active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
 ) -> (bool, Option<String>) {
     if VERBOSE_OUTPUT {
         println!("\n📣 节点-{}: 尝试轮转 (原因: {})", node_id, reason);
@@ -1645,6 +1768,10 @@ async fn rotate_to_next_node(
                         println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
                                 node_id, node_id, final_next_node_id);
                     }
+                    
+                    // 发送特殊的启动命令给节点管理器，确保立即启动新节点
+                    let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
+                    println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
                 } else {
                     // 当前节点不在列表中
                     println!("\n⚠️ 节点-{}: 未在活动列表中找到", node_id);
@@ -1657,6 +1784,21 @@ async fn rotate_to_next_node(
                         // 将新节点添加到全局活跃节点集合
                         add_global_active_node(final_next_node_id);
                         println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
+                        
+                        // 同时更新active_threads映射
+                        {
+                            let mut threads_guard = active_threads.lock();
+                            // 将当前节点标记为非活跃
+                            threads_guard.insert(node_id, false);
+                            // 将新节点标记为活跃
+                            threads_guard.insert(final_next_node_id, true);
+                            println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
+                                    node_id, node_id, final_next_node_id);
+                        }
+                        
+                        // 发送特殊的启动命令给节点管理器，确保立即启动新节点
+                        let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
+                        println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
                     } else {
                         // 列表已满，尝试替换一个节点
                         println!("⚠️ 节点-{}: 活动节点数量已达到最大并发数 {}, 尝试替换一个节点", node_id, *max_concurrent);
@@ -1674,19 +1816,21 @@ async fn rotate_to_next_node(
                             add_global_active_node(final_next_node_id);
                             println!("🌍 节点-{}: 新节点-{} 已添加到全局活跃节点集合", node_id, final_next_node_id);
                             
-                            // 创建一个任务来启动新节点
-                            println!("🚀 节点-{}: 正在触发新节点-{} 的启动", node_id, final_next_node_id);
-
                             // 同时更新active_threads映射
                             {
                                 let mut threads_guard = active_threads.lock();
-                                // 将当前节点标记为非活跃
+                                // 将当前节点和被替换的节点标记为非活跃
                                 threads_guard.insert(node_id, false);
+                                threads_guard.insert(replaced_node, false);
                                 // 将新节点标记为活跃
                                 threads_guard.insert(final_next_node_id, true);
-                                println!("📊 节点-{}: 已在active_threads中将节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
-                                        node_id, node_id, final_next_node_id);
+                                println!("📊 节点-{}: 已在active_threads中将节点-{} 和节点-{} 标记为非活跃，将节点-{} 标记为活跃", 
+                                        node_id, node_id, replaced_node, final_next_node_id);
                             }
+                            
+                            // 发送特殊的启动命令给节点管理器，确保立即启动新节点
+                            let _ = node_tx.send(NodeManagerCommand::PriorityStartNode(final_next_node_id)).await;
+                            println!("🚀 节点-{}: 已发送优先启动命令给节点管理器，启动节点-{}", node_id, final_next_node_id);
                         } else {
                             println!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id);
                             return (false, Some(format!("❌ 节点-{}: 活动节点列表为空，无法替换", node_id)));
