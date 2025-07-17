@@ -48,7 +48,8 @@ use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 use std::collections::HashSet;
 use std::time::Duration;
-use tokio::sync::Mutex;
+// 移除tokio::sync::Mutex的导入，因为我们使用std::sync::Mutex
+// use tokio::sync::Mutex;
 
 // 导入全局活跃节点计数函数
 use crate::prover_runtime::get_global_active_node_count;
@@ -160,7 +161,7 @@ struct FixedLineDisplay {
     start_time: std::time::Instant,
     // 刷新控制
     refresh_interval: Duration,
-    last_refresh: Arc<Mutex<std::time::Instant>>,
+    last_refresh: Arc<std::sync::Mutex<std::time::Instant>>,
 }
 
 impl FixedLineDisplay {
@@ -173,7 +174,7 @@ impl FixedLineDisplay {
             start_time: std::time::Instant::now(),
             refresh_interval: Duration::from_secs(refresh_interval_secs),
             // 设置为过去的时间，确保首次更新时会立即刷新
-            last_refresh: Arc::new(Mutex::new(std::time::Instant::now() - Duration::from_secs(60))),
+            last_refresh: Arc::new(std::sync::Mutex::new(std::time::Instant::now() - Duration::from_secs(60))),
         }
     }
 
@@ -190,7 +191,7 @@ impl FixedLineDisplay {
             if self.refresh_interval.as_secs() == 0 {
                 true
             } else {
-                let mut last_refresh = self.last_refresh.lock();
+                let mut last_refresh = self.last_refresh.lock().unwrap();
                 let now = std::time::Instant::now();
                 let elapsed = now.duration_since(*last_refresh);
                 
