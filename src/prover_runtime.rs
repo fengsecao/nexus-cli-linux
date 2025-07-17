@@ -1234,7 +1234,7 @@ async fn node_manager(
                                 shutdown.resubscribe(),
                                 rotation_data.clone(),
                                 active_threads.clone(),
-                                node_tx_for_nodes.clone(), // 使用克隆的通信通道
+                                node_cmd_tx.clone(), // 使用克隆的通信通道
                             ).await;
                             
                             // 不需要存储句柄，因为它们会在完成时自动清理
