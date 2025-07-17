@@ -1296,7 +1296,7 @@ async fn node_manager(
                                 shutdown.resubscribe(),
                                 rotation_data.clone(),
                                 active_threads.clone(),
-                                node_tx_for_nodes.clone(),
+                                node_cmd_tx.clone(),
                             ).await;
                             
                             // 不需要存储句柄，因为它们会在完成时自动清理
@@ -1341,7 +1341,7 @@ async fn node_manager(
                             shutdown.resubscribe(),
                             rotation_data.clone(),
                             active_threads.clone(),
-                            node_tx_for_nodes.clone(),
+                            node_cmd_tx.clone(),
                         ).await;
                         
                         // 不需要存储句柄，因为它们会在完成时自动清理
@@ -1450,7 +1450,7 @@ async fn handle_node_command(
                         shutdown.resubscribe(),
                         rotation_data.clone(),
                         active_threads.clone(),
-                        node_tx_for_nodes.clone(),
+                        node_cmd_tx.clone(),
                     ).await;
                     
                     // 不需要存储句柄，因为它们会在完成时自动清理
@@ -1537,7 +1537,7 @@ async fn handle_node_command(
                 shutdown.resubscribe(),
                 rotation_data.clone(),
                 active_threads.clone(),
-                node_tx_for_nodes.clone(),
+                node_cmd_tx.clone(),
             ).await;
             
             // 不需要存储句柄，因为它们会在完成时自动清理
