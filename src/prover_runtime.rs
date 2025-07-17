@@ -2741,7 +2741,7 @@ async fn cleanup_active_nodes(
                 .collect::<Vec<u64>>();
             
             if !nodes_to_add.is_empty() {
-                nodes_guard.extend(nodes_to_add);
+                nodes_guard.extend(nodes_to_add.clone());
                 println!("✅ 节点清理: 已添加{}个活跃节点到活动列表 (完全重建)", nodes_guard.len());
                 
                 // 确保这些节点真正启动 - 添加一个标记，表示这些节点需要启动
@@ -2859,14 +2859,14 @@ async fn cleanup_active_nodes(
             // 如果全局活跃节点数量不足，则补充
             else if global_nodes.len() < max_concurrent / 2 {
                 // 找出不在全局集合中的节点
-                let nodes_to_add: Vec<u64> = nodes_guard.iter()
+                let nodes_to_sync: Vec<u64> = nodes_guard.iter()
                     .filter(|&&node_id| !global_nodes.contains(&node_id))
                     .take(max_concurrent - global_nodes.len())
                     .copied()
                     .collect();
                 
                 // 添加这些节点
-                for &node_id in &nodes_to_add {
+                for &node_id in &nodes_to_sync {
                     global_nodes.insert(node_id);
                     
                     // 同时确保节点在active_threads中标记为非活跃，以便后续启动
@@ -2876,7 +2876,7 @@ async fn cleanup_active_nodes(
                 }
                 
                 println!("🚨 紧急修复: 已添加 {} 个节点到全局活跃节点集合，现有 {} 个", 
-                        nodes_to_add.len(), global_nodes.len());
+                        nodes_to_sync.len(), global_nodes.len());
             }
             
             // 打印当前活跃节点状态
