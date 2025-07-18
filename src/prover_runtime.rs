@@ -702,7 +702,7 @@ pub async fn start_optimized_batch_workers(
                                 consecutive_successes += 1;
                                 
                                 // 每次检查都增加10%的速率
-                                current_rate = f64::min(current_rate * 1.1, 5.0); // 最高每秒5个请求
+                                current_rate = f64::min(current_rate * 1.1, 20.0); // 最高每秒20个请求
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
                                     log_println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
