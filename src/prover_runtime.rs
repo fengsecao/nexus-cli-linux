@@ -2468,13 +2468,36 @@ async fn run_memory_optimized_node(
                                         
                                         update_status(format!("[{}] ❌ 缓存证明提交失败: {}", timestamp, error_str));
                                         
-                                        // 检查是否为404错误（任务未找到），如果是则不再重试
+                                                                                // 检查是否为404错误（任务未找到），如果是则触发节点轮转
                                         if error_str.contains("404") || error_str.contains("NotFoundError") || error_str.contains("Task not found") {
-                                            update_status(format!("[{}] 🔍 任务已不存在 (404)，停止重试并获取新任务", timestamp));
+                                            update_status(format!("[{}] 🔍 任务已不存在 (404)，触发节点轮转", timestamp));
                                             retry_count = MAX_429_RETRIES; // 设置为最大值以跳出循环
+                                            
+                                            // 如果启用了轮转功能，404错误时轮转到下一个节点
+                                            if rotation_data.is_some() {
+                                                log_println!("🔄 节点-{}: 404错误，触发轮转", node_id);
+                                                let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "404错误-任务不存在", &node_tx, &active_threads).await;
+                                                if should_rotate {
+                                                    if let Some(msg) = status_msg {
+                                                        update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
+                                                    }
+                                                    // 发送一个显式的停止消息，确保节点真正停止
+                                                    let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                                    log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                                    
+                                                    // 设置停止标志
+                                                    should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                    
+                                                    // 强制退出当前节点的处理循环
+                                                    return;
+                                                } else {
+                                                    log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                }
+                                            }
+                                            
                                             break; // 立即退出重试循环
                                         }
-                                        
+
                                         // 如果不是429错误，我们不需要那么多重试
                                         if retry_count >= 2 {
                                             update_status(format!("[{}] 放弃缓存证明，尝试重新生成...", timestamp));
@@ -2683,10 +2706,33 @@ async fn run_memory_optimized_node(
                                         update_status(format!("[{}] ❌ 证明提交失败: {} (重试 {}/{})", 
                                             timestamp, error_str, retry_count + 1, MAX_SUBMISSION_RETRIES));
                                         
-                                        // 检查是否为404错误（任务未找到），如果是则不再重试
+                                        // 检查是否为404错误（任务未找到），如果是则触发节点轮转
                                         if error_str.contains("404") || error_str.contains("NotFoundError") || error_str.contains("Task not found") {
-                                            update_status(format!("[{}] 🔍 任务已不存在 (404)，停止重试并获取新任务", timestamp));
+                                            update_status(format!("[{}] 🔍 任务已不存在 (404)，触发节点轮转", timestamp));
                                             retry_count = MAX_429_RETRIES; // 设置为最大值以跳出循环
+                                            
+                                            // 如果启用了轮转功能，404错误时轮转到下一个节点
+                                            if rotation_data.is_some() {
+                                                log_println!("🔄 节点-{}: 404错误，触发轮转", node_id);
+                                                let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "404错误-任务不存在", &node_tx, &active_threads).await;
+                                                if should_rotate {
+                                                    if let Some(msg) = status_msg {
+                                                        update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
+                                                    }
+                                                    // 发送一个显式的停止消息，确保节点真正停止
+                                                    let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                                    log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                                    
+                                                    // 设置停止标志
+                                                    should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                    
+                                                    // 强制退出当前节点的处理循环
+                                                    return;
+                                                } else {
+                                                    log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                }
+                                            }
+                                            
                                             break; // 立即退出重试循环
                                         }
                                         
@@ -2774,15 +2820,38 @@ async fn run_memory_optimized_node(
                         
                         tokio::time::sleep(Duration::from_secs(wait_time)).await;
                     } else if error_str.contains("404") || error_str.contains("NOT_FOUND") {
-                        // 404错误 - 无可用任务
+                        // 404错误 - 无可用任务，直接触发节点轮转
                         consecutive_429s = 0; // 重置连续429计数
                         task_fetch_failures += 1; // 增加任务获取失败计数
                         
                         // 重置429计数
                         rate_limit_tracker.reset_429_count(node_id).await;
                         
-                        update_status(format!("[{}] 🔍 无可用任务 (404) (尝试 {}/{})", 
-                            timestamp, attempt, MAX_TASK_RETRIES));
+                        update_status(format!("[{}] 🔍 无可用任务 (404)，触发节点轮转", timestamp));
+                        
+                        // 如果启用了轮转功能，404错误时立即轮转到下一个节点
+                        if rotation_data.is_some() {
+                            log_println!("🔄 节点-{}: 404错误，触发轮转", node_id);
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "404错误-无可用任务", &node_tx, &active_threads).await;
+                            if should_rotate {
+                                if let Some(msg) = status_msg {
+                                    update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
+                                }
+                                // 发送一个显式的停止消息，确保节点真正停止
+                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                
+                                // 设置停止标志
+                                should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                
+                                // 强制退出当前节点的处理循环
+                                return;
+                            } else {
+                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                            }
+                        }
+                        
+                        // 如果轮转失败或未启用轮转，等待后继续
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     } else {
                         // 其他错误
