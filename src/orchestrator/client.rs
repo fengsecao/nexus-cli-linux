@@ -909,7 +909,7 @@ impl Orchestrator for OrchestratorClient {
 
     async fn get_tasks(&self, node_id: &str) -> Result<Vec<Task>, OrchestratorError> {
         // 使用带节点ID的请求方法
-        let response: GetTasksResponse = self.get_request_with_retry((&format!("v3/tasks/{}", node_id), vec![], node_id).await?;
+        let response: GetTasksResponse = self.get_request_with_retry(&format!("v3/tasks/{}", node_id), vec![], node_id).await?;
         let tasks = response.tasks.iter().map(Task::from).collect();
         Ok(tasks)
     }
