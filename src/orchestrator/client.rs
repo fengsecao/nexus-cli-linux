@@ -908,14 +908,8 @@ impl Orchestrator for OrchestratorClient {
     }
 
     async fn get_tasks(&self, node_id: &str) -> Result<Vec<Task>, OrchestratorError> {
-        let request = GetTasksRequest {
-            node_id: node_id.to_string(),
-            next_cursor: "".to_string(),
-        };
-        let request_bytes = Self::encode_request(&request);
-
         // 使用带节点ID的请求方法
-        let response: GetTasksResponse = self.get_request_with_retry("v3/tasks", request_bytes, node_id).await?;
+        let response: GetTasksResponse = self.get_request_with_retry((&format!("v3/tasks/{}", node_id), vec![], node_id).await?;
         let tasks = response.tasks.iter().map(Task::from).collect();
         Ok(tasks)
     }
