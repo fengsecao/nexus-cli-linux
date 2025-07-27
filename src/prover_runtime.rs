@@ -510,7 +510,8 @@ pub async fn start_optimized_batch_workers(
     let _ = crate::prover::get_or_create_initial_prover().await;
     
     // 增加初始延迟，避免一次性启动太多节点导致429错误
-    let initial_delay = 3.0; // 3秒初始延迟
+    let 
+     = 1.0; // 1秒初始延迟
     log_println!("等待初始延迟 {:.1}秒...", initial_delay);
     tokio::time::sleep(std::time::Duration::from_secs_f64(initial_delay)).await;
     
@@ -729,8 +730,10 @@ pub async fn start_optimized_batch_workers(
                                 _consecutive_429s += 1;
                                 consecutive_successes = 0;
                                 
-                                // 根据429错误数量按比例减少速率，每个错误1%，最多10%
-                                let decrease_percent = f64::min(recent_429s as f64 / 100.0, 0.1); // 最多减少10%
+                                                                        // 根据429错误数量按比例减少速率
+                                // 3个429错误降低1%，4个降低2%，依此类推，最多10%
+                                let errors_above_threshold = if recent_429s >= 3 { recent_429s - 2 } else { 0 };
+                                let decrease_percent = f64::min(errors_above_threshold as f64 * 0.01, 0.1); // 最多减少10%
                                 let min_rate = {
                                     let lock = MIN_RATE.lock();
                                     lock.unwrap_or(1.0) // 默认最低每1秒1个请求
@@ -2433,38 +2436,50 @@ async fn run_memory_optimized_node(
                                         let _count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
-                                        update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
-                                            timestamp, wait_time));
-                                        
-                                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                                        // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
+                                        if rotation_data.is_some() {
+                                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
+                                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                                             
+                                            log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
+                                            
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                                 }
+                                                
                                                 // 发送一个显式的停止消息，确保节点真正停止
-                                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                                match node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await {
+                                                    Ok(_) => log_println!("🛑 节点-{}: 轮转后成功发送停止信号", node_id),
+                                                    Err(e) => log_println!("⚠️ 节点-{}: 轮转后发送停止信号失败: {}", node_id, e),
+                                                }
                                                 
-                                                // 设置停止标志
+                                                // 强制关闭此节点，避免继续处理
                                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                log_println!("🛑 节点-{}: 轮转后强制停止", node_id);
                                                 
-                                                // 强制退出当前节点的处理循环
+                                                // 立即返回，确保节点不再继续运行
                                                 return;
                                             } else {
-                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                // 轮转失败但仍然显示原始429消息
+                                                log_println!("⚠️ 节点-{}: 轮转失败，将等待后重试", node_id);
+                                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试 (轮转失败)", 
+                                                    timestamp, wait_time));
                                             }
                                         } else {
-                                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
+                                            // 轮转功能未启用，显示普通等待消息
+                                            update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                                timestamp, wait_time));
+                                            log_println!("节点-{}: 429错误 (轮转功能未启用)", node_id);
                                         }
                                         
-                                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        // 只有在无法轮转的情况下才执行等待
+                                        if !rotation_data.is_some() || !should_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        }
+                                        
                                         retry_count += 1;
                                         continue;
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
@@ -2668,39 +2683,51 @@ async fn run_memory_optimized_node(
                                         // 缓存证明以便后续重试
                                         orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         
-                                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                                        update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
-                                            timestamp, wait_time));
+                                        let wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
                                         
-                                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                                        // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
+                                        if rotation_data.is_some() {
+                                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
+                                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                                             
+                                            log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
+                                            
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                                 }
+                                                
                                                 // 发送一个显式的停止消息，确保节点真正停止
-                                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                                match node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await {
+                                                    Ok(_) => log_println!("🛑 节点-{}: 轮转后成功发送停止信号", node_id),
+                                                    Err(e) => log_println!("⚠️ 节点-{}: 轮转后发送停止信号失败: {}", node_id, e),
+                                                }
                                                 
-                                                // 设置停止标志
+                                                // 强制关闭此节点，避免继续处理
                                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                log_println!("🛑 节点-{}: 轮转后强制停止", node_id);
                                                 
-                                                // 强制退出当前节点的处理循环
+                                                // 立即返回，确保节点不再继续运行
                                                 return;
                                             } else {
-                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                // 轮转失败但仍然显示原始429消息
+                                                log_println!("⚠️ 节点-{}: 轮转失败，将等待后重试", node_id);
+                                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试 (轮转失败)", 
+                                                    timestamp, wait_time));
                                             }
                                         } else {
-                                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
+                                            // 轮转功能未启用，显示普通等待消息
+                                            update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                                timestamp, wait_time));
+                                            log_println!("节点-{}: 429错误 (轮转功能未启用)", node_id);
                                         }
                                         
-                                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        // 只有在无法轮转的情况下才执行等待
+                                        if !rotation_data.is_some() || !should_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        }
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
                                         // 证明已经被提交，视为成功
                                         proof_count += 1;
@@ -2838,39 +2865,51 @@ async fn run_memory_optimized_node(
                         consecutive_429s += 1; // 增加连续429计数
                         task_fetch_failures += 1; // 增加任务获取失败计数
                         
-                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                                                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
-                                            timestamp, wait_time));
+                        let wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
                         
-                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
-                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                        // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
+                        if rotation_data.is_some() {
+                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
+                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                             
+                            log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
+                            
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                 }
+                                
                                 // 发送一个显式的停止消息，确保节点真正停止
-                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                match node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await {
+                                    Ok(_) => log_println!("🛑 节点-{}: 轮转后成功发送停止信号", node_id),
+                                    Err(e) => log_println!("⚠️ 节点-{}: 轮转后发送停止信号失败: {}", node_id, e),
+                                }
                                 
-                                // 设置停止标志
+                                // 强制关闭此节点，避免继续处理
                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                log_println!("🛑 节点-{}: 轮转后强制停止", node_id);
                                 
-                                // 强制退出当前节点的处理循环
+                                // 立即返回，确保节点不再继续运行
                                 return;
                             } else {
-                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                // 轮转失败但仍然显示原始429消息
+                                log_println!("⚠️ 节点-{}: 轮转失败，将等待后重试", node_id);
+                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试 (轮转失败)", 
+                                    timestamp, wait_time));
                             }
                         } else {
-                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
-                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
+                            // 轮转功能未启用，显示普通等待消息
+                            update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                timestamp, wait_time));
+                            log_println!("节点-{}: 429错误 (轮转功能未启用)", node_id);
                         }
                         
-                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                        // 只有在无法轮转的情况下才执行等待
+                        if !rotation_data.is_some() || !should_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                        }
                     } else if error_str.contains("404") || error_str.contains("NOT_FOUND") {
                         // 404错误 - 无可用任务，直接触发节点轮转
                         consecutive_429s = 0; // 重置连续429计数
