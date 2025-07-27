@@ -510,8 +510,7 @@ pub async fn start_optimized_batch_workers(
     let _ = crate::prover::get_or_create_initial_prover().await;
     
     // 增加初始延迟，避免一次性启动太多节点导致429错误
-    let 
-     = 1.0; // 1秒初始延迟
+    let initial_delay = 1.0; // 1秒初始延迟
     log_println!("等待初始延迟 {:.1}秒...", initial_delay);
     tokio::time::sleep(std::time::Duration::from_secs_f64(initial_delay)).await;
     
@@ -2245,7 +2244,7 @@ async fn run_memory_optimized_node(
     const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 0; // 连续429错误达到此数量时轮转（改为0，确保立即轮转）
     let mut _consecutive_failures = 0; // 改为_consecutive_failures
     let mut proof_count = 0;
-    let mut consecutive_429s = 0; // 跟踪连续429错误
+    let mut _consecutive_429s = 0; // 跟踪连续429错误
     
     // 添加任务获取失败计数，用于触发轮转
     let mut task_fetch_failures = 0;
