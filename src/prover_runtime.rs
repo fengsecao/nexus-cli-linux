@@ -686,12 +686,13 @@ pub async fn start_optimized_batch_workers(
                                 _consecutive_429s += 1;
                                 consecutive_successes = 0;
                                 
-                                // 每次减少10%的速率
-                                current_rate = f64::max(current_rate * 0.9, 0.5); // 最低每2秒1个请求
+                                // 根据429错误数量按比例减少速率，每个错误1%，最多10%
+                                let decrease_percent = f64::min(recent_429s as f64 / 100.0, 0.1); // 最多减少10%
+                                current_rate = f64::max(current_rate * (1.0 - decrease_percent), 0.5); // 最低每2秒1个请求
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
-                                    log_println!("⚠️ 检测到429错误 ({}个)，降低请求速率至每秒{}个 (降低10%)", 
-                                            recent_429s, current_rate);
+                                    log_println!("⚠️ 检测到429错误 ({}个)，降低请求速率至每秒{}个 (降低{}%)", 
+                                            recent_429s, current_rate, (decrease_percent * 100.0).round());
                                 }
                                 
                                 // 重置429错误计数，避免重复计算
