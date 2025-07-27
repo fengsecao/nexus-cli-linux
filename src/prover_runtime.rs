@@ -731,7 +731,10 @@ pub async fn start_optimized_batch_workers(
                                 
                                 // 根据429错误数量按比例减少速率，每个错误1%，最多10%
                                 let decrease_percent = f64::min(recent_429s as f64 / 100.0, 0.1); // 最多减少10%
-                                let min_rate = if let Some(min_rate) = MIN_RATE.get() { *min_rate } else { 1 }; // 默认最低每1秒1个请求
+                                let min_rate = {
+                                    let lock = MIN_RATE.lock();
+                                    lock.unwrap_or(1.0) // 默认最低每1秒1个请求
+                                };
                                 current_rate = f64::max(current_rate * (1.0 - decrease_percent), min_rate);
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
@@ -747,7 +750,10 @@ pub async fn start_optimized_batch_workers(
                                 consecutive_successes += 1;
                                 
                                 // 每次检查都增加10%的速率
-                                let max_rate = if let Some(max_rate) = MAX_RATE.get() { *max_rate } else { 20.0 }; // 默认最高每秒20个请求
+                                let max_rate = {
+                                    let lock = MAX_RATE.lock();
+                                    lock.unwrap_or(20.0) // 默认最高每秒20个请求
+                                };
                                 current_rate = f64::min(current_rate * 1.1, max_rate);
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
