@@ -151,26 +151,33 @@ impl GlobalRateLimiter {
 
 // 创建全局限流器实例 - 每秒1个请求
 static GLOBAL_RATE_LIMITER: Lazy<Mutex<GlobalRateLimiter>> = Lazy::new(|| {
-    // 尝试从配置文件读取速率设置
-    let initial_rate = match crate::config::get_config_path() {
-        Ok(config_path) => {
-            if config_path.exists() {
-                match crate::config::Config::load_from_file(&config_path) {
-                    Ok(config) => config.initial_request_rate,
-                    Err(_) => 1.0, // 默认每秒1个请求
-                }
-            } else {
-                1.0 // 默认每秒1个请求
-            }
-        },
-        Err(_) => 1.0, // 如果无法获取配置路径，使用默认值
-    };
-    
-    Mutex::new(GlobalRateLimiter::new(initial_rate))
+    Mutex::new(GlobalRateLimiter::new(1.0))
 });
 
 // 全局429错误计数器
 static RECENT_429_ERRORS: Lazy<AtomicU32> = Lazy::new(|| AtomicU32::new(0));
+
+// 速率配置
+static MIN_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
+static MAX_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
+
+/// 设置最低请求速率
+pub fn set_min_request_rate(rate: f64) {
+    let mut min_rate = MIN_RATE.lock();
+    *min_rate = Some(rate);
+    if get_verbose_output() {
+        log_println!("🚦 设置最低请求速率: 每秒 {} 个请求", rate);
+    }
+}
+
+/// 设置最高请求速率
+pub fn set_max_request_rate(rate: f64) {
+    let mut max_rate = MAX_RATE.lock();
+    *max_rate = Some(rate);
+    if get_verbose_output() {
+        log_println!("🚦 设置最高请求速率: 每秒 {} 个请求", rate);
+    }
+}
 
 /// 增加429错误计数
 pub fn increment_429_error_count() {
@@ -468,11 +475,32 @@ pub async fn start_optimized_batch_workers(
     proxy_file: Option<String>,
     rotation: bool,
     max_concurrent: usize, // 添加max_concurrent参数
+    initial_rate: Option<f64>,
+    min_rate: Option<f64>,
+    max_rate: Option<f64>,
 ) -> (mpsc::Receiver<Event>, Vec<JoinHandle<()>>) {
     // Worker事件
     let (event_sender, event_receiver) = mpsc::channel::<Event>(EVENT_QUEUE_SIZE);
     let mut join_handles = Vec::new();
     let defragmenter = get_defragmenter();
+    
+    // 设置初始请求速率（如果提供）
+    if let Some(rate) = initial_rate {
+        set_global_request_rate(rate);
+        if get_verbose_output() {
+            log_println!("🚦 设置初始请求速率: 每秒 {} 个请求", rate);
+        }
+    }
+    
+    // 设置最低请求速率（如果提供）
+    if let Some(rate) = min_rate {
+        set_min_request_rate(rate);
+    }
+    
+    // 设置最高请求速率（如果提供）
+    if let Some(rate) = max_rate {
+        set_max_request_rate(rate);
+    }
     
     // 将回调函数包装在Arc中，这样可以在多个任务之间共享
     let status_callback_arc = status_callback.map(Arc::new);
@@ -680,8 +708,8 @@ pub async fn start_optimized_batch_workers(
                 let mut consecutive_successes = 0;
                 let check_interval = std::time::Duration::from_secs(30); // 每30秒检查一次
                 
-                // 初始速率为每秒1个请求
-                let mut current_rate = 1.0;
+                // 初始速率为每秒3个请求
+                let mut current_rate = 3.0;
                 
                 loop {
                     tokio::select! {
@@ -703,22 +731,7 @@ pub async fn start_optimized_batch_workers(
                                 
                                 // 根据429错误数量按比例减少速率，每个错误1%，最多10%
                                 let decrease_percent = f64::min(recent_429s as f64 / 100.0, 0.1); // 最多减少10%
-                                
-                                // 从配置文件读取最低速率限制
-                                let min_rate = match crate::config::get_config_path() {
-                                    Ok(config_path) => {
-                                        if config_path.exists() {
-                                            match crate::config::Config::load_from_file(&config_path) {
-                                                Ok(config) => config.min_request_rate,
-                                                Err(_) => 0.5, // 默认最低每秒0.5个请求
-                                            }
-                                        } else {
-                                            0.5 // 默认最低每秒0.5个请求
-                                        }
-                                    },
-                                    Err(_) => 0.5, // 默认最低每秒0.5个请求
-                                };
-                                
+                                let min_rate = if let Some(min_rate) = MIN_RATE.get() { *min_rate } else { 1 }; // 默认最低每1秒1个请求
                                 current_rate = f64::max(current_rate * (1.0 - decrease_percent), min_rate);
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
@@ -734,22 +747,7 @@ pub async fn start_optimized_batch_workers(
                                 consecutive_successes += 1;
                                 
                                 // 每次检查都增加10%的速率
-                                
-                                // 从配置文件读取最高速率限制
-                                let max_rate = match crate::config::get_config_path() {
-                                    Ok(config_path) => {
-                                        if config_path.exists() {
-                                            match crate::config::Config::load_from_file(&config_path) {
-                                                Ok(config) => config.max_request_rate,
-                                                Err(_) => 10.0, // 默认最高每秒10个请求
-                                            }
-                                        } else {
-                                            10.0 // 默认最高每秒10个请求
-                                        }
-                                    },
-                                    Err(_) => 10.0, // 默认最高每秒10个请求
-                                };
-                                
+                                let max_rate = if let Some(max_rate) = MAX_RATE.get() { *max_rate } else { 20.0 }; // 默认最高每秒20个请求
                                 current_rate = f64::min(current_rate * 1.1, max_rate);
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
@@ -973,7 +971,7 @@ async fn node_manager(
     });
     
     // 添加定期状态更新功能，确保活跃节点的状态显示在UI上
-    if let Some(status_callback_arc_clone) = status_callback.clone() {
+    if let Some(status_callback_arc_clone) = status_callback_arc.clone() {
         let active_threads_for_status = active_threads.clone();
         let global_active_nodes_clone = Arc::new(parking_lot::Mutex::new(HashSet::<u64>::new()));
         
@@ -1025,7 +1023,7 @@ async fn node_manager(
     let node_tx_for_recovery = node_tx.clone();
     let environment_for_recovery = environment.clone();
     let proxy_file_for_recovery = proxy_file.clone();
-    let status_callback_arc_for_recovery = status_callback.clone();
+    let status_callback_arc_for_recovery = status_callback_arc.clone();
     let event_sender_for_recovery = event_sender.clone();
     let rotation_data_for_recovery = rotation_data.clone();
     let mut shutdown_for_recovery = shutdown.resubscribe(); // 确保这是可变的
@@ -2783,15 +2781,15 @@ async fn run_memory_optimized_node(
                                             
                                             break; // 立即退出重试循环
                                         }
-
-                                        // 如果不是429错误，我们不需要那么多重试
-                                        if retry_count >= 2 {
-                                            update_status(format!("[{}] 放弃缓存证明，尝试重新生成...", timestamp));
-                                            break;
+                                        
+                                        // 缓存证明以便后续重试
+                                        if retry_count == 0 {
+                                            orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         }
+                                        
                                         tokio::time::sleep(Duration::from_secs(2)).await;
-                                        retry_count += 1;
                                     }
+                                    retry_count += 1;
                                 }
                             }
                             }

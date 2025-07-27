@@ -146,17 +146,17 @@ enum Command {
         /// Display refresh interval in seconds (0 for immediate updates)
         #[arg(long, default_value = "1")]
         refresh_interval: u64,
-        
-        /// 初始请求速率（每秒请求数）
-        #[arg(long, value_name = "RATE")]
+
+        /// Initial request rate per second
+        #[arg(long = "initial-rate", value_name = "RATE")]
         initial_rate: Option<f64>,
-        
-        /// 最低请求速率（每秒请求数）
-        #[arg(long, value_name = "RATE")]
+
+        /// Minimum request rate per second
+        #[arg(long = "min-rate", value_name = "RATE")]
         min_rate: Option<f64>,
-        
-        /// 最高请求速率（每秒请求数）
-        #[arg(long, value_name = "RATE")]
+
+        /// Maximum request rate per second
+        #[arg(long = "max-rate", value_name = "RATE")]
         max_rate: Option<f64>,
     },
 }
@@ -646,55 +646,6 @@ async fn start_batch_processing(
         crate::consts::set_retry_timeout(timeout_value);
     }
     
-    // 更新配置文件中的请求速率设置
-    if let Ok(config_path) = crate::config::get_config_path() {
-        println!("📁 使用配置文件: {}", config_path.display());
-        
-        let mut config = if config_path.exists() {
-            match crate::config::Config::load_from_file(&config_path) {
-                Ok(cfg) => cfg,
-                Err(_) => crate::config::Config::new(
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    Environment::default(),
-                ),
-            }
-        } else {
-            crate::config::Config::new(
-                String::new(),
-                String::new(),
-                String::new(),
-                Environment::default(),
-            )
-        };
-        
-        // 更新速率设置
-        if let Some(rate) = initial_rate {
-            config.initial_request_rate = rate;
-            println!("📊 初始请求速率设置为: {} 请求/秒", rate);
-        }
-        
-        if let Some(rate) = min_rate {
-            config.min_request_rate = rate;
-            println!("📊 最低请求速率设置为: {} 请求/秒", rate);
-        }
-        
-        if let Some(rate) = max_rate {
-            config.max_request_rate = rate;
-            println!("📊 最高请求速率设置为: {} 请求/秒", rate);
-        }
-        
-        // 保存更新后的配置
-        if initial_rate.is_some() || min_rate.is_some() || max_rate.is_some() {
-            if let Err(e) = config.save(&config_path) {
-                println!("⚠️ 保存配置文件失败: {}", e);
-            } else {
-                println!("✅ 配置文件已更新");
-            }
-        }
-    }
-    
     // 加载节点列表
     let node_ids = node_list::load_node_list(file_path)?;
     if node_ids.is_empty() {
@@ -729,6 +680,26 @@ async fn start_batch_processing(
     } else {
         println!("🔄 节点轮转: 已禁用 (添加 --rotation 参数可启用此功能)");
     }
+    
+    // 打印请求速率参数
+    if let Some(rate) = initial_rate {
+        println!("🚦 初始请求速率: 每秒 {} 个请求", rate);
+    } else {
+        println!("🚦 初始请求速率: 默认值 (每秒1个请求)");
+    }
+    
+    if let Some(rate) = min_rate {
+        println!("🚦 最低请求速率: 每秒 {} 个请求", rate);
+    } else {
+        println!("🚦 最低请求速率: 默认值 (每2秒1个请求)");
+    }
+    
+    if let Some(rate) = max_rate {
+        println!("🚦 最高请求速率: 每秒 {} 个请求", rate);
+    } else {
+        println!("🚦 最高请求速率: 默认值 (每秒10个请求)");
+    }
+    
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
@@ -764,6 +735,9 @@ async fn start_batch_processing(
         proxy_file,
         rotation,
         max_concurrent, // 添加max_concurrent参数
+        initial_rate,
+        min_rate,
+        max_rate,
     ).await;
     
     // 创建消费事件的任务
