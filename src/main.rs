@@ -146,6 +146,18 @@ enum Command {
         /// Display refresh interval in seconds (0 for immediate updates)
         #[arg(long, default_value = "1")]
         refresh_interval: u64,
+        
+        /// 初始请求速率（每秒请求数）
+        #[arg(long, value_name = "RATE")]
+        initial_rate: Option<f64>,
+        
+        /// 最低请求速率（每秒请求数）
+        #[arg(long, value_name = "RATE")]
+        min_rate: Option<f64>,
+        
+        /// 最高请求速率（每秒请求数）
+        #[arg(long, value_name = "RATE")]
+        max_rate: Option<f64>,
     },
 }
 
@@ -372,6 +384,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             timeout,
             rotation,
             refresh_interval,
+            initial_rate,
+            min_rate,
+            max_rate,
         } => {
             if verbose {
                 // 设置详细日志级别
@@ -422,6 +437,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 timeout,
                 rotation,
                 refresh_interval,
+                initial_rate,
+                min_rate,
+                max_rate,
             )
             .await
         }
@@ -612,6 +630,9 @@ async fn start_batch_processing(
     timeout: Option<u64>,
     rotation: bool,
     refresh_interval: u64,
+    initial_rate: Option<f64>,
+    min_rate: Option<f64>,
+    max_rate: Option<f64>,
 ) -> Result<(), Box<dyn Error>> {
     // 设置日志输出详细程度
     crate::prover_runtime::set_verbose_output(verbose);
@@ -623,6 +644,55 @@ async fn start_batch_processing(
     if let Some(timeout_value) = timeout {
         // 设置全局429超时参数
         crate::consts::set_retry_timeout(timeout_value);
+    }
+    
+    // 更新配置文件中的请求速率设置
+    if let Ok(config_path) = crate::config::get_config_path() {
+        println!("📁 使用配置文件: {}", config_path.display());
+        
+        let mut config = if config_path.exists() {
+            match crate::config::Config::load_from_file(&config_path) {
+                Ok(cfg) => cfg,
+                Err(_) => crate::config::Config::new(
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    Environment::default(),
+                ),
+            }
+        } else {
+            crate::config::Config::new(
+                String::new(),
+                String::new(),
+                String::new(),
+                Environment::default(),
+            )
+        };
+        
+        // 更新速率设置
+        if let Some(rate) = initial_rate {
+            config.initial_request_rate = rate;
+            println!("📊 初始请求速率设置为: {} 请求/秒", rate);
+        }
+        
+        if let Some(rate) = min_rate {
+            config.min_request_rate = rate;
+            println!("📊 最低请求速率设置为: {} 请求/秒", rate);
+        }
+        
+        if let Some(rate) = max_rate {
+            config.max_request_rate = rate;
+            println!("📊 最高请求速率设置为: {} 请求/秒", rate);
+        }
+        
+        // 保存更新后的配置
+        if initial_rate.is_some() || min_rate.is_some() || max_rate.is_some() {
+            if let Err(e) = config.save(&config_path) {
+                println!("⚠️ 保存配置文件失败: {}", e);
+            } else {
+                println!("✅ 配置文件已更新");
+            }
+        }
     }
     
     // 加载节点列表

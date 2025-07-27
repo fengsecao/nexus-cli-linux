@@ -5,8 +5,17 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::{fs, path::Path};
 
-/// Get the path to the Nexus config file, typically located at ~/.nexus/config.json.
+/// Get the path to the Nexus config file, 优先从当前目录下的nexus.config读取，如果不存在则使用~/.nexus/config.json.
 pub fn get_config_path() -> Result<PathBuf, std::io::Error> {
+    // 先尝试当前目录下的nexus.config
+    let local_config_path = std::env::current_dir()?.join("nexus.config");
+    
+    // 如果当前目录存在nexus.config文件，直接返回
+    if local_config_path.exists() {
+        return Ok(local_config_path);
+    }
+    
+    // 否则使用原来的路径 ~/.nexus/config.json
     let home_path = home::home_dir().ok_or(std::io::Error::new(
         std::io::ErrorKind::NotFound,
         "Home directory not found",
@@ -32,6 +41,30 @@ pub struct Config {
     /// The node's unique identifier, probably an integer. Empty when not yet registered.
     #[serde(default)]
     pub node_id: String,
+    
+    /// 初始请求速率（每秒请求数）
+    #[serde(default = "default_initial_rate")]
+    pub initial_request_rate: f64,
+    
+    /// 最低请求速率（每秒请求数）
+    #[serde(default = "default_min_rate")]
+    pub min_request_rate: f64,
+    
+    /// 最高请求速率（每秒请求数）
+    #[serde(default = "default_max_rate")]
+    pub max_request_rate: f64,
+}
+
+fn default_initial_rate() -> f64 {
+    1.0 // 默认每秒1个请求
+}
+
+fn default_min_rate() -> f64 {
+    0.5 // 默认最低每秒0.5个请求（每2秒1个）
+}
+
+fn default_max_rate() -> f64 {
+    10.0 // 默认最高每秒10个请求
 }
 
 impl Config {
@@ -47,6 +80,9 @@ impl Config {
             wallet_address,
             node_id,
             environment: environment.to_string(),
+            initial_request_rate: default_initial_rate(),
+            min_request_rate: default_min_rate(),
+            max_request_rate: default_max_rate(),
         }
     }
 
@@ -116,6 +152,9 @@ mod tests {
             user_id: "test_user_id".to_string(),
             wallet_address: "0x1234567890abcdef1234567890abcdef12345678".to_string(),
             node_id: "test_node_id".to_string(),
+            initial_request_rate: default_initial_rate(),
+            min_request_rate: default_min_rate(),
+            max_request_rate: default_max_rate(),
         }
     }
 
@@ -202,7 +241,7 @@ mod tests {
 
         // Write a JSON with user_id and empty strings for other fields
         let mut file = File::create(&path).unwrap();
-        writeln!(file, r#"{{ "user_id": "test_user", "wallet_address": "", "environment": "", "node_id": "" }}"#).unwrap();
+        writeln!(file, r#"{{ "user_id": "test_user", "wallet_address": "", "environment": "", "node_id": "", "initial_request_rate": 1.0, "min_request_rate": 0.5, "max_request_rate": 10.0 }}"#).unwrap();
 
         match Config::load_from_file(&path) {
             Ok(config) => {
@@ -212,6 +251,9 @@ mod tests {
                 assert!(config.wallet_address.is_empty());
                 assert!(config.environment.is_empty());
                 assert!(config.node_id.is_empty());
+                assert_eq!(config.initial_request_rate, 1.0);
+                assert_eq!(config.min_request_rate, 0.5);
+                assert_eq!(config.max_request_rate, 10.0);
             }
             Err(e) => {
                 panic!("Failed to load config with user_id and empty fields: {}", e);
@@ -237,6 +279,9 @@ mod tests {
                 assert!(config.user_id.is_empty());
                 assert!(config.wallet_address.is_empty());
                 assert!(config.environment.is_empty());
+                assert_eq!(config.initial_request_rate, default_initial_rate());
+                assert_eq!(config.min_request_rate, default_min_rate());
+                assert_eq!(config.max_request_rate, default_max_rate());
             }
             Err(e) => {
                 panic!("Failed to load config with only node_id: {}", e);
@@ -255,6 +300,9 @@ mod tests {
             user_id: "".to_string(),
             wallet_address: "".to_string(),
             node_id: "12345".to_string(),
+            initial_request_rate: default_initial_rate(),
+            min_request_rate: default_min_rate(),
+            max_request_rate: default_max_rate(),
         };
         config.save(&path).unwrap();
 
@@ -266,6 +314,9 @@ mod tests {
                 assert!(config.user_id.is_empty());
                 assert!(config.wallet_address.is_empty());
                 assert!(config.environment.is_empty());
+                assert_eq!(config.initial_request_rate, default_initial_rate());
+                assert_eq!(config.min_request_rate, default_min_rate());
+                assert_eq!(config.max_request_rate, default_max_rate());
             }
             Err(e) => {
                 panic!("Failed to load config with only node_id: {}", e);
@@ -291,6 +342,9 @@ mod tests {
                 assert!(config.user_id.is_empty());
                 assert!(config.wallet_address.is_empty());
                 assert!(config.environment.is_empty());
+                assert_eq!(config.initial_request_rate, default_initial_rate());
+                assert_eq!(config.min_request_rate, default_min_rate());
+                assert_eq!(config.max_request_rate, default_max_rate());
             }
             Err(e) => {
                 panic!("Failed to load config with additional fields: {}", e);

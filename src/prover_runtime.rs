@@ -151,7 +151,22 @@ impl GlobalRateLimiter {
 
 // 创建全局限流器实例 - 每秒1个请求
 static GLOBAL_RATE_LIMITER: Lazy<Mutex<GlobalRateLimiter>> = Lazy::new(|| {
-    Mutex::new(GlobalRateLimiter::new(1.0))
+    // 尝试从配置文件读取速率设置
+    let initial_rate = match crate::config::get_config_path() {
+        Ok(config_path) => {
+            if config_path.exists() {
+                match crate::config::Config::load_from_file(&config_path) {
+                    Ok(config) => config.initial_request_rate,
+                    Err(_) => 1.0, // 默认每秒1个请求
+                }
+            } else {
+                1.0 // 默认每秒1个请求
+            }
+        },
+        Err(_) => 1.0, // 如果无法获取配置路径，使用默认值
+    };
+    
+    Mutex::new(GlobalRateLimiter::new(initial_rate))
 });
 
 // 全局429错误计数器
@@ -688,7 +703,23 @@ pub async fn start_optimized_batch_workers(
                                 
                                 // 根据429错误数量按比例减少速率，每个错误1%，最多10%
                                 let decrease_percent = f64::min(recent_429s as f64 / 100.0, 0.1); // 最多减少10%
-                                current_rate = f64::max(current_rate * (1.0 - decrease_percent), 0.5); // 最低每2秒1个请求
+                                
+                                // 从配置文件读取最低速率限制
+                                let min_rate = match crate::config::get_config_path() {
+                                    Ok(config_path) => {
+                                        if config_path.exists() {
+                                            match crate::config::Config::load_from_file(&config_path) {
+                                                Ok(config) => config.min_request_rate,
+                                                Err(_) => 0.5, // 默认最低每秒0.5个请求
+                                            }
+                                        } else {
+                                            0.5 // 默认最低每秒0.5个请求
+                                        }
+                                    },
+                                    Err(_) => 0.5, // 默认最低每秒0.5个请求
+                                };
+                                
+                                current_rate = f64::max(current_rate * (1.0 - decrease_percent), min_rate);
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
                                     log_println!("⚠️ 检测到429错误 ({}个)，降低请求速率至每秒{}个 (降低{}%)", 
@@ -703,7 +734,23 @@ pub async fn start_optimized_batch_workers(
                                 consecutive_successes += 1;
                                 
                                 // 每次检查都增加10%的速率
-                                current_rate = f64::min(current_rate * 1.1, 10.0); // 最高每秒10个请求
+                                
+                                // 从配置文件读取最高速率限制
+                                let max_rate = match crate::config::get_config_path() {
+                                    Ok(config_path) => {
+                                        if config_path.exists() {
+                                            match crate::config::Config::load_from_file(&config_path) {
+                                                Ok(config) => config.max_request_rate,
+                                                Err(_) => 10.0, // 默认最高每秒10个请求
+                                            }
+                                        } else {
+                                            10.0 // 默认最高每秒10个请求
+                                        }
+                                    },
+                                    Err(_) => 10.0, // 默认最高每秒10个请求
+                                };
+                                
+                                current_rate = f64::min(current_rate * 1.1, max_rate);
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
                                     log_println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
@@ -926,7 +973,7 @@ async fn node_manager(
     });
     
     // 添加定期状态更新功能，确保活跃节点的状态显示在UI上
-    if let Some(status_callback_arc_clone) = status_callback_arc.clone() {
+    if let Some(status_callback_arc_clone) = status_callback.clone() {
         let active_threads_for_status = active_threads.clone();
         let global_active_nodes_clone = Arc::new(parking_lot::Mutex::new(HashSet::<u64>::new()));
         
@@ -978,7 +1025,7 @@ async fn node_manager(
     let node_tx_for_recovery = node_tx.clone();
     let environment_for_recovery = environment.clone();
     let proxy_file_for_recovery = proxy_file.clone();
-    let status_callback_arc_for_recovery = status_callback_arc.clone();
+    let status_callback_arc_for_recovery = status_callback.clone();
     let event_sender_for_recovery = event_sender.clone();
     let rotation_data_for_recovery = rotation_data.clone();
     let mut shutdown_for_recovery = shutdown.resubscribe(); // 确保这是可变的
@@ -2736,15 +2783,15 @@ async fn run_memory_optimized_node(
                                             
                                             break; // 立即退出重试循环
                                         }
-                                        
-                                        // 缓存证明以便后续重试
-                                        if retry_count == 0 {
-                                            orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
+
+                                        // 如果不是429错误，我们不需要那么多重试
+                                        if retry_count >= 2 {
+                                            update_status(format!("[{}] 放弃缓存证明，尝试重新生成...", timestamp));
+                                            break;
                                         }
-                                        
                                         tokio::time::sleep(Duration::from_secs(2)).await;
+                                        retry_count += 1;
                                     }
-                                    retry_count += 1;
                                 }
                             }
                             }
