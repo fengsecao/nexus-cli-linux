@@ -148,15 +148,15 @@ enum Command {
         refresh_interval: u64,
 
         /// Initial request rate per second
-        #[arg(long = "initial-rate", value_name = "RATE")]
+        #[arg(long = "initial-rate")]
         initial_rate: Option<f64>,
 
         /// Minimum request rate per second
-        #[arg(long = "min-rate", value_name = "RATE")]
+        #[arg(long = "min-rate")]
         min_rate: Option<f64>,
 
         /// Maximum request rate per second
-        #[arg(long = "max-rate", value_name = "RATE")]
+        #[arg(long = "max-rate")]
         max_rate: Option<f64>,
     },
 }
