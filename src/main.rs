@@ -146,6 +146,18 @@ enum Command {
         /// Display refresh interval in seconds (0 for immediate updates)
         #[arg(long, default_value = "1")]
         refresh_interval: u64,
+
+        /// Initial request rate per second
+        #[arg(long = "initial-rate")]
+        initial_rate: Option<f64>,
+
+        /// Minimum request rate per second
+        #[arg(long = "min-rate")]
+        min_rate: Option<f64>,
+
+        /// Maximum request rate per second
+        #[arg(long = "max-rate")]
+        max_rate: Option<f64>,
     },
 }
 
@@ -372,6 +384,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             timeout,
             rotation,
             refresh_interval,
+            initial_rate,
+            min_rate,
+            max_rate,
         } => {
             if verbose {
                 // 设置详细日志级别
@@ -422,6 +437,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 timeout,
                 rotation,
                 refresh_interval,
+                initial_rate,
+                min_rate,
+                max_rate,
             )
             .await
         }
@@ -612,6 +630,9 @@ async fn start_batch_processing(
     timeout: Option<u64>,
     rotation: bool,
     refresh_interval: u64,
+    initial_rate: Option<f64>,
+    min_rate: Option<f64>,
+    max_rate: Option<f64>,
 ) -> Result<(), Box<dyn Error>> {
     // 设置日志输出详细程度
     crate::prover_runtime::set_verbose_output(verbose);
@@ -659,6 +680,26 @@ async fn start_batch_processing(
     } else {
         println!("🔄 节点轮转: 已禁用 (添加 --rotation 参数可启用此功能)");
     }
+    
+    // 打印请求速率参数
+    if let Some(rate) = initial_rate {
+        println!("🚦 初始请求速率: 每秒 {} 个请求", rate);
+    } else {
+        println!("🚦 初始请求速率: 默认值 (每秒1个请求)");
+    }
+    
+    if let Some(rate) = min_rate {
+        println!("🚦 最低请求速率: 每秒 {} 个请求", rate);
+    } else {
+        println!("🚦 最低请求速率: 默认值 (每2秒1个请求)");
+    }
+    
+    if let Some(rate) = max_rate {
+        println!("🚦 最高请求速率: 每秒 {} 个请求", rate);
+    } else {
+        println!("🚦 最高请求速率: 默认值 (每秒10个请求)");
+    }
+    
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
@@ -694,6 +735,9 @@ async fn start_batch_processing(
         proxy_file,
         rotation,
         max_concurrent, // 添加max_concurrent参数
+        initial_rate,
+        min_rate,
+        max_rate,
     ).await;
     
     // 创建消费事件的任务

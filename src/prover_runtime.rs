@@ -149,13 +149,49 @@ impl GlobalRateLimiter {
     }
 }
 
-// 创建全局限流器实例 - 每秒1个请求
+// 创建全局限流器实例 - 默认每秒3个请求，但会被用户设置覆盖
 static GLOBAL_RATE_LIMITER: Lazy<Mutex<GlobalRateLimiter>> = Lazy::new(|| {
-    Mutex::new(GlobalRateLimiter::new(1.0))
+    // 检查环境变量中是否有初始速率设置
+    let default_rate = std::env::var("NEXUS_INITIAL_RATE")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(3.0);
+    
+    if should_log() {
+        println!("🚀 初始化全局请求限流器 - 使用默认值每秒 {} 个请求", default_rate);
+    }
+    
+    Mutex::new(GlobalRateLimiter::new(default_rate))
 });
 
 // 全局429错误计数器
 static RECENT_429_ERRORS: Lazy<AtomicU32> = Lazy::new(|| AtomicU32::new(0));
+
+// 速率配置
+static MIN_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
+static MAX_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
+static USER_INITIAL_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
+
+// 记录用户是否明确设置了初始速率
+static INITIAL_RATE_SET: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
+
+/// 设置最低请求速率
+pub fn set_min_request_rate(rate: f64) {
+    let mut min_rate = MIN_RATE.lock();
+    *min_rate = Some(rate);
+    if get_verbose_output() {
+        log_println!("🚦 设置最低请求速率: 每秒 {} 个请求", rate);
+    }
+}
+
+/// 设置最高请求速率
+pub fn set_max_request_rate(rate: f64) {
+    let mut max_rate = MAX_RATE.lock();
+    *max_rate = Some(rate);
+    if get_verbose_output() {
+        log_println!("🚦 设置最高请求速率: 每秒 {} 个请求", rate);
+    }
+}
 
 /// 增加429错误计数
 pub fn increment_429_error_count() {
@@ -225,6 +261,9 @@ where
 pub fn set_global_request_rate(requests_per_second: f64) {
     let mut limiter = GLOBAL_RATE_LIMITER.lock();
     limiter.set_rate(requests_per_second);
+    
+    // 标记用户已设置初始速率，这会防止其他地方重置它
+    INITIAL_RATE_SET.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// 获取全局请求统计信息
@@ -453,11 +492,83 @@ pub async fn start_optimized_batch_workers(
     proxy_file: Option<String>,
     rotation: bool,
     max_concurrent: usize, // 添加max_concurrent参数
+    initial_rate: Option<f64>,
+    min_rate: Option<f64>,
+    max_rate: Option<f64>,
 ) -> (mpsc::Receiver<Event>, Vec<JoinHandle<()>>) {
     // Worker事件
     let (event_sender, event_receiver) = mpsc::channel::<Event>(EVENT_QUEUE_SIZE);
     let mut join_handles = Vec::new();
     let defragmenter = get_defragmenter();
+    
+    // 设置初始请求速率（如果提供）
+    if let Some(rate) = initial_rate {
+        // 保存用户设置的初始速率
+        {
+            let mut user_rate = USER_INITIAL_RATE.lock();
+            *user_rate = Some(rate);
+        }
+        
+        // 强制设置全局请求速率为用户指定的值
+        set_global_request_rate(rate);
+        
+        // 记录实际设置后的值，确认是否正确
+        let actual_rate = {
+            let limiter = GLOBAL_RATE_LIMITER.lock();
+            limiter.get_rate()
+        };
+        
+        // 保存用户设置的初始速率，用于自适应调整时参考
+        {
+            let mut min_rate_lock = MIN_RATE.lock();
+            if min_rate_lock.is_none() {
+                // 如果用户没有明确设置最小速率，则将其设置为初始速率的20%
+                *min_rate_lock = Some(rate * 0.2);
+            }
+            
+            let mut max_rate_lock = MAX_RATE.lock();
+            if max_rate_lock.is_none() {
+                // 如果用户没有明确设置最大速率，则将其设置为初始速率的500%
+                *max_rate_lock = Some(rate * 5.0);
+            }
+        }
+        
+        // 输出详细的日志，确认速率已被正确设置
+        log_println!("🚦 用户设置初始请求速率: {} 每秒，实际设置为: {} 每秒", 
+                    rate, actual_rate);
+                    
+        // 将用户设置的初始速率保存到环境变量中，以便后续组件使用
+        std::env::set_var("NEXUS_INITIAL_RATE", rate.to_string());
+    } else {
+        // 如果用户没有提供初始速率，也输出当前使用的默认值
+        let current_rate = {
+            let limiter = GLOBAL_RATE_LIMITER.lock();
+            limiter.get_rate()
+        };
+        log_println!("🚦 使用默认请求速率: 每秒 {} 个请求", current_rate);
+    }
+    
+    // 设置最低请求速率（如果提供）
+    if let Some(rate) = min_rate {
+        set_min_request_rate(rate);
+        log_println!("🚦 设置最低请求速率: 每秒 {} 个请求", rate);
+    }
+    
+    // 设置最高请求速率（如果提供）
+    if let Some(rate) = max_rate {
+        set_max_request_rate(rate);
+        log_println!("🚦 设置最高请求速率: 每秒 {} 个请求", rate);
+    }
+    
+    // 显示当前速率设置
+    {
+        let min_rate_value = MIN_RATE.lock().unwrap_or(0.5);
+        let max_rate_value = MAX_RATE.lock().unwrap_or(20.0);
+        let current_rate = GLOBAL_RATE_LIMITER.lock().get_rate();
+        
+        log_println!("📊 请求速率配置: 当前={:.1}, 最小={:.1}, 最大={:.1} 请求/秒", 
+                   current_rate, min_rate_value, max_rate_value);
+    }
     
     // 将回调函数包装在Arc中，这样可以在多个任务之间共享
     let status_callback_arc = status_callback.map(Arc::new);
@@ -467,7 +578,7 @@ pub async fn start_optimized_batch_workers(
     let _ = crate::prover::get_or_create_initial_prover().await;
     
     // 增加初始延迟，避免一次性启动太多节点导致429错误
-    let initial_delay = 3.0; // 3秒初始延迟
+    let initial_delay = 1.0; // 1秒初始延迟
     log_println!("等待初始延迟 {:.1}秒...", initial_delay);
     tokio::time::sleep(std::time::Duration::from_secs_f64(initial_delay)).await;
     
@@ -665,8 +776,21 @@ pub async fn start_optimized_batch_workers(
                 let mut consecutive_successes = 0;
                 let check_interval = std::time::Duration::from_secs(30); // 每30秒检查一次
                 
-                // 初始速率为每秒1个请求
-                let mut current_rate = 1.0;
+                // 获取当前速率，如果用户设置了初始速率则使用用户设置的值
+                let mut current_rate = {
+                    // 首先检查用户是否设置了初始速率
+                    let user_rate = USER_INITIAL_RATE.lock();
+                    if let Some(rate) = *user_rate {
+                        // 用户设置了初始速率，使用它
+                        log_println!("🚦 速率监控使用用户设置的初始速率: 每秒 {} 个请求", rate);
+                        rate
+                    } else {
+                        // 没有用户设置，使用当前全局速率
+                        let rate = GLOBAL_RATE_LIMITER.lock().get_rate();
+                        log_println!("🚦 速率监控使用当前全局速率: 每秒 {} 个请求", rate);
+                        rate
+                    }
+                };
                 
                 loop {
                     tokio::select! {
@@ -686,12 +810,19 @@ pub async fn start_optimized_batch_workers(
                                 _consecutive_429s += 1;
                                 consecutive_successes = 0;
                                 
-                                // 每次减少10%的速率
-                                current_rate = f64::max(current_rate * 0.9, 0.1); // 最低每10秒1个请求
+                                                                        // 根据429错误数量按比例减少速率
+                                // 3个429错误降低1%，4个降低2%，依此类推，最多10%
+                                let errors_above_threshold = if recent_429s >= 3 { recent_429s - 2 } else { 0 };
+                                let decrease_percent = f64::min(errors_above_threshold as f64 * 0.01, 0.1); // 最多减少10%
+                                let min_rate = {
+                                    let lock = MIN_RATE.lock();
+                                    lock.unwrap_or(1.0) // 默认最低每1秒1个请求
+                                };
+                                current_rate = f64::max(current_rate * (1.0 - decrease_percent), min_rate);
                                 set_global_request_rate(current_rate);
                                 if get_verbose_output() {
-                                    log_println!("⚠️ 检测到429错误 ({}个)，降低请求速率至每秒{}个 (降低10%)", 
-                                            recent_429s, current_rate);
+                                    log_println!("⚠️ 检测到429错误 ({}个)，降低请求速率至每秒{}个 (降低{}%)", 
+                                            recent_429s, current_rate, (decrease_percent * 100.0).round());
                                 }
                                 
                                 // 重置429错误计数，避免重复计算
@@ -701,11 +832,22 @@ pub async fn start_optimized_batch_workers(
                                 _consecutive_429s = 0;
                                 consecutive_successes += 1;
                                 
-                                // 每次检查都增加10%的速率
-                                current_rate = f64::min(current_rate * 1.1, 5.0); // 最高每秒5个请求
-                                set_global_request_rate(current_rate);
-                                if get_verbose_output() {
-                                    log_println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
+                                // 每次检查都增加速率，增加10%的速率
+                                let max_rate = {
+                                    let lock = MAX_RATE.lock();
+                                    lock.unwrap_or(20.0) // 默认最高每秒20个请求
+                                };
+                                
+                                // 计算新的速率，增加10%，不要使用较小的增幅
+                                let new_rate = f64::min(current_rate * 1.1, max_rate);
+                                
+                                // 只有当新速率比当前速率高时才设置
+                                if new_rate > current_rate {
+                                    current_rate = new_rate;
+                                    set_global_request_rate(current_rate);
+                                    if get_verbose_output() {
+                                        log_println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
+                                    }
                                 }
                                 
                                 // 重置成功计数，避免过大
@@ -716,7 +858,9 @@ pub async fn start_optimized_batch_workers(
                             
                             // 输出当前请求统计信息
                             if get_verbose_output() {
-                                log_println!("📊 请求速率监控: 当前速率 = 每秒{}个请求, 总请求数 = {}", rate, total_requests);
+                                log_println!("📊 请求速率监控: 当前速率 = 每秒{}个请求, 总请求数 = {}", current_rate, total_requests);
+                            } else if total_requests % 20 == 0 { // 即使不是详细模式，也每20个请求输出一次
+                                log_println!("📊 当前请求速率: 每秒{}个请求 (总请求数: {})", current_rate, total_requests);
                             }
                         }
                     }
@@ -2381,38 +2525,50 @@ async fn run_memory_optimized_node(
                                         let _count = rate_limit_tracker.increment_429_count(node_id).await;
                                         consecutive_429s += 1; // 增加连续429计数
                                         
-                                        update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
-                                            timestamp, wait_time));
-                                        
-                                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                                        // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
+                                        if rotation_data.is_some() {
+                                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
+                                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                                             
+                                            log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
+                                            
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                                 }
+                                                
                                                 // 发送一个显式的停止消息，确保节点真正停止
-                                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                                match node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await {
+                                                    Ok(_) => log_println!("🛑 节点-{}: 轮转后成功发送停止信号", node_id),
+                                                    Err(e) => log_println!("⚠️ 节点-{}: 轮转后发送停止信号失败: {}", node_id, e),
+                                                }
                                                 
-                                                // 设置停止标志
+                                                // 强制关闭此节点，避免继续处理
                                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                log_println!("🛑 节点-{}: 轮转后强制停止", node_id);
                                                 
-                                                // 强制退出当前节点的处理循环
+                                                // 立即返回，确保节点不再继续运行
                                                 return;
                                             } else {
-                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                // 轮转失败但仍然显示原始429消息
+                                                log_println!("⚠️ 节点-{}: 轮转失败，将等待后重试", node_id);
+                                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试 (轮转失败)", 
+                                                    timestamp, wait_time));
                                             }
                                         } else {
-                                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
+                                            // 轮转功能未启用，显示普通等待消息
+                                            update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                                timestamp, wait_time));
+                                            log_println!("节点-{}: 429错误 (轮转功能未启用)", node_id);
                                         }
                                         
-                                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        // 只有在无法轮转的情况下才执行等待
+                                        if !rotation_data.is_some() || !should_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        }
+                                        
                                         retry_count += 1;
                                         continue;
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
@@ -2616,39 +2772,51 @@ async fn run_memory_optimized_node(
                                         // 缓存证明以便后续重试
                                         orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         
-                                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                                        update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
-                                            timestamp, wait_time));
+                                        let wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
                                         
-                                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                                        // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
+                                        if rotation_data.is_some() {
+                                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
+                                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                                             
+                                            log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
+                                            
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
                                             if should_rotate {
                                                 if let Some(msg) = status_msg {
                                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                                 }
+                                                
                                                 // 发送一个显式的停止消息，确保节点真正停止
-                                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                                match node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await {
+                                                    Ok(_) => log_println!("🛑 节点-{}: 轮转后成功发送停止信号", node_id),
+                                                    Err(e) => log_println!("⚠️ 节点-{}: 轮转后发送停止信号失败: {}", node_id, e),
+                                                }
                                                 
-                                                // 设置停止标志
+                                                // 强制关闭此节点，避免继续处理
                                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                                log_println!("🛑 节点-{}: 轮转后强制停止", node_id);
                                                 
-                                                // 强制退出当前节点的处理循环
+                                                // 立即返回，确保节点不再继续运行
                                                 return;
                                             } else {
-                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                                // 轮转失败但仍然显示原始429消息
+                                                log_println!("⚠️ 节点-{}: 轮转失败，将等待后重试", node_id);
+                                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试 (轮转失败)", 
+                                                    timestamp, wait_time));
                                             }
                                         } else {
-                                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
-                                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
+                                            // 轮转功能未启用，显示普通等待消息
+                                            update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                                timestamp, wait_time));
+                                            log_println!("节点-{}: 429错误 (轮转功能未启用)", node_id);
                                         }
                                         
-                                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        // 只有在无法轮转的情况下才执行等待
+                                        if !rotation_data.is_some() || !should_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                        }
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
                                         // 证明已经被提交，视为成功
                                         proof_count += 1;
@@ -2786,39 +2954,51 @@ async fn run_memory_optimized_node(
                         consecutive_429s += 1; // 增加连续429计数
                         task_fetch_failures += 1; // 增加任务获取失败计数
                         
-                        let wait_time = 30 + rand::random::<u64>() % 31; // 30-60秒随机
-                                                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
-                                            timestamp, wait_time));
+                        let wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
                         
-                        // 如果启用了轮转功能且连续429错误达到阈值，轮转到下一个节点
-                        if consecutive_429s >= MAX_CONSECUTIVE_429S_BEFORE_ROTATION && rotation_data.is_some() {
-                            log_println!("\n⚠️ 节点-{}: 连续429错误达到{}次，触发轮转 (阈值: {})\n", 
-                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION);
+                        // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
+                        if rotation_data.is_some() {
+                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
+                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                             
+                            log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "连续429错误", &node_tx, &active_threads).await;
+                            
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
                                 }
+                                
                                 // 发送一个显式的停止消息，确保节点真正停止
-                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
-                                log_println!("🛑 节点-{}: 轮转后显式停止", node_id);
+                                match node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await {
+                                    Ok(_) => log_println!("🛑 节点-{}: 轮转后成功发送停止信号", node_id),
+                                    Err(e) => log_println!("⚠️ 节点-{}: 轮转后发送停止信号失败: {}", node_id, e),
+                                }
                                 
-                                // 设置停止标志
+                                // 强制关闭此节点，避免继续处理
                                 should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                log_println!("🛑 节点-{}: 轮转后强制停止", node_id);
                                 
-                                // 强制退出当前节点的处理循环
+                                // 立即返回，确保节点不再继续运行
                                 return;
                             } else {
-                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
+                                // 轮转失败但仍然显示原始429消息
+                                log_println!("⚠️ 节点-{}: 轮转失败，将等待后重试", node_id);
+                                update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试 (轮转失败)", 
+                                    timestamp, wait_time));
                             }
                         } else {
-                            log_println!("节点-{}: 连续429错误: {}次 (轮转阈值: {}次, 轮转功能: {})", 
-                                node_id, consecutive_429s, MAX_CONSECUTIVE_429S_BEFORE_ROTATION, rotation_data.is_some());
+                            // 轮转功能未启用，显示普通等待消息
+                            update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", 
+                                timestamp, wait_time));
+                            log_println!("节点-{}: 429错误 (轮转功能未启用)", node_id);
                         }
                         
-                        tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                        // 只有在无法轮转的情况下才执行等待
+                        if !rotation_data.is_some() || !should_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                        }
                     } else if error_str.contains("404") || error_str.contains("NOT_FOUND") {
                         // 404错误 - 无可用任务，直接触发节点轮转
                         consecutive_429s = 0; // 重置连续429计数
