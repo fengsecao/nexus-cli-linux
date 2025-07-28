@@ -149,9 +149,19 @@ impl GlobalRateLimiter {
     }
 }
 
-// 创建全局限流器实例 - 每秒1个请求
+// 创建全局限流器实例 - 默认每秒3个请求，但会被用户设置覆盖
 static GLOBAL_RATE_LIMITER: Lazy<Mutex<GlobalRateLimiter>> = Lazy::new(|| {
-    Mutex::new(GlobalRateLimiter::new(1.0))
+    // 检查环境变量中是否有初始速率设置
+    let default_rate = std::env::var("NEXUS_INITIAL_RATE")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(3.0);
+    
+    if should_log() {
+        println!("🚀 初始化全局请求限流器 - 使用默认值每秒 {} 个请求", default_rate);
+    }
+    
+    Mutex::new(GlobalRateLimiter::new(default_rate))
 });
 
 // 全局429错误计数器
@@ -160,6 +170,10 @@ static RECENT_429_ERRORS: Lazy<AtomicU32> = Lazy::new(|| AtomicU32::new(0));
 // 速率配置
 static MIN_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
 static MAX_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
+static USER_INITIAL_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
+
+// 记录用户是否明确设置了初始速率
+static INITIAL_RATE_SET: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 /// 设置最低请求速率
 pub fn set_min_request_rate(rate: f64) {
@@ -247,6 +261,9 @@ where
 pub fn set_global_request_rate(requests_per_second: f64) {
     let mut limiter = GLOBAL_RATE_LIMITER.lock();
     limiter.set_rate(requests_per_second);
+    
+    // 标记用户已设置初始速率，这会防止其他地方重置它
+    INITIAL_RATE_SET.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// 获取全局请求统计信息
@@ -486,20 +503,71 @@ pub async fn start_optimized_batch_workers(
     
     // 设置初始请求速率（如果提供）
     if let Some(rate) = initial_rate {
-        set_global_request_rate(rate);
-        if get_verbose_output() {
-            log_println!("🚦 设置初始请求速率: 每秒 {} 个请求", rate);
+        // 保存用户设置的初始速率
+        {
+            let mut user_rate = USER_INITIAL_RATE.lock();
+            *user_rate = Some(rate);
         }
+        
+        // 强制设置全局请求速率为用户指定的值
+        set_global_request_rate(rate);
+        
+        // 记录实际设置后的值，确认是否正确
+        let actual_rate = {
+            let limiter = GLOBAL_RATE_LIMITER.lock();
+            limiter.get_rate()
+        };
+        
+        // 保存用户设置的初始速率，用于自适应调整时参考
+        {
+            let mut min_rate_lock = MIN_RATE.lock();
+            if min_rate_lock.is_none() {
+                // 如果用户没有明确设置最小速率，则将其设置为初始速率的20%
+                *min_rate_lock = Some(rate * 0.2);
+            }
+            
+            let mut max_rate_lock = MAX_RATE.lock();
+            if max_rate_lock.is_none() {
+                // 如果用户没有明确设置最大速率，则将其设置为初始速率的500%
+                *max_rate_lock = Some(rate * 5.0);
+            }
+        }
+        
+        // 输出详细的日志，确认速率已被正确设置
+        log_println!("🚦 用户设置初始请求速率: {} 每秒，实际设置为: {} 每秒", 
+                    rate, actual_rate);
+                    
+        // 将用户设置的初始速率保存到环境变量中，以便后续组件使用
+        std::env::set_var("NEXUS_INITIAL_RATE", rate.to_string());
+    } else {
+        // 如果用户没有提供初始速率，也输出当前使用的默认值
+        let current_rate = {
+            let limiter = GLOBAL_RATE_LIMITER.lock();
+            limiter.get_rate()
+        };
+        log_println!("🚦 使用默认请求速率: 每秒 {} 个请求", current_rate);
     }
     
     // 设置最低请求速率（如果提供）
     if let Some(rate) = min_rate {
         set_min_request_rate(rate);
+        log_println!("🚦 设置最低请求速率: 每秒 {} 个请求", rate);
     }
     
     // 设置最高请求速率（如果提供）
     if let Some(rate) = max_rate {
         set_max_request_rate(rate);
+        log_println!("🚦 设置最高请求速率: 每秒 {} 个请求", rate);
+    }
+    
+    // 显示当前速率设置
+    {
+        let min_rate_value = MIN_RATE.lock().unwrap_or(0.5);
+        let max_rate_value = MAX_RATE.lock().unwrap_or(20.0);
+        let current_rate = GLOBAL_RATE_LIMITER.lock().get_rate();
+        
+        log_println!("📊 请求速率配置: 当前={:.1}, 最小={:.1}, 最大={:.1} 请求/秒", 
+                   current_rate, min_rate_value, max_rate_value);
     }
     
     // 将回调函数包装在Arc中，这样可以在多个任务之间共享
@@ -708,8 +776,21 @@ pub async fn start_optimized_batch_workers(
                 let mut consecutive_successes = 0;
                 let check_interval = std::time::Duration::from_secs(30); // 每30秒检查一次
                 
-                // 初始速率为每秒3个请求
-                let mut current_rate = 3.0;
+                // 获取当前速率，如果用户设置了初始速率则使用用户设置的值
+                let mut current_rate = {
+                    // 首先检查用户是否设置了初始速率
+                    let user_rate = USER_INITIAL_RATE.lock();
+                    if let Some(rate) = *user_rate {
+                        // 用户设置了初始速率，使用它
+                        log_println!("🚦 速率监控使用用户设置的初始速率: 每秒 {} 个请求", rate);
+                        rate
+                    } else {
+                        // 没有用户设置，使用当前全局速率
+                        let rate = GLOBAL_RATE_LIMITER.lock().get_rate();
+                        log_println!("🚦 速率监控使用当前全局速率: 每秒 {} 个请求", rate);
+                        rate
+                    }
+                };
                 
                 loop {
                     tokio::select! {
@@ -751,15 +832,22 @@ pub async fn start_optimized_batch_workers(
                                 _consecutive_429s = 0;
                                 consecutive_successes += 1;
                                 
-                                // 每次检查都增加10%的速率
+                                // 每次检查都增加速率，增加10%的速率
                                 let max_rate = {
                                     let lock = MAX_RATE.lock();
                                     lock.unwrap_or(20.0) // 默认最高每秒20个请求
                                 };
-                                current_rate = f64::min(current_rate * 1.1, max_rate);
-                                set_global_request_rate(current_rate);
-                                if get_verbose_output() {
-                                    log_println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
+                                
+                                // 计算新的速率，增加10%，不要使用较小的增幅
+                                let new_rate = f64::min(current_rate * 1.1, max_rate);
+                                
+                                // 只有当新速率比当前速率高时才设置
+                                if new_rate > current_rate {
+                                    current_rate = new_rate;
+                                    set_global_request_rate(current_rate);
+                                    if get_verbose_output() {
+                                        log_println!("✅ 无429错误，增加请求速率至每秒{}个 (增加10%)", current_rate);
+                                    }
                                 }
                                 
                                 // 重置成功计数，避免过大
@@ -770,7 +858,9 @@ pub async fn start_optimized_batch_workers(
                             
                             // 输出当前请求统计信息
                             if get_verbose_output() {
-                                log_println!("📊 请求速率监控: 当前速率 = 每秒{}个请求, 总请求数 = {}", rate, total_requests);
+                                log_println!("📊 请求速率监控: 当前速率 = 每秒{}个请求, 总请求数 = {}", current_rate, total_requests);
+                            } else if total_requests % 20 == 0 { // 即使不是详细模式，也每20个请求输出一次
+                                log_println!("📊 当前请求速率: 每秒{}个请求 (总请求数: {})", current_rate, total_requests);
                             }
                         }
                     }
