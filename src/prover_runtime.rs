@@ -538,7 +538,9 @@ pub async fn start_optimized_batch_workers(
                     rate, actual_rate);
                     
         // 将用户设置的初始速率保存到环境变量中，以便后续组件使用
-        std::env::set_var("NEXUS_INITIAL_RATE", rate.to_string());
+        unsafe {
+          std::env::set_var("NEXUS_INITIAL_RATE", rate.to_string());
+        }
     } else {
         // 如果用户没有提供初始速率，也输出当前使用的默认值
         let current_rate = {
