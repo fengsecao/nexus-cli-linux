@@ -538,7 +538,9 @@ pub async fn start_optimized_batch_workers(
                     rate, actual_rate);
                     
         // 将用户设置的初始速率保存到环境变量中，以便后续组件使用
-        std::env::set_var("NEXUS_INITIAL_RATE", rate.to_string());
+        unsafe {
+            std::env::set_var("NEXUS_INITIAL_RATE", rate.to_string());
+        }
     } else {
         // 如果用户没有提供初始速率，也输出当前使用的默认值
         let current_rate = {
@@ -800,7 +802,7 @@ pub async fn start_optimized_batch_workers(
                         }
                         _ = tokio::time::sleep(check_interval) => {
                             // 获取当前请求统计信息
-                            let (rate, total_requests) = get_global_request_stats();
+                            let (_rate, total_requests) = get_global_request_stats();
                             
                             // 检查最近是否有429错误（不重置计数器）
                             let recent_429s = get_429_error_count();
@@ -2334,7 +2336,7 @@ async fn run_memory_optimized_node(
     const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 0; // 连续429错误达到此数量时轮转（改为0，确保立即轮转）
     let mut _consecutive_failures = 0; // 改为_consecutive_failures
     let mut proof_count = 0;
-    let mut consecutive_429s = 0; // 跟踪连续429错误
+    let mut _consecutive_429s = 0; // 跟踪连续429错误
     
     // 添加任务获取失败计数，用于触发轮转
     let mut task_fetch_failures = 0;
