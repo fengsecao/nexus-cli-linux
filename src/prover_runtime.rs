@@ -2336,7 +2336,7 @@ async fn run_memory_optimized_node(
     const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 0; // 连续429错误达到此数量时轮转（改为0，确保立即轮转）
     let mut _consecutive_failures = 0; // 改为_consecutive_failures
     let mut proof_count = 0;
-    let mut _consecutive_429s = 0; // 跟踪连续429错误
+    let mut consecutive_429s = 0; // 跟踪连续429错误
     
     // 添加任务获取失败计数，用于触发轮转
     let mut task_fetch_failures = 0;
