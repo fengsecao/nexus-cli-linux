@@ -11,6 +11,10 @@
 
 ## 安装指南
 
+### 环境要求
+- Ubuntu 24.04 或更高版本（编译需要）
+- 至少36GB内存空间
+
 ### 安装Rust环境（如已安装可跳过）
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -36,6 +40,9 @@ cargo build --release
 
 # 启用节点轮转功能
 ./target/release/nexus-network batch-file --file nodes/nodes.txt --rotation
+
+# 高级配置（推荐生产环境使用）
+./target/release/nexus-network batch-file --file nodes/nodes.txt --max-concurrent 8 --proof-interval 5 --rate 1.0 --min-rate 0.2 --max-rate 3.0 --proxy-file proxy.txt --rotation --disable-logs
 ```
 
 ### 节点列表文件格式
@@ -63,6 +70,12 @@ cargo build --release
 | `--proxy-file` | 代理列表文件路径 | - | proxy.txt |
 | `--rotation` | 启用节点轮转功能 | false | 建议启用 |
 | `--refresh-interval` | 显示刷新间隔（秒） | 1 | 1-3 |
+| `--rate` | 设置API请求速率（每秒请求数） | 1.0 | 0.5-2.0 |
+| `--min-rate` | 最小API请求速率（每秒请求数） | 0.2 | 0.2-0.5 |
+| `--max-rate` | 最大API请求速率（每秒请求数） | 5.0 | 2.0-5.0 |
+| `--verbose` | 启用详细日志输出 | false | 调试时启用 |
+| `--disable-logs` | 禁用所有日志输出 | false | 生产环境可启用 |
+| `--env` | 设置运行环境（prod/staging） | prod | prod |
 
 ## 内存优化技巧
 
@@ -70,20 +83,25 @@ cargo build --release
 - 增加 `--proof-interval` 值到5-10秒可减少429错误
 - 使用 `--proxy-file` 参数指定代理文件，实现IP轮换
 - 启用 `--rotation` 参数可在节点成功或遇到429错误时自动切换节点
-
-## 性能对比
-
-| 指标 | 官方版本 | 优化版本 | 提升 |
-|------|---------|---------|------|
-| 单节点内存占用 | 约150MB | 约80MB | 降低约47% |
-| 10节点内存占用 | 约1.5GB | 约700MB | 降低约53% |
+- 设置合理的 `--rate` 值可平衡请求频率和成功率
+- 使用 `--min-rate` 和 `--max-rate` 参数可动态调整请求速率
+- 在大规模部署时开启 `--disable-logs` 可减少I/O开销
 
 ## 常见问题
 
 1. **内存不足错误**：减少 `--max-concurrent` 参数值
 2. **429错误过多**：增加 `--proof-interval` 值，使用代理文件和节点轮转功能
 3. **节点状态显示异常**：使用 `--verbose` 参数查看详细日志
+4. **请求速度过慢**：适当增加 `--rate` 参数值，但注意不要超过限制
+5. **编译错误**：确保使用Ubuntu 24.04或更高版本系统
+
+
+
 
 ## 致谢
 
 特别感谢@hua_web3的代码贡献和Nexus Network社区的支持。
+
+## 联系方式
+
+- 推特：[@zjw023](https://x.com/zjw023)
