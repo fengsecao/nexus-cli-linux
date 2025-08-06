@@ -30,6 +30,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use std::future::Future;
 use std::collections::HashSet;
+use lazy_static;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -385,7 +386,22 @@ pub fn sync_global_active_nodes(active_threads: &Arc<Mutex<HashMap<u64, bool>>>,
     }
 }
 
+// 添加全局节点状态跟踪器
+lazy_static::lazy_static! {
+    static ref NODE_STATES: Mutex<HashMap<u64, String>> = Mutex::new(HashMap::new());
+}
 
+/// 设置节点的当前状态
+pub fn set_node_state(node_id: u64, state: &str) {
+    let mut states = NODE_STATES.lock();
+    states.insert(node_id, state.to_string());
+}
+
+/// 获取节点的当前状态
+pub fn get_node_state(node_id: u64) -> String {
+    let states = NODE_STATES.lock();
+    states.get(&node_id).cloned().unwrap_or_else(|| "等待任务".to_string())
+}
 
 /// Starts authenticated workers that fetch tasks from the orchestrator and process them.
 pub async fn start_authenticated_workers(
@@ -1098,8 +1114,9 @@ async fn node_manager(
                     };
                     
                     if is_active {
-                        // 发送状态更新
-                        status_callback_arc_clone(node_id, format!("[{}] 节点活跃中 - 等待任务处理更新", timestamp));
+                        // 发送状态更新 - 获取节点的当前具体状态
+                        let node_state = get_node_state(node_id);
+                        status_callback_arc_clone(node_id, format!("[{}] 节点活跃中 - {}", timestamp, node_state));
                     } else {
                         // 节点不活跃，尝试标记为活跃
                         let mut threads_guard = active_threads_for_status.lock();
@@ -2456,11 +2473,15 @@ async fn run_memory_optimized_node(
                     
                     // 更新状态显示成功次数
                     update_status(format!("[{}] 获取任务 ({}/5) (成功: {}次)", timestamp, attempt + 1, success_count));
+                    // 更新节点状态
+                    set_node_state(node_id, "获取任务中");
                     
                     // 检查是否有该任务的缓存证明
                     if let Some((cached_proof_bytes, cached_proof_hash, attempts)) = orchestrator.get_cached_proof(&task.task_id) {
                         // 有缓存的证明，直接尝试提交
                         update_status(format!("[{}] 使用缓存证明重试提交 (尝试次数: {})", timestamp, attempts + 1));
+                        // 更新节点状态
+                        set_node_state(node_id, "使用缓存证明提交");
                         
                         // 针对缓存的证明，我们可以进行更多次数的重试，特别是429错误
                         let mut retry_count = 0;
@@ -2531,6 +2552,8 @@ async fn run_memory_optimized_node(
                                         if rotation_data.is_some() {
                                             // 先更新状态，表明节点遇到429错误（但会立即轮转）
                                             update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
+                                            // 更新节点状态
+                                            set_node_state(node_id, "遇到429错误，准备轮转");
                                             
                                             log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
@@ -2680,11 +2703,15 @@ async fn run_memory_optimized_node(
                     
                     // 没有缓存或缓存提交失败，重新生成证明
                     update_status(format!("[{}] 正在生成证明...", timestamp));
+                    // 更新节点状态
+                    set_node_state(node_id, "生成证明中");
                     
                     match crate::prover::authenticated_proving(&task, &environment, client_id.clone()).await {
                         Ok(proof) => {
                             // 证明生成成功，开始提交
                             update_status(format!("[{}] 正在提交证明...", timestamp));
+                            // 更新节点状态
+                            set_node_state(node_id, "提交证明中");
                             
                             // 计算哈希
                     let mut hasher = sha3::Sha3_256::new();
@@ -2780,6 +2807,8 @@ async fn run_memory_optimized_node(
                                         if rotation_data.is_some() {
                                             // 先更新状态，表明节点遇到429错误（但会立即轮转）
                                             update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
+                                            // 更新节点状态
+                                            set_node_state(node_id, "遇到429错误，准备轮转");
                                             
                                             log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
