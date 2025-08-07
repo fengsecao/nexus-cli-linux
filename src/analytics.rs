@@ -27,9 +27,9 @@ pub enum TrackError {
     },
 }
 
-pub const STAGING_MEASUREMENT_ID: &str = "G-T0M0Q3V6WN";
+pub const STAGING_MEASUREMENT_ID: &str = "G-GLH0GMEEFH";
 pub const BETA_MEASUREMENT_ID: &str = "G-GLH0GMEEFH";
-pub const STAGING_API_SECRET: &str = "OI7H53soRMSDWfJf1ittHQ";
+pub const STAGING_API_SECRET: &str = "3wxu8FjVSPqOlxSsZEnBOw";
 pub const BETA_API_SECRET: &str = "3wxu8FjVSPqOlxSsZEnBOw";
 
 pub fn get_measurement_id(environment: &Environment) -> String {

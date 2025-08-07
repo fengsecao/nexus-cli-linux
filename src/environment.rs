@@ -34,7 +34,7 @@ impl Environment {
     pub fn orchestrator_url(&self) -> String {
         match self.env_type {
             EnvironmentType::Local => "http://localhost:50505".to_string(),
-            EnvironmentType::Staging => "https://staging.orchestrator.nexus.xyz".to_string(),
+            EnvironmentType::Staging => "https://production.orchestrator.nexus.xyz".to_string(),
             EnvironmentType::Beta => "https://production.orchestrator.nexus.xyz".to_string(),
         }
     }
