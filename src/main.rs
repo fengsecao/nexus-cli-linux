@@ -174,14 +174,14 @@ struct FixedLineDisplay {
     // 刷新控制
     refresh_interval: Duration,
     last_refresh: Arc<std::sync::Mutex<std::time::Instant>>,
-    // 每节点线程数
-    threads_per_node: usize,
+    // 用户设置的最大并发数（显示用）
+    max_concurrency: usize,
     // 近5分钟成功时间戳滑窗
     recent_successes: Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>,
 }
 
 impl FixedLineDisplay {
-    fn new(refresh_interval_secs: u64, threads_per_node: usize) -> Self {
+    fn new(refresh_interval_secs: u64, max_concurrency: usize) -> Self {
         Self {
             node_lines: Arc::new(RwLock::new(HashMap::new())),
             defragmenter: crate::prover::get_defragmenter(),
@@ -191,7 +191,7 @@ impl FixedLineDisplay {
             refresh_interval: Duration::from_secs(refresh_interval_secs),
             // 设置为过去的时间，确保首次更新时会立即刷新
             last_refresh: Arc::new(std::sync::Mutex::new(std::time::Instant::now() - Duration::from_secs(60))),
-            threads_per_node,
+            max_concurrency,
             recent_successes: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
     }
@@ -270,8 +270,8 @@ impl FixedLineDisplay {
         // 本地统计信息 - 只计算总节点数量，活跃数使用全局计数
         let total_nodes = lines.len();
         
-        println!("📊 状态: {} 总数 | {} 活跃 | {} 成功 | {} 失败", 
-                 total_nodes, global_active_count, successful_count, failed_count);
+        println!("📊 状态: {} 总数 | {} 活跃/{} 并发 | {} 成功 | {} 失败", 
+                 total_nodes, global_active_count, self.max_concurrency, successful_count, failed_count);
         println!("⏱️ 运行时间: {}天 {}小时 {}分钟 {}秒", 
                  self.start_time.elapsed().as_secs() / 86400,
                  (self.start_time.elapsed().as_secs() % 86400) / 3600,
@@ -303,15 +303,15 @@ impl FixedLineDisplay {
         let ram_total_gb = (ram_total_mb as f64) / 1024.0;
         let swap_used_gb = (swap_used_mb as f64) / 1024.0;
         let swap_total_gb = (swap_total_mb as f64) / 1024.0;
-        let bytes_freed_mb = (stats.bytes_freed as f64) / 1024.0 / 1024.0;
+        let bytes_freed_gb = (stats.bytes_freed as f64) / 1024.0 / 1024.0 / 1024.0;
  
         println!("🧠 内存(含交换): {:.1}% ({:.1} GB / {:.1} GB)", 
                  memory_percentage, used_total_gb, total_gb);
-        println!("   RAM: {:.1}/{:.1} GB | SWAP: {:.1}/{:.1} GB | 清理: {} 次 | 释放: {:.1} MB",
+        println!("   RAM: {:.1}/{:.1} GB | SWAP: {:.1}/{:.1} GB | 清理: {} 次 | 释放: {:.1} GB",
                  ram_used_gb, ram_total_gb,
                  swap_used_gb, swap_total_gb,
                  stats.cleanups_performed,
-                 bytes_freed_mb);
+                 bytes_freed_gb);
         
         println!("───────────────────────────────────────────");
         
@@ -325,44 +325,31 @@ impl FixedLineDisplay {
         if active_node_ids.is_empty() {
             println!("⚠️ 警告: 没有检测到活跃节点，请检查节点状态");
         } else {
-            // 首先显示已有状态信息的活跃节点
-            let mut sorted_lines: Vec<_> = lines.iter()
-                .filter(|(id, _)| active_node_ids.contains(id))
-                .collect();
-            sorted_lines.sort_unstable_by_key(|(id, _)| *id);
-            
-            // 只显示最近有更新的10个节点
-            for (node_id, status) in sorted_lines.iter().take(10) {
+            // 统一以全局活跃节点为基准，逐个展示状态（无最近状态时回退至节点当前状态）
+            let mut active_sorted: Vec<u64> = active_node_ids.iter().copied().collect();
+            active_sorted.sort_unstable();
+
+            for node_id in active_sorted.iter().take(30) {
+                // 优先使用最近状态字符串；若无则回退到节点当前状态（等待任务/提交中等）
+                let status = lines.get(node_id).cloned().unwrap_or_else(|| {
+                    let s = crate::prover_runtime::get_node_state(*node_id);
+                    format!("{}", s)
+                });
                 println!("节点-{}: {}", node_id, status);
             }
-            
-            // 然后显示没有状态信息的活跃节点，但最多只显示10-已显示节点数量个
-            let nodes_with_status: HashSet<u64> = sorted_lines.iter().map(|(id, _)| **id).collect();
-            let mut missing_nodes: Vec<u64> = active_node_ids.iter()
-                .filter(|id| !nodes_with_status.contains(id))
-                .copied()
-                .collect();
-            missing_nodes.sort_unstable();
-            
-            let displayed_count = sorted_lines.len().min(10);
-            let remaining_slots = 10 - displayed_count;
-            
-            for node_id in missing_nodes.iter().take(remaining_slots) {
-                println!("节点-{}: 已添加到活跃列表，等待状态更新...", node_id);
-            }
-            
+
             // 如果有更多节点，显示一个摘要
-            let total_active = active_node_ids.len();
-            if total_active > 10 {
-                println!("... 以及 {} 个其他节点 (总共 {} 个活跃节点)", total_active - 10, total_active);
+            let total_active = active_sorted.len();
+            if total_active > 30 {
+                println!("... 以及 {} 个其他节点 (总共 {} 个活跃节点)", total_active - 30, total_active);
             }
         }
         
         println!("───────────────────────────────────────────");
         // 获取当前请求速率
         let (current_rate, _) = crate::prover_runtime::get_global_request_stats();
-        println!("刷新间隔: {}秒 | 线程: {}/节点 | 请求速率: {:.1}次/秒 | 按Ctrl+C退出", 
-                 self.refresh_interval.as_secs(), self.threads_per_node, current_rate);
+        println!("刷新间隔: {}秒 | 线程: {} | 请求速率: {:.1}次/秒 | 按Ctrl+C退出", 
+                 self.refresh_interval.as_secs(), self.max_concurrency, current_rate);
         
         // 归还缓存字符串
         self.defragmenter.return_string(time_str).await;
@@ -753,7 +740,7 @@ async fn start_batch_processing(
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
-    let display = Arc::new(FixedLineDisplay::new(refresh_interval, workers_per_node));
+    let display = Arc::new(FixedLineDisplay::new(refresh_interval, max_concurrent));
     display.render_display().await;
     
     // 创建批处理工作器
