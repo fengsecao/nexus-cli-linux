@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, Mutex};
 use once_cell::sync::Lazy;
 use lazy_static::lazy_static;
+use sha3::{Digest, Keccak256};
 
 #[derive(Error, Debug)]
 pub enum ProverError {
@@ -173,7 +174,7 @@ pub async fn prove_anonymously(
         )));
     }
 
-    // Send analytics event for anonymous proof - return analytics error but don't fail the proof
+    // Send analytics event for anonymous proof - do not fail proving on analytics error
     if let Err(e) = track(
         "cli_proof_anon_v3".to_string(),
         json!({
@@ -187,9 +188,7 @@ pub async fn prove_anonymously(
     )
     .await
     {
-        // Log locally but also return the analytics error so it can be classified and displayed
         debug!("Analytics tracking failed (non-critical): {}", e);
-        return Err(ProverError::Analytics(e.to_string()));
     }
 
     Ok(proof)
@@ -220,17 +219,34 @@ pub async fn authenticated_proving(
             (view, proof, input)
         }
         "fib_input_initial" => {
-            let inputs = get_triple_public_input(task)?;
-            // 我们需要获取一个拥有所有权的Stwo实例
-            // 创建一个新的Stwo实例而不是使用Arc中的共享引用
-            let stwo_instance = get_initial_stwo_prover()?;
-            
-            // 使用拥有所有权的实例调用prove_with_input
-            let (view, proof) = stwo_instance.prove_with_input::<(), (u32, u32, u32)>(&(), &inputs)
-                .map_err(|e| {
-                    ProverError::Stwo(format!("Failed to run fib_input_initial prover: {}", e))
-                })?;
-            (view, proof, inputs.0)
+            // 支持多输入（保持向后兼容：若仅有legacy字段则只处理一个输入）
+            let all_inputs = task.all_inputs();
+            if all_inputs.is_empty() {
+                return Err(ProverError::MalformedTask("No inputs provided for task".to_string()));
+            }
+
+            let mut final_view = None;
+            let mut final_proof = None;
+
+            for (idx, input_bytes) in all_inputs.iter().enumerate() {
+                let inputs = parse_triple_public_input(input_bytes)?;
+                let stwo_instance = get_initial_stwo_prover()?;
+                let (view, proof) = stwo_instance
+                    .prove_with_input::<(), (u32, u32, u32)>(&(), &inputs)
+                    .map_err(|e| ProverError::Stwo(format!(
+                        "Failed to run fib_input_initial prover for input {}: {}",
+                        idx, e
+                    )))?;
+
+                final_view = Some(view);
+                final_proof = Some(proof);
+            }
+
+            let view = final_view.ok_or_else(|| ProverError::Stwo("Failed to generate proof view".to_string()))?;
+            let proof = final_proof.ok_or_else(|| ProverError::Stwo("Failed to generate proof".to_string()))?;
+            // 用第一个输入的 n 作为 analytics_input（与旧逻辑兼容）
+            let first_inputs = parse_triple_public_input(&all_inputs[0])?;
+            (view, proof, first_inputs.0)
         }
         _ => {
             return Err(ProverError::MalformedTask(format!(
@@ -251,7 +267,7 @@ pub async fn authenticated_proving(
         )));
     }
 
-    // Send analytics event for authenticated proof
+    // Send analytics event for authenticated proof - do not fail proving on analytics error
     let analytics_data = match task.program_id.as_str() {
         "fast-fib" => json!({
             "program_name": "fast-fib",
@@ -259,19 +275,26 @@ pub async fn authenticated_proving(
             "task_id": task.task_id,
         }),
         "fib_input_initial" => {
-            let inputs = get_triple_public_input(task)?;
-            json!({
-                "program_name": "fib_input_initial",
-                "public_input": inputs.0,
-                "public_input_2": inputs.1,
-                "public_input_3": inputs.2,
-                "task_id": task.task_id,
-            })
+            let all = task.all_inputs();
+            if !all.is_empty() && all[0].len() >= 12 {
+                let inputs = parse_triple_public_input(&all[0])?;
+                json!({
+                    "program_name": "fib_input_initial",
+                    "public_input": inputs.0,
+                    "public_input_2": inputs.1,
+                    "public_input_3": inputs.2,
+                    "task_id": task.task_id,
+                })
+            } else {
+                json!({
+                    "program_name": "fib_input_initial",
+                    "task_id": task.task_id,
+                })
+            }
         }
         _ => unreachable!(),
     };
 
-    // Send analytics event for authenticated proof - return analytics error but don't fail the proof
     if let Err(e) = track(
         "cli_proof_node_v3".to_string(),
         analytics_data,
@@ -280,9 +303,7 @@ pub async fn authenticated_proving(
     )
     .await
     {
-        // Log locally but also return the analytics error so it can be classified and displayed
         debug!("Analytics tracking failed (non-critical): {}", e);
-        return Err(ProverError::Analytics(e.to_string()));
     }
 
     Ok(proof)
@@ -298,26 +319,20 @@ fn get_string_public_input(task: &Task) -> Result<u32, ProverError> {
     Ok(task.public_inputs[0] as u32)
 }
 
-fn get_triple_public_input(task: &Task) -> Result<(u32, u32, u32), ProverError> {
-    if task.public_inputs.len() < 12 {
+fn parse_triple_public_input(input_data: &[u8]) -> Result<(u32, u32, u32), ProverError> {
+    if input_data.len() < 12 {
         return Err(ProverError::MalformedTask(
             "Public inputs buffer too small, expected at least 12 bytes for three u32 values"
                 .to_string(),
         ));
     }
-
-    // Read all three u32 values (little-endian) from the buffer
     let mut bytes = [0u8; 4];
-
-    bytes.copy_from_slice(&task.public_inputs[0..4]);
+    bytes.copy_from_slice(&input_data[0..4]);
     let n = u32::from_le_bytes(bytes);
-
-    bytes.copy_from_slice(&task.public_inputs[4..8]);
+    bytes.copy_from_slice(&input_data[4..8]);
     let init_a = u32::from_le_bytes(bytes);
-
-    bytes.copy_from_slice(&task.public_inputs[8..12]);
+    bytes.copy_from_slice(&input_data[8..12]);
     let init_b = u32::from_le_bytes(bytes);
-
     Ok((n, init_a, init_b))
 }
 
