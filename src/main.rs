@@ -759,8 +759,55 @@ async fn start_batch_processing(
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
-    let display = Arc::new(FixedLineDisplay::new(refresh_interval, max_concurrent, Arc::new(HashMap::new())));
+    let labels_file = if let Some(path) = file_path.rsplit_once('.') {
+        Some(path.0.to_string() + ".labels")
+    } else {
+        None
+    };
+
+    let labels_map: Arc<std::collections::HashMap<u64, String>> = Arc::new(
+        if let Some(path) = labels_file {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    let mut map = std::collections::HashMap::new();
+                    for (lineno, line) in content.lines().enumerate() {
+                        let s = line.trim();
+                        if s.is_empty() || s.starts_with('#') { continue; }
+                        // 支持三种分隔: 逗号/空白/制表
+                        let parts: Vec<&str> = s.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).collect();
+                        if parts.len() >= 2 {
+                            if let Ok(id) = parts[0].parse::<u64>() {
+                                map.insert(id, parts[1].to_string());
+                            }
+                        } else {
+                            // 行内只有node_id则忽略，保持兼容
+                            let _ = lineno; // no-op
+                        }
+                    }
+                    map
+                }
+                Err(_) => std::collections::HashMap::new(),
+            }
+        } else {
+            std::collections::HashMap::new()
+        }
+    );
+ 
+    let display = Arc::new(FixedLineDisplay::new(refresh_interval, max_concurrent, labels_map.clone()));
     display.render_display().await;
+
+    // 周期性刷新显示（即使没有状态事件也会刷新）
+    {
+        let display_clone = display.clone();
+        let interval_secs = std::cmp::max(1, refresh_interval) as u64;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                ticker.tick().await;
+                display_clone.render_display().await;
+            }
+        });
+    }
     
     // 创建批处理工作器
     let (shutdown_sender, _) = broadcast::channel(1);

@@ -230,7 +230,7 @@ pub async fn authenticated_proving(
 
             for (idx, input_bytes) in all_inputs.iter().enumerate() {
                 let inputs = parse_triple_public_input(input_bytes)?;
-                let stwo_instance = get_initial_stwo_prover()?;
+            let stwo_instance = get_initial_stwo_prover()?;
                 let (view, proof) = stwo_instance
                     .prove_with_input::<(), (u32, u32, u32)>(&(), &inputs)
                     .map_err(|e| ProverError::Stwo(format!(
@@ -278,13 +278,13 @@ pub async fn authenticated_proving(
             let all = task.all_inputs();
             if !all.is_empty() && all[0].len() >= 12 {
                 let inputs = parse_triple_public_input(&all[0])?;
-                json!({
-                    "program_name": "fib_input_initial",
-                    "public_input": inputs.0,
-                    "public_input_2": inputs.1,
-                    "public_input_3": inputs.2,
-                    "task_id": task.task_id,
-                })
+            json!({
+                "program_name": "fib_input_initial",
+                "public_input": inputs.0,
+                "public_input_2": inputs.1,
+                "public_input_3": inputs.2,
+                "task_id": task.task_id,
+            })
             } else {
                 json!({
                     "program_name": "fib_input_initial",

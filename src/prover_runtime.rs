@@ -3066,14 +3066,14 @@ async fn run_memory_optimized_node(
                         consecutive_429s = 0; // 重置连续429计数
                         task_fetch_failures += 1; // 增加任务获取失败计数
                         
-                        // 重置429计数
+                                                // 重置429计数
                         rate_limit_tracker.reset_429_count(node_id).await;
                         
-                        // 立即轮转（启用了轮转时）
-                        if rotation_data.is_some() {
-                            update_status(format!("[{}] ❌ 获取任务失败: {} -> 立即轮转", timestamp, error_str));
-                            log_println!("🔄 节点-{}: 获取任务失败，立即触发轮转", node_id);
-                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "获取任务失败-立即轮转", &node_tx, &active_threads).await;
+                        // 失败重试策略：允许前2次快速重试，第3次开始轮转
+                        if rotation_data.is_some() && attempt >= 2 {
+                            update_status(format!("[{}] ❌ 获取任务失败: {} (第 {}/{}) -> 轮转", timestamp, error_str, attempt, MAX_TASK_RETRIES));
+                            log_println!("🔄 节点-{}: 获取任务失败已达到阈值，触发轮转", node_id);
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "获取任务失败-达阈值轮转", &node_tx, &active_threads).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
                                     update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));

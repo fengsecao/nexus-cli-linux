@@ -171,7 +171,7 @@ pub async fn fetch_prover_tasks(
     loop {
         tokio::select! {
             _ = shutdown.recv() => break,
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 let tasks_in_queue = TASK_QUEUE_SIZE - sender.capacity();
 
                 // Log queue status every QUEUE_LOG_INTERVAL seconds regardless of queue level
@@ -462,10 +462,14 @@ async fn handle_fetch_error(
     
     // Classify error and determine appropriate response
     let (message, error_type, log_level) = match error {
-        OrchestratorError::Http { status, message } => {
+        OrchestratorError::Http { status, message, .. } => {
             if status == 429 {
                 // Rate limiting requires special handling
-                state.increase_backoff_for_rate_limit();
+                if let Some(retry_after) = error.get_retry_after_seconds() {
+                    state.set_backoff_from_server(retry_after);
+                } else {
+                    state.increase_backoff_for_rate_limit();
+                }
                 state.increment_429_count(); // 保留原有的计数器
                 
                 // 增加节点特定的429计数
