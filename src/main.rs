@@ -178,10 +178,14 @@ struct FixedLineDisplay {
     max_concurrency: usize,
     // 近5分钟成功时间戳滑窗
     recent_successes: Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>,
+    // 节点标签（邮箱/evm）
+    labels: Arc<std::collections::HashMap<u64, String>>,
+    // 最近错误消息（最多5条）
+    recent_errors: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
 }
 
 impl FixedLineDisplay {
-    fn new(refresh_interval_secs: u64, max_concurrency: usize) -> Self {
+    fn new(refresh_interval_secs: u64, max_concurrency: usize, labels: Arc<std::collections::HashMap<u64, String>>) -> Self {
         Self {
             node_lines: Arc::new(RwLock::new(HashMap::new())),
             defragmenter: crate::prover::get_defragmenter(),
@@ -193,6 +197,8 @@ impl FixedLineDisplay {
             last_refresh: Arc::new(std::sync::Mutex::new(std::time::Instant::now() - Duration::from_secs(60))),
             max_concurrency,
             recent_successes: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            labels,
+            recent_errors: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
     }
 
@@ -246,6 +252,13 @@ impl FixedLineDisplay {
         let first = dq.front().copied().unwrap_or(now);
         let window_secs = now.saturating_duration_since(first).as_secs_f64().min(5.0 * 60.0).max(1.0);
         (dq.len() as f64) / (window_secs / 60.0)
+    }
+
+    // 记录错误消息（最多保留5条）
+    fn record_error(&self, msg: String) {
+        let mut dq = self.recent_errors.lock().unwrap();
+        dq.push_back(msg);
+        while dq.len() > 5 { dq.pop_front(); }
     }
 
     async fn render_display(&self) {
@@ -314,38 +327,44 @@ impl FixedLineDisplay {
                  bytes_freed_gb);
         
         println!("───────────────────────────────────────────");
-        
-        // 获取全局活跃节点列表
+        // 获取全局活跃节点列表并显示最多30行（带标签）
         let active_node_ids = {
             let nodes = crate::prover_runtime::GLOBAL_ACTIVE_NODES.lock();
             nodes.clone()
         };
-        
-        // 修改显示逻辑：确保显示所有全局活跃节点，不仅仅是有状态更新的节点
         if active_node_ids.is_empty() {
             println!("⚠️ 警告: 没有检测到活跃节点，请检查节点状态");
         } else {
-            // 统一以全局活跃节点为基准，逐个展示状态（无最近状态时回退至节点当前状态）
             let mut active_sorted: Vec<u64> = active_node_ids.iter().copied().collect();
             active_sorted.sort_unstable();
-
             for node_id in active_sorted.iter().take(30) {
-                // 优先使用最近状态字符串；若无则回退到节点当前状态（等待任务/提交中等）
                 let status = lines.get(node_id).cloned().unwrap_or_else(|| {
                     let s = crate::prover_runtime::get_node_state(*node_id);
                     format!("{}", s)
                 });
-                println!("节点-{}: {}", node_id, status);
+                if let Some(label) = self.labels.get(node_id) {
+                    println!("节点-{} [{}]: {}", node_id, label, status);
+                } else {
+                    println!("节点-{}: {}", node_id, status);
+                }
             }
-
-            // 如果有更多节点，显示一个摘要
             let total_active = active_sorted.len();
             if total_active > 30 {
                 println!("... 以及 {} 个其他节点 (总共 {} 个活跃节点)", total_active - 30, total_active);
             }
         }
-        
         println!("───────────────────────────────────────────");
+        // 最近错误（最多5条）
+        {
+            let errs = self.recent_errors.lock().unwrap();
+            if !errs.is_empty() {
+                println!("最近错误:");
+                for msg in errs.iter().rev().take(5) {
+                    println!("❌ {}", msg);
+                }
+                println!("───────────────────────────────────────────");
+            }
+        }
         // 获取当前请求速率
         let (current_rate, _) = crate::prover_runtime::get_global_request_stats();
         println!("刷新间隔: {}秒 | 请求速率: {:.1}次/秒 | 按Ctrl+C退出", 
@@ -740,7 +759,7 @@ async fn start_batch_processing(
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
-    let display = Arc::new(FixedLineDisplay::new(refresh_interval, max_concurrent));
+    let display = Arc::new(FixedLineDisplay::new(refresh_interval, max_concurrent, Arc::new(HashMap::new())));
     display.render_display().await;
     
     // 创建批处理工作器
@@ -790,6 +809,10 @@ async fn start_batch_processing(
                       (event.msg.contains("Error submitting proof") || 
                        event.msg.contains("Failed to submit proof")) {
                 let _ = display_clone.failure_count.fetch_add(1, Ordering::Relaxed);
+            }
+            // 记录错误信息（任意 Error 事件）
+            if event.event_type == crate::events::EventType::Error {
+                display_clone.record_error(format!("[{}] {}", event.timestamp, event.msg));
             }
             
             // 只在调试模式下输出事件信息
