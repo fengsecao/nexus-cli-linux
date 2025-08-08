@@ -2713,14 +2713,10 @@ async fn run_memory_optimized_node(
                             // 更新节点状态
                             set_node_state(node_id, "提交证明中");
                             
-                            // 计算哈希
-                    let mut hasher = sha3::Sha3_256::new();
-                            // 将Proof转换为Vec<u8>
+                            // 计算哈希（与 0.10.4 保持一致使用 Keccak256）
                             let proof_bytes = postcard::to_allocvec(&proof)
                                 .unwrap_or_else(|_| Vec::new());
-                            hasher.update(&proof_bytes);
-                    let hash = hasher.finalize();
-                    let proof_hash = format!("{:x}", hash);
+                            let proof_hash = format!("{:x}", sha3::Keccak256::digest(&proof_bytes));
                             
                             // 提交证明 - 克隆签名密钥以避免所有权问题
                             let mut retry_count = 0;
@@ -3390,7 +3386,7 @@ mod tests {
         let mut mock = MockOrchestrator::new();
         mock.expect_get_proof_task().returning_st(move |_, _| {
             // Simulate a task with dummy data
-            let task = Task::new(i.to_string(), format!("Task {}", i), vec![1, 2, 3]);
+            let task = Task::new(i.to_string(), format!("Task {}", i), vec![1, 2, 3], crate::task::TaskType::ProofRequired);
             i += 1;
             Ok(task)
         });
