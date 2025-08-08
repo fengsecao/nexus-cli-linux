@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, Mutex};
 use once_cell::sync::Lazy;
 use lazy_static::lazy_static;
-use sha3::{Digest, Keccak256};
+
 
 #[derive(Error, Debug)]
 pub enum ProverError {

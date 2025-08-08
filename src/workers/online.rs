@@ -152,6 +152,10 @@ impl TaskFetchState {
     pub fn get_429_count(&self) -> u32 {
         self.consecutive_429s
     }
+
+    pub fn set_backoff_from_server(&mut self, seconds: u32) {
+        self.backoff_duration = Duration::from_secs(seconds as u64);
+    }
 }
 
 /// Fetches tasks from the orchestrator and place them in the task queue.
@@ -858,7 +862,7 @@ async fn handle_submission_error(
     
     // Determine the error type and log level based on the error
     let (message, log_level) = match error {
-        OrchestratorError::Http { status, message } => {
+        OrchestratorError::Http { status, message, .. } => {
             if status == 429 {
                 // 增加429计数
                 let count = if let Some(node_id) = node_id {
