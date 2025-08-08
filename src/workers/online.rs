@@ -466,7 +466,7 @@ async fn handle_fetch_error(
     
     // Classify error and determine appropriate response
     let (message, error_type, log_level) = match error {
-        OrchestratorError::Http { status, message, .. } => {
+        OrchestratorError::Http { status, ref message, .. } => {
             if status == 429 {
                 // Rate limiting requires special handling
                 if let Some(retry_after) = error.get_retry_after_seconds() {
@@ -862,7 +862,7 @@ async fn handle_submission_error(
     
     // Determine the error type and log level based on the error
     let (message, log_level) = match error {
-        OrchestratorError::Http { status, message, .. } => {
+        OrchestratorError::Http { status, ref message, .. } => {
             if status == 429 {
                 // 增加429计数
                 let count = if let Some(node_id) = node_id {
@@ -897,8 +897,8 @@ async fn handle_submission_error(
                 (
                     format!("HTTP error {} for task {}: {} (成功: {}次)", status, task.task_id, message, success_count),
                     LogLevel::Error,
-            )
-        }
+                )
+            }
         }
         _ => {
             // 重置429计数
@@ -906,9 +906,9 @@ async fn handle_submission_error(
                 rate_limit_tracker.reset_429_count(node_id).await;
             }
             
-            // Network errors
+            // Non-HTTP errors
             (
-                format!("Network error for task {}: {} (成功: {}次)", task.task_id, error, success_count),
+                format!("Submission error for task {}: {} (成功: {}次)", task.task_id, error, success_count),
                 LogLevel::Error,
             )
         }
