@@ -2357,7 +2357,7 @@ async fn run_memory_optimized_node(
     
     // 添加任务获取失败计数，用于触发轮转
     let mut task_fetch_failures = 0;
-    const MAX_TASK_FETCH_FAILURES_BEFORE_ROTATION: usize = 3; // 连续获取任务失败3次后触发轮转
+    const MAX_TASK_FETCH_FAILURES_BEFORE_ROTATION: usize = 1; // 连续获取任务失败1次后触发轮转（立刻轮转）
     
     // 使用传入的事件发送器
     let event_sender = event_sender.clone();

@@ -174,10 +174,14 @@ struct FixedLineDisplay {
     // 刷新控制
     refresh_interval: Duration,
     last_refresh: Arc<std::sync::Mutex<std::time::Instant>>,
+    // 每节点线程数
+    threads_per_node: usize,
+    // 近5分钟成功时间戳滑窗
+    recent_successes: Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>,
 }
 
 impl FixedLineDisplay {
-    fn new(refresh_interval_secs: u64) -> Self {
+    fn new(refresh_interval_secs: u64, threads_per_node: usize) -> Self {
         Self {
             node_lines: Arc::new(RwLock::new(HashMap::new())),
             defragmenter: crate::prover::get_defragmenter(),
@@ -187,6 +191,8 @@ impl FixedLineDisplay {
             refresh_interval: Duration::from_secs(refresh_interval_secs),
             // 设置为过去的时间，确保首次更新时会立即刷新
             last_refresh: Arc::new(std::sync::Mutex::new(std::time::Instant::now() - Duration::from_secs(60))),
+            threads_per_node,
+            recent_successes: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
     }
 
@@ -221,6 +227,27 @@ impl FixedLineDisplay {
         }
     }
 
+    // 记录一次成功并维护5分钟滑窗
+    fn record_success(&self) {
+        let mut dq = self.recent_successes.lock().unwrap();
+        let now = std::time::Instant::now();
+        dq.push_back(now);
+        let cutoff = now - Duration::from_secs(5 * 60);
+        while let Some(&front) = dq.front() {
+            if front < cutoff { dq.pop_front(); } else { break; }
+        }
+    }
+
+    // 计算近5分钟平均每分钟效率
+    fn recent_efficiency_per_min(&self) -> f64 {
+        let dq = self.recent_successes.lock().unwrap();
+        if dq.is_empty() { return 0.0; }
+        let now = std::time::Instant::now();
+        let first = dq.front().copied().unwrap_or(now);
+        let window_secs = now.saturating_duration_since(first).as_secs_f64().min(5.0 * 60.0).max(1.0);
+        (dq.len() as f64) / (window_secs / 60.0)
+    }
+
     async fn render_display(&self) {
         // 渲染当前状态
         print!("\x1b[2J\x1b[H"); // 清屏并移动到顶部
@@ -250,18 +277,41 @@ impl FixedLineDisplay {
                  (self.start_time.elapsed().as_secs() % 86400) / 3600,
                  (self.start_time.elapsed().as_secs() % 3600) / 60,
                  self.start_time.elapsed().as_secs() % 60);
+        // 效率：每分钟成功次数
+        let elapsed_minutes = (self.start_time.elapsed().as_secs_f64() / 60.0).max(0.0001);
+        let efficiency_per_min = (successful_count as f64) / elapsed_minutes;
+        // 近5分钟滑窗效率
+        let recent_eff = self.recent_efficiency_per_min();
+        println!("⚡ 效率: {:.2} 次/分钟 | 近5分钟: {:.2} 次/分钟", efficiency_per_min, recent_eff);
         
-        // 显示内存统计
+        // 显示内存统计（包含RAM+SWAP）
         let stats = self.defragmenter.get_stats().await;
-        let memory_info = crate::system::get_memory_info();
-        let memory_percentage = (memory_info.0 as f64 / memory_info.1 as f64) * 100.0;
-        
-        println!("🧠 内存: {:.1}% ({} MB / {} MB) | 清理次数: {} | 释放: {} KB", 
-                memory_percentage, 
-               memory_info.0 / 1024 / 1024,  
-               memory_info.1 / 1024 / 1024,
-                stats.cleanups_performed,
-                stats.bytes_freed / 1024);
+        let (used_total_mb, total_mb) = crate::system::get_system_memory_with_swap_mb();
+        let memory_percentage = if total_mb > 0 { (used_total_mb as f64 / total_mb as f64) * 100.0 } else { 0.0 };
+        // 另外显示单独RAM与SWAP（可选更详细诊断）
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let ram_used_mb = (sys.used_memory() as f64 / 1_048_576.0).round() as i32;
+        let ram_total_mb = (sys.total_memory() as f64 / 1_048_576.0).round() as i32;
+        let swap_used_mb = (sys.used_swap() as f64 / 1_048_576.0).round() as i32;
+        let swap_total_mb = (sys.total_swap() as f64 / 1_048_576.0).round() as i32;
+
+        // 转为GB并保留1位小数
+        let used_total_gb = (used_total_mb as f64) / 1024.0;
+        let total_gb = (total_mb as f64) / 1024.0;
+        let ram_used_gb = (ram_used_mb as f64) / 1024.0;
+        let ram_total_gb = (ram_total_mb as f64) / 1024.0;
+        let swap_used_gb = (swap_used_mb as f64) / 1024.0;
+        let swap_total_gb = (swap_total_mb as f64) / 1024.0;
+        let bytes_freed_mb = (stats.bytes_freed as f64) / 1024.0 / 1024.0;
+ 
+        println!("🧠 内存(含交换): {:.1}% ({:.1} GB / {:.1} GB)", 
+                 memory_percentage, used_total_gb, total_gb);
+        println!("   RAM: {:.1}/{:.1} GB | SWAP: {:.1}/{:.1} GB | 清理: {} 次 | 释放: {:.1} MB",
+                 ram_used_gb, ram_total_gb,
+                 swap_used_gb, swap_total_gb,
+                 stats.cleanups_performed,
+                 bytes_freed_mb);
         
         println!("───────────────────────────────────────────");
         
@@ -311,8 +361,8 @@ impl FixedLineDisplay {
         println!("───────────────────────────────────────────");
         // 获取当前请求速率
         let (current_rate, _) = crate::prover_runtime::get_global_request_stats();
-        println!("刷新间隔: {}秒 | 请求速率: {:.1}次/秒 | 按Ctrl+C退出", 
-                 self.refresh_interval.as_secs(), current_rate);
+        println!("刷新间隔: {}秒 | 线程: {}/节点 | 请求速率: {:.1}次/秒 | 按Ctrl+C退出", 
+                 self.refresh_interval.as_secs(), self.threads_per_node, current_rate);
         
         // 归还缓存字符串
         self.defragmenter.return_string(time_str).await;
@@ -703,7 +753,7 @@ async fn start_batch_processing(
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
-    let display = Arc::new(FixedLineDisplay::new(refresh_interval));
+    let display = Arc::new(FixedLineDisplay::new(refresh_interval, workers_per_node));
     display.render_display().await;
     
     // 创建批处理工作器
@@ -747,6 +797,8 @@ async fn start_batch_processing(
             // 更新成功/失败计数
             if event.event_type == crate::events::EventType::ProofSubmitted {
                 let _ = display_clone.success_count.fetch_add(1, Ordering::Relaxed);
+                // 记录近5分钟成功时间戳
+                display_clone.record_success();
             } else if event.event_type == crate::events::EventType::Error &&
                       (event.msg.contains("Error submitting proof") || 
                        event.msg.contains("Failed to submit proof")) {
