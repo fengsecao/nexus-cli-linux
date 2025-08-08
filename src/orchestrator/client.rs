@@ -36,6 +36,13 @@ static COUNTRY_CODE: OnceCell<String> = OnceCell::new();
 // 添加一个常量控制日志输出
 const VERBOSE_LOGS: bool = false;
 
+static BUILD_TIMESTAMP: &str = match option_env!("BUILD_TIMESTAMP") {
+    Some(timestamp) => timestamp,
+    None => "Build timestamp not available",
+};
+
+const USER_AGENT: &str = concat!("nexus-cli/", env!("CARGO_PKG_VERSION"));
+
 /// 代理信息结构
 #[derive(Clone, Debug)]
 struct ProxyInfo {
@@ -521,6 +528,8 @@ impl OrchestratorClient {
         let response = client
             .get(url)
             .header("Content-Type", "application/octet-stream")
+            .header("User-Agent", USER_AGENT)
+            .header("X-Build-Timestamp", BUILD_TIMESTAMP)
             .body(body)
             .send()
             .await?;
