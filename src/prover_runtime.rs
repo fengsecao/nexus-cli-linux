@@ -3069,9 +3069,28 @@ async fn run_memory_optimized_node(
                         // 重置429计数
                         rate_limit_tracker.reset_429_count(node_id).await;
                         
-                        update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
-                            timestamp, error_str, attempt, MAX_TASK_RETRIES));
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        // 立即轮转（启用了轮转时）
+                        if rotation_data.is_some() {
+                            update_status(format!("[{}] ❌ 获取任务失败: {} -> 立即轮转", timestamp, error_str));
+                            log_println!("🔄 节点-{}: 获取任务失败，立即触发轮转", node_id);
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "获取任务失败-立即轮转", &node_tx, &active_threads).await;
+                            if should_rotate {
+                                if let Some(msg) = status_msg {
+                                    update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
+                                }
+                                // 显式停止当前节点
+                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                return;
+                            } else {
+                                // 轮转失败，短暂等待
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                        } else {
+                            update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
+                                timestamp, error_str, attempt, MAX_TASK_RETRIES));
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
                     }
                     attempt += 1;
                 }

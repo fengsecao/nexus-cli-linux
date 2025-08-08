@@ -348,8 +348,8 @@ impl FixedLineDisplay {
         println!("───────────────────────────────────────────");
         // 获取当前请求速率
         let (current_rate, _) = crate::prover_runtime::get_global_request_stats();
-        println!("刷新间隔: {}秒 | 线程: {} | 请求速率: {:.1}次/秒 | 按Ctrl+C退出", 
-                 self.refresh_interval.as_secs(), self.max_concurrency, current_rate);
+        println!("刷新间隔: {}秒 | 请求速率: {:.1}次/秒 | 按Ctrl+C退出", 
+                 self.refresh_interval.as_secs(), current_rate);
         
         // 归还缓存字符串
         self.defragmenter.return_string(time_str).await;
