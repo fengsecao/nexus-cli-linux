@@ -2357,7 +2357,7 @@ async fn run_memory_optimized_node(
     
     // 添加任务获取失败计数，用于触发轮转
     let mut task_fetch_failures = 0;
-    const MAX_TASK_FETCH_FAILURES_BEFORE_ROTATION: usize = 3; // 连续获取任务失败3次后触发轮转
+    const MAX_TASK_FETCH_FAILURES_BEFORE_ROTATION: usize = 1; // 连续获取任务失败1次后触发轮转（立刻轮转）
     
     // 使用传入的事件发送器
     let event_sender = event_sender.clone();
@@ -3066,12 +3066,31 @@ async fn run_memory_optimized_node(
                         consecutive_429s = 0; // 重置连续429计数
                         task_fetch_failures += 1; // 增加任务获取失败计数
                         
-                        // 重置429计数
+                                                // 重置429计数
                         rate_limit_tracker.reset_429_count(node_id).await;
                         
-                        update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
-                            timestamp, error_str, attempt, MAX_TASK_RETRIES));
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        // 失败重试策略：允许前2次快速重试，第3次开始轮转
+                        if rotation_data.is_some() && attempt >= 2 {
+                            update_status(format!("[{}] ❌ 获取任务失败: {} (第 {}/{}) -> 轮转", timestamp, error_str, attempt, MAX_TASK_RETRIES));
+                            log_println!("🔄 节点-{}: 获取任务失败已达到阈值，触发轮转", node_id);
+                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "获取任务失败-达阈值轮转", &node_tx, &active_threads).await;
+                            if should_rotate {
+                                if let Some(msg) = status_msg {
+                                    update_status(format!("{}\n🔄 节点已轮转，当前节点处理结束", msg));
+                                }
+                                // 显式停止当前节点
+                                let _ = node_tx.send(NodeManagerCommand::NodeStopped(node_id)).await;
+                                should_stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                                return;
+                            } else {
+                                // 轮转失败，短暂等待
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                        } else {
+                            update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
+                                timestamp, error_str, attempt, MAX_TASK_RETRIES));
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
                     }
                     attempt += 1;
                 }

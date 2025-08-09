@@ -152,6 +152,10 @@ impl TaskFetchState {
     pub fn get_429_count(&self) -> u32 {
         self.consecutive_429s
     }
+
+    pub fn set_backoff_from_server(&mut self, seconds: u32) {
+        self.backoff_duration = Duration::from_secs(seconds as u64);
+    }
 }
 
 /// Fetches tasks from the orchestrator and place them in the task queue.
@@ -171,7 +175,7 @@ pub async fn fetch_prover_tasks(
     loop {
         tokio::select! {
             _ = shutdown.recv() => break,
-            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {
                 let tasks_in_queue = TASK_QUEUE_SIZE - sender.capacity();
 
                 // Log queue status every QUEUE_LOG_INTERVAL seconds regardless of queue level
@@ -462,10 +466,14 @@ async fn handle_fetch_error(
     
     // Classify error and determine appropriate response
     let (message, error_type, log_level) = match error {
-        OrchestratorError::Http { status, message } => {
+        OrchestratorError::Http { status, ref message, .. } => {
             if status == 429 {
                 // Rate limiting requires special handling
-                state.increase_backoff_for_rate_limit();
+                if let Some(retry_after) = error.get_retry_after_seconds() {
+                    state.set_backoff_from_server(retry_after);
+                } else {
+                    state.increase_backoff_for_rate_limit();
+                }
                 state.increment_429_count(); // 保留原有的计数器
                 
                 // 增加节点特定的429计数
@@ -854,7 +862,7 @@ async fn handle_submission_error(
     
     // Determine the error type and log level based on the error
     let (message, log_level) = match error {
-        OrchestratorError::Http { status, message } => {
+        OrchestratorError::Http { status, ref message, .. } => {
             if status == 429 {
                 // 增加429计数
                 let count = if let Some(node_id) = node_id {
@@ -889,8 +897,8 @@ async fn handle_submission_error(
                 (
                     format!("HTTP error {} for task {}: {} (成功: {}次)", status, task.task_id, message, success_count),
                     LogLevel::Error,
-            )
-        }
+                )
+            }
         }
         _ => {
             // 重置429计数
@@ -898,9 +906,9 @@ async fn handle_submission_error(
                 rate_limit_tracker.reset_429_count(node_id).await;
             }
             
-            // Network errors
+            // Non-HTTP errors
             (
-                format!("Network error for task {}: {} (成功: {}次)", task.task_id, error, success_count),
+                format!("Submission error for task {}: {} (成功: {}次)", task.task_id, error, success_count),
                 LogLevel::Error,
             )
         }

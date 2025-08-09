@@ -214,14 +214,14 @@ impl MemoryDefragmenter {
 
 /// 检查系统内存压力
 pub fn check_memory_pressure() -> bool {
-    let (used_mb, total_mb) = get_memory_info();
+    let (used_mb, total_mb) = get_system_memory_with_swap_mb();
     let ratio = used_mb as f64 / total_mb as f64;
     ratio > HIGH_MEMORY_THRESHOLD
 }
 
 /// 获取系统内存使用率
 pub fn get_memory_usage_ratio() -> f64 {
-    let (used_mb, total_mb) = get_memory_info();
+    let (used_mb, total_mb) = get_system_memory_with_swap_mb();
     used_mb as f64 / total_mb as f64
 }
 
@@ -291,8 +291,8 @@ pub fn estimate_peak_gflops(num_provers: usize) -> f64 {
     let (_cores, mhz) = cpu_stats();
     let fpc = flops_per_cycle_per_core() as u64;
 
-    // GFLOP/s = (cores * MHz * flops_per_cycle) / 1000
-    (num_provers as u64 * mhz * fpc) as f64 / 1000.0
+    // GFLOP/s = (cores * MHz * flops_per_cycle) / 1024
+    (num_provers as u64 * mhz * fpc) as f64 / 1024.0
 }
 
 /// Measure actual FLOPS (in GFLOP/s) of this machine by running mathematical operations.
@@ -350,12 +350,29 @@ pub fn get_memory_info() -> (i32, i32) {
     (program_memory_mb, total_memory_mb)
 }
 
+/// Get the system memory usage including swap, as (used_mb, total_mb).
+pub fn get_system_memory_with_swap_mb() -> (i32, i32) {
+    let mut sys = System::new();
+    sys.refresh_memory();
+
+    // sysinfo returns bytes (v0.30+)
+    let total_ram = sys.total_memory();
+    let used_ram = sys.used_memory();
+    let total_swap = sys.total_swap();
+    let used_swap = sys.used_swap();
+
+    let total = total_ram.saturating_add(total_swap);
+    let used = used_ram.saturating_add(used_swap);
+
+    (bytes_to_mb_i32(used), bytes_to_mb_i32(total))
+}
+
 /// Total memory in GB of the machine.
 pub fn total_memory_gb() -> f64 {
     let mut sys = System::new();
     sys.refresh_memory();
     let total_memory = sys.total_memory(); // bytes
-    total_memory as f64 / 1000.0 / 1000.0 / 1000.0 // Convert to GB
+    total_memory as f64 / 1024.0 / 1024.0 / 1024.0 // Convert to GB (binary)
 }
 
 /// Memory used by the current process, in GB.
@@ -370,14 +387,13 @@ pub fn process_memory_gb() -> f64 {
         .expect("Failed to get current process");
 
     let memory = current_process.memory(); // bytes
-    memory as f64 / 1000.0 / 1000.0 / 1000.0 // Convert to GB
+    memory as f64 / 1024.0 / 1024.0 / 1024.0 // Convert to GB (binary)
 }
 
 // We encode the memory usage to i32 type at client
 fn bytes_to_mb_i32(bytes: u64) -> i32 {
-    // Convert to MB with 3 decimal places of precision
-    // Multiply by 1000 to preserve 3 decimal places
-    ((bytes as f64 * 1000.0) / 1_048_576.0).round() as i32
+    // Convert bytes to MB (binary)
+    (bytes as f64 / 1_048_576.0).round() as i32
 }
 
 #[cfg(test)]

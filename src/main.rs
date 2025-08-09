@@ -46,7 +46,7 @@ use std::collections::HashMap;
 use log::warn;
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
-use std::collections::HashSet;
+
 use std::time::Duration;
 // 移除tokio::sync::Mutex的导入，因为我们使用std::sync::Mutex
 // use tokio::sync::Mutex;
@@ -174,10 +174,20 @@ struct FixedLineDisplay {
     // 刷新控制
     refresh_interval: Duration,
     last_refresh: Arc<std::sync::Mutex<std::time::Instant>>,
+    // 用户设置的最大并发数（显示用）
+    max_concurrency: usize,
+    // 近5分钟成功时间戳滑窗
+    recent_successes: Arc<std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>>,
+    // 节点标签（邮箱/evm）
+    labels: Arc<std::collections::HashMap<u64, String>>,
+    // 最近错误消息（最多5条）
+    recent_errors: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    // 节点在节点列表文件中的行号（1-based）
+    line_numbers: Arc<std::collections::HashMap<u64, usize>>,
 }
 
 impl FixedLineDisplay {
-    fn new(refresh_interval_secs: u64) -> Self {
+    fn new(refresh_interval_secs: u64, max_concurrency: usize, labels: Arc<std::collections::HashMap<u64, String>>, line_numbers: Arc<std::collections::HashMap<u64, usize>>) -> Self {
         Self {
             node_lines: Arc::new(RwLock::new(HashMap::new())),
             defragmenter: crate::prover::get_defragmenter(),
@@ -187,6 +197,11 @@ impl FixedLineDisplay {
             refresh_interval: Duration::from_secs(refresh_interval_secs),
             // 设置为过去的时间，确保首次更新时会立即刷新
             last_refresh: Arc::new(std::sync::Mutex::new(std::time::Instant::now() - Duration::from_secs(60))),
+            max_concurrency,
+            recent_successes: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            labels,
+            recent_errors: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            line_numbers,
         }
     }
 
@@ -221,6 +236,34 @@ impl FixedLineDisplay {
         }
     }
 
+    // 记录一次成功并维护5分钟滑窗
+    fn record_success(&self) {
+        let mut dq = self.recent_successes.lock().unwrap();
+        let now = std::time::Instant::now();
+        dq.push_back(now);
+        let cutoff = now - Duration::from_secs(5 * 60);
+        while let Some(&front) = dq.front() {
+            if front < cutoff { dq.pop_front(); } else { break; }
+        }
+    }
+
+    // 计算近5分钟平均每分钟效率
+    fn recent_efficiency_per_min(&self) -> f64 {
+        let dq = self.recent_successes.lock().unwrap();
+        if dq.is_empty() { return 0.0; }
+        let now = std::time::Instant::now();
+        let first = dq.front().copied().unwrap_or(now);
+        let window_secs = now.saturating_duration_since(first).as_secs_f64().min(5.0 * 60.0).max(1.0);
+        (dq.len() as f64) / (window_secs / 60.0)
+    }
+
+    // 记录错误消息（最多保留5条）
+    fn record_error(&self, msg: String) {
+        let mut dq = self.recent_errors.lock().unwrap();
+        dq.push_back(msg);
+        while dq.len() > 5 { dq.pop_front(); }
+    }
+
     async fn render_display(&self) {
         // 渲染当前状态
         print!("\x1b[2J\x1b[H"); // 清屏并移动到顶部
@@ -243,72 +286,97 @@ impl FixedLineDisplay {
         // 本地统计信息 - 只计算总节点数量，活跃数使用全局计数
         let total_nodes = lines.len();
         
-        println!("📊 状态: {} 总数 | {} 活跃 | {} 成功 | {} 失败", 
-                 total_nodes, global_active_count, successful_count, failed_count);
+        println!("📊 状态: {} 总数 | {} 活跃/{} 并发 | {} 成功 | {} 失败", 
+                 total_nodes, global_active_count, self.max_concurrency, successful_count, failed_count);
         println!("⏱️ 运行时间: {}天 {}小时 {}分钟 {}秒", 
                  self.start_time.elapsed().as_secs() / 86400,
                  (self.start_time.elapsed().as_secs() % 86400) / 3600,
                  (self.start_time.elapsed().as_secs() % 3600) / 60,
                  self.start_time.elapsed().as_secs() % 60);
+        // 效率：每分钟成功次数
+        let elapsed_minutes = (self.start_time.elapsed().as_secs_f64() / 60.0).max(0.0001);
+        let efficiency_per_min = (successful_count as f64) / elapsed_minutes;
+        // 近5分钟滑窗效率
+        let recent_eff = self.recent_efficiency_per_min();
+        println!("⚡ 效率: {:.2} 次/分钟 | 近5分钟: {:.2} 次/分钟", efficiency_per_min, recent_eff);
         
-        // 显示内存统计
+        // 显示内存统计（包含RAM+SWAP）
         let stats = self.defragmenter.get_stats().await;
-        let memory_info = crate::system::get_memory_info();
-        let memory_percentage = (memory_info.0 as f64 / memory_info.1 as f64) * 100.0;
-        
-        println!("🧠 内存: {:.1}% ({} MB / {} MB) | 清理次数: {} | 释放: {} KB", 
-                memory_percentage, 
-               memory_info.0 / 1024 / 1024,  
-               memory_info.1 / 1024 / 1024,
-                stats.cleanups_performed,
-                stats.bytes_freed / 1024);
+        let (used_total_mb, total_mb) = crate::system::get_system_memory_with_swap_mb();
+        let memory_percentage = if total_mb > 0 { (used_total_mb as f64 / total_mb as f64) * 100.0 } else { 0.0 };
+        // 另外显示单独RAM与SWAP（可选更详细诊断）
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let ram_used_mb = (sys.used_memory() as f64 / 1_048_576.0).round() as i32;
+        let ram_total_mb = (sys.total_memory() as f64 / 1_048_576.0).round() as i32;
+        let swap_used_mb = (sys.used_swap() as f64 / 1_048_576.0).round() as i32;
+        let swap_total_mb = (sys.total_swap() as f64 / 1_048_576.0).round() as i32;
+
+        // 转为GB并保留1位小数
+        let used_total_gb = (used_total_mb as f64) / 1024.0;
+        let total_gb = (total_mb as f64) / 1024.0;
+        let ram_used_gb = (ram_used_mb as f64) / 1024.0;
+        let ram_total_gb = (ram_total_mb as f64) / 1024.0;
+        let swap_used_gb = (swap_used_mb as f64) / 1024.0;
+        let swap_total_gb = (swap_total_mb as f64) / 1024.0;
+        let bytes_freed_gb = (stats.bytes_freed as f64) / 1024.0 / 1024.0 / 1024.0;
+ 
+        println!("🧠 内存(含交换): {:.1}% ({:.1} GB / {:.1} GB)", 
+                 memory_percentage, used_total_gb, total_gb);
+        println!("   RAM: {:.1}/{:.1} GB | SWAP: {:.1}/{:.1} GB | 清理: {} 次 | 释放: {:.1} GB",
+                 ram_used_gb, ram_total_gb,
+                 swap_used_gb, swap_total_gb,
+                 stats.cleanups_performed,
+                 bytes_freed_gb);
         
         println!("───────────────────────────────────────────");
-        
-        // 获取全局活跃节点列表
+        // 获取全局活跃节点列表并显示最多30行（带标签）
         let active_node_ids = {
             let nodes = crate::prover_runtime::GLOBAL_ACTIVE_NODES.lock();
             nodes.clone()
         };
-        
-        // 修改显示逻辑：确保显示所有全局活跃节点，不仅仅是有状态更新的节点
         if active_node_ids.is_empty() {
             println!("⚠️ 警告: 没有检测到活跃节点，请检查节点状态");
         } else {
-            // 首先显示已有状态信息的活跃节点
-            let mut sorted_lines: Vec<_> = lines.iter()
-                .filter(|(id, _)| active_node_ids.contains(id))
-                .collect();
-            sorted_lines.sort_unstable_by_key(|(id, _)| *id);
-            
-            // 只显示最近有更新的10个节点
-            for (node_id, status) in sorted_lines.iter().take(10) {
-                println!("节点-{}: {}", node_id, status);
+            let mut active_sorted: Vec<u64> = active_node_ids.iter().copied().collect();
+            active_sorted.sort_unstable();
+            for node_id in active_sorted.iter().take(30) {
+                let status = lines.get(node_id).cloned().unwrap_or_else(|| {
+                    let s = crate::prover_runtime::get_node_state(*node_id);
+                    format!("{}", s)
+                });
+                let line_no_opt = self.line_numbers.get(node_id).copied();
+                if let Some(label) = self.labels.get(node_id) {
+                    if let Some(line_no) = line_no_opt {
+                        println!("节点-{}({}) [{}]: {}", node_id, line_no, label, status);
+                    } else {
+                        println!("节点-{} [{}]: {}", node_id, label, status);
+                    }
+                } else {
+                    if let Some(line_no) = line_no_opt {
+                        println!("节点-{}({}): {}", node_id, line_no, status);
+                    } else {
+                        println!("节点-{}: {}", node_id, status);
+                    }
+                }
             }
-            
-            // 然后显示没有状态信息的活跃节点，但最多只显示10-已显示节点数量个
-            let nodes_with_status: HashSet<u64> = sorted_lines.iter().map(|(id, _)| **id).collect();
-            let mut missing_nodes: Vec<u64> = active_node_ids.iter()
-                .filter(|id| !nodes_with_status.contains(id))
-                .copied()
-                .collect();
-            missing_nodes.sort_unstable();
-            
-            let displayed_count = sorted_lines.len().min(10);
-            let remaining_slots = 10 - displayed_count;
-            
-            for node_id in missing_nodes.iter().take(remaining_slots) {
-                println!("节点-{}: 已添加到活跃列表，等待状态更新...", node_id);
-            }
-            
-            // 如果有更多节点，显示一个摘要
-            let total_active = active_node_ids.len();
-            if total_active > 10 {
-                println!("... 以及 {} 个其他节点 (总共 {} 个活跃节点)", total_active - 10, total_active);
+            let total_active = active_sorted.len();
+            if total_active > 30 {
+                println!("... 以及 {} 个其他节点 (总共 {} 个活跃节点)", total_active - 30, total_active);
             }
         }
-        
         println!("───────────────────────────────────────────");
+        // 最近错误（最多5条）
+        {
+            let errs = self.recent_errors.lock().unwrap();
+            if !errs.is_empty() {
+                println!("最近错误:");
+                for msg in errs.iter().rev().take(5) {
+                    println!("❌ {}", msg);
+                }
+                println!("───────────────────────────────────────────");
+            }
+        }
         // 获取当前请求速率
         let (current_rate, _) = crate::prover_runtime::get_global_request_stats();
         println!("刷新间隔: {}秒 | 请求速率: {:.1}次/秒 | 按Ctrl+C退出", 
@@ -703,8 +771,72 @@ async fn start_batch_processing(
     println!("───────────────────────────────────────");
     
     // 创建固定行显示管理器
-    let display = Arc::new(FixedLineDisplay::new(refresh_interval));
+    let labels_file = if let Some(path) = file_path.rsplit_once('.') {
+        Some(path.0.to_string() + ".labels")
+    } else {
+        None
+    };
+
+    let labels_map: Arc<std::collections::HashMap<u64, String>> = Arc::new(
+        if let Some(path) = labels_file {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    let mut map = std::collections::HashMap::new();
+                    for (lineno, line) in content.lines().enumerate() {
+                        let s = line.trim();
+                        if s.is_empty() || s.starts_with('#') { continue; }
+                        // 支持三种分隔: 逗号/空白/制表
+                        let parts: Vec<&str> = s.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).collect();
+                        if parts.len() >= 2 {
+                            if let Ok(id) = parts[0].parse::<u64>() {
+                                map.insert(id, parts[1].to_string());
+                            }
+                        } else {
+                            // 行内只有node_id则忽略，保持兼容
+                            let _ = lineno; // no-op
+                        }
+                    }
+                    map
+                }
+                Err(_) => std::collections::HashMap::new(),
+            }
+        } else {
+            std::collections::HashMap::new()
+        }
+    );
+
+    // 读取节点列表文件，构建 node_id -> 行号(1-based) 映射
+    let line_numbers_map: Arc<std::collections::HashMap<u64, usize>> = Arc::new({
+        let mut map = std::collections::HashMap::new();
+        if let Ok(content) = std::fs::read_to_string(file_path) {
+            let mut entry_index: usize = 0; // 仅对有效节点条目计数（1-based）
+            for line in content.lines() {
+                let s = line.trim();
+                if s.is_empty() || s.starts_with('#') { continue; }
+                if let Ok(id) = s.parse::<u64>() {
+                    entry_index += 1;
+                    map.insert(id, entry_index);
+                }
+            }
+        }
+        map
+    });
+ 
+    let display = Arc::new(FixedLineDisplay::new(refresh_interval, max_concurrent, labels_map.clone(), line_numbers_map.clone()));
     display.render_display().await;
+
+    // 周期性刷新显示（即使没有状态事件也会刷新）
+    {
+        let display_clone = display.clone();
+        let interval_secs = std::cmp::max(1, refresh_interval) as u64;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                ticker.tick().await;
+                display_clone.render_display().await;
+            }
+        });
+    }
     
     // 创建批处理工作器
     let (shutdown_sender, _) = broadcast::channel(1);
@@ -747,10 +879,16 @@ async fn start_batch_processing(
             // 更新成功/失败计数
             if event.event_type == crate::events::EventType::ProofSubmitted {
                 let _ = display_clone.success_count.fetch_add(1, Ordering::Relaxed);
+                // 记录近5分钟成功时间戳
+                display_clone.record_success();
             } else if event.event_type == crate::events::EventType::Error &&
                       (event.msg.contains("Error submitting proof") || 
                        event.msg.contains("Failed to submit proof")) {
                 let _ = display_clone.failure_count.fetch_add(1, Ordering::Relaxed);
+            }
+            // 记录错误信息（任意 Error 事件）
+            if event.event_type == crate::events::EventType::Error {
+                display_clone.record_error(format!("[{}] {}", event.timestamp, event.msg));
             }
             
             // 只在调试模式下输出事件信息

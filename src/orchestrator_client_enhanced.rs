@@ -79,13 +79,14 @@ impl EnhancedOrchestratorClient {
                 Ok(task) => Ok(task),
                 Err(e) => {
                     match &e {
-                        OrchestratorError::Http { status, message } => {
+                        OrchestratorError::Http { status, message, .. } => {
                             if *status == 429 || message.contains("RATE_LIMITED") {
                                 // 增加全局429错误计数
                                 crate::prover_runtime::increment_429_error_count();
-                                return Err(OrchestratorError::Http { 
+                                                                    return Err(OrchestratorError::Http { 
                                     status: 429, 
-                                    message: "RATE_LIMITED: Too many requests".to_string() 
+                                    message: "RATE_LIMITED: Too many requests".to_string(),
+                                    headers: vec![] 
                                 });
                             }
                         },
@@ -124,7 +125,7 @@ impl EnhancedOrchestratorClient {
                     },
                     Err(e) => {
                         match &e {
-                            OrchestratorError::Http { status, message } => {
+                            OrchestratorError::Http { status, message, .. } => {
                                 if *status == 429 || message.contains("RATE_LIMITED") {
                                     // 更新缓存中的尝试次数
                                     self.update_proof_attempts(task_id);
@@ -136,7 +137,8 @@ impl EnhancedOrchestratorClient {
                                     // 这样可以让上层实现更复杂的重试策略
                                     return Err(OrchestratorError::Http { 
                                         status: 429, 
-                                        message: "RATE_LIMITED: Too many requests".to_string() 
+                                        message: "RATE_LIMITED: Too many requests".to_string(),
+                                        headers: vec![] 
                                     });
                                 }
                                 
