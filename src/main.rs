@@ -326,7 +326,7 @@ impl FixedLineDisplay {
         println!("   RAM: {:.1}/{:.1} GB | SWAP: {:.1}/{:.1} GB | 清理: {} 次 | 释放: {:.1} GB",
                  ram_used_gb, ram_total_gb,
                  swap_used_gb, swap_total_gb,
-                 stats.cleanups_performed,
+                stats.cleanups_performed,
                  bytes_freed_gb);
         
         println!("───────────────────────────────────────────");
@@ -356,8 +356,8 @@ impl FixedLineDisplay {
                     if let Some(line_no) = line_no_opt {
                         println!("节点-{}({}): {}", node_id, line_no, status);
                     } else {
-                        println!("节点-{}: {}", node_id, status);
-                    }
+                println!("节点-{}: {}", node_id, status);
+            }
                 }
             }
             let total_active = active_sorted.len();
@@ -715,9 +715,14 @@ async fn start_batch_processing(
     }
     
     // 加载节点列表
-    let node_ids = node_list::load_node_list(file_path)?;
+    let mut node_ids = node_list::load_node_list(file_path)?;
     if node_ids.is_empty() {
         return Err("节点列表为空".into());
+    }
+    // 去重（保留首次出现顺序），避免重复节点导致行号与轮转索引异常
+    {
+        let mut seen = std::collections::HashSet::new();
+        node_ids.retain(|id| seen.insert(*id));
     }
     
     println!("📋 已加载 {} 个节点", node_ids.len());
@@ -805,17 +810,20 @@ async fn start_batch_processing(
         }
     );
 
-    // 读取节点列表文件，构建 node_id -> 行号(1-based) 映射
+    // 读取节点列表文件，构建 node_id -> 有效节点首出现序号(1-based)
     let line_numbers_map: Arc<std::collections::HashMap<u64, usize>> = Arc::new({
         let mut map = std::collections::HashMap::new();
         if let Ok(content) = std::fs::read_to_string(file_path) {
-            let mut entry_index: usize = 0; // 仅对有效节点条目计数（1-based）
+            let mut entry_index: usize = 0; // 仅对“首次出现的有效节点条目”计数
+            let mut seen = std::collections::HashSet::new();
             for line in content.lines() {
                 let s = line.trim();
                 if s.is_empty() || s.starts_with('#') { continue; }
                 if let Ok(id) = s.parse::<u64>() {
-                    entry_index += 1;
-                    map.insert(id, entry_index);
+                    if seen.insert(id) {
+                        entry_index += 1;
+                        map.insert(id, entry_index);
+                    }
                 }
             }
         }

@@ -472,7 +472,7 @@ async fn handle_fetch_error(
                 if let Some(retry_after) = error.get_retry_after_seconds() {
                     state.set_backoff_from_server(retry_after);
                 } else {
-                    state.increase_backoff_for_rate_limit();
+                state.increase_backoff_for_rate_limit();
                 }
                 state.increment_429_count(); // 保留原有的计数器
                 
@@ -897,8 +897,8 @@ async fn handle_submission_error(
                 (
                     format!("HTTP error {} for task {}: {} (成功: {}次)", status, task.task_id, message, success_count),
                     LogLevel::Error,
-                )
-            }
+            )
+        }
         }
         _ => {
             // 重置429计数
