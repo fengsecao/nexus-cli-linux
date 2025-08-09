@@ -182,10 +182,12 @@ struct FixedLineDisplay {
     labels: Arc<std::collections::HashMap<u64, String>>,
     // 最近错误消息（最多5条）
     recent_errors: Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
+    // 节点在节点列表文件中的行号（1-based）
+    line_numbers: Arc<std::collections::HashMap<u64, usize>>,
 }
 
 impl FixedLineDisplay {
-    fn new(refresh_interval_secs: u64, max_concurrency: usize, labels: Arc<std::collections::HashMap<u64, String>>) -> Self {
+    fn new(refresh_interval_secs: u64, max_concurrency: usize, labels: Arc<std::collections::HashMap<u64, String>>, line_numbers: Arc<std::collections::HashMap<u64, usize>>) -> Self {
         Self {
             node_lines: Arc::new(RwLock::new(HashMap::new())),
             defragmenter: crate::prover::get_defragmenter(),
@@ -199,6 +201,7 @@ impl FixedLineDisplay {
             recent_successes: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             labels,
             recent_errors: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            line_numbers,
         }
     }
 
@@ -342,10 +345,19 @@ impl FixedLineDisplay {
                     let s = crate::prover_runtime::get_node_state(*node_id);
                     format!("{}", s)
                 });
+                let line_no_opt = self.line_numbers.get(node_id).copied();
                 if let Some(label) = self.labels.get(node_id) {
-                    println!("节点-{} [{}]: {}", node_id, label, status);
+                    if let Some(line_no) = line_no_opt {
+                        println!("节点-{}({}) [{}]: {}", node_id, line_no, label, status);
+                    } else {
+                        println!("节点-{} [{}]: {}", node_id, label, status);
+                    }
                 } else {
-                    println!("节点-{}: {}", node_id, status);
+                    if let Some(line_no) = line_no_opt {
+                        println!("节点-{}({}): {}", node_id, line_no, status);
+                    } else {
+                        println!("节点-{}: {}", node_id, status);
+                    }
                 }
             }
             let total_active = active_sorted.len();
@@ -792,8 +804,25 @@ async fn start_batch_processing(
             std::collections::HashMap::new()
         }
     );
+
+    // 读取节点列表文件，构建 node_id -> 行号(1-based) 映射
+    let line_numbers_map: Arc<std::collections::HashMap<u64, usize>> = Arc::new({
+        let mut map = std::collections::HashMap::new();
+        if let Ok(content) = std::fs::read_to_string(file_path) {
+            let mut entry_index: usize = 0; // 仅对有效节点条目计数（1-based）
+            for line in content.lines() {
+                let s = line.trim();
+                if s.is_empty() || s.starts_with('#') { continue; }
+                if let Ok(id) = s.parse::<u64>() {
+                    entry_index += 1;
+                    map.insert(id, entry_index);
+                }
+            }
+        }
+        map
+    });
  
-    let display = Arc::new(FixedLineDisplay::new(refresh_interval, max_concurrent, labels_map.clone()));
+    let display = Arc::new(FixedLineDisplay::new(refresh_interval, max_concurrent, labels_map.clone(), line_numbers_map.clone()));
     display.render_display().await;
 
     // 周期性刷新显示（即使没有状态事件也会刷新）
