@@ -1370,18 +1370,16 @@ async fn node_manager(
                     0
                 };
                 
-                // 检查是否有active_nodes列表中的节点被标记为需要启动但尚未启动
+                // 检查是否有节点被标记为需要启动但尚未启动（扫描 active_threads 中标记为 false 的节点）
                 let nodes_needing_start = {
                     let threads_guard = active_threads.lock();
-                    let nodes_guard = active_nodes.lock();
-                    nodes_guard
-                        .iter()
-                        .filter(|&&node_id| {
-                            let is_active = threads_guard.get(&node_id).copied().unwrap_or(false);
-                            !is_active && !starting_nodes.contains(&node_id)
-                        })
-                        .copied()
-                        .collect::<Vec<u64>>()
+                    let mut nodes: Vec<u64> = Vec::new();
+                    for (&node_id, &is_active) in threads_guard.iter() {
+                        if !is_active && !starting_nodes.contains(&node_id) {
+                            nodes.push(node_id);
+                        }
+                    }
+                    nodes
                 };
                 
                 // 如果有节点需要启动，优先启动这些节点
