@@ -1362,19 +1362,18 @@ async fn node_manager(
                     0
                 };
                 
-                // 检查是否有节点被标记为需要启动但尚未启动
+                // 检查是否有active_nodes列表中的节点被标记为需要启动但尚未启动
                 let nodes_needing_start = {
                     let threads_guard = active_threads.lock();
-                    let mut nodes = Vec::new();
-                    
-                    // 查找所有在active_threads中标记为false的节点
-                    for (&node_id, &is_active) in threads_guard.iter() {
-                        if !is_active && !starting_nodes.contains(&node_id) {
-                            nodes.push(node_id);
-                        }
-                    }
-                    
-                    nodes
+                    let nodes_guard = active_nodes.lock();
+                    nodes_guard
+                        .iter()
+                        .filter(|&&node_id| {
+                            let is_active = threads_guard.get(&node_id).copied().unwrap_or(false);
+                            !is_active && !starting_nodes.contains(&node_id)
+                        })
+                        .copied()
+                        .collect::<Vec<u64>>()
                 };
                 
                 // 如果有节点需要启动，优先启动这些节点
@@ -1445,7 +1444,7 @@ async fn node_manager(
                 else if available_slots > 0 && !nodes_to_start.is_empty() {
                     log_println!("📊 节点管理器: 有 {} 个可用槽位，可以启动新节点", available_slots);
                     
-                    // 只启动可用槽位数量的节点
+                    // 只启动可用槽位数量的节点（限定为active_nodes中的待启动节点）
                     let nodes_to_start = nodes_to_start.into_iter()
                         .filter(|&node_id| !starting_nodes.contains(&node_id) && !is_node_globally_active(node_id))
                         .take(available_slots)
@@ -3066,7 +3065,7 @@ async fn run_memory_optimized_node(
                         consecutive_429s = 0; // 重置连续429计数
                         task_fetch_failures += 1; // 增加任务获取失败计数
                         
-                                                // 重置429计数
+                        // 重置429计数
                         rate_limit_tracker.reset_429_count(node_id).await;
                         
                         // 失败重试策略：允许前2次快速重试，第3次开始轮转
@@ -3087,9 +3086,9 @@ async fn run_memory_optimized_node(
                                 tokio::time::sleep(Duration::from_millis(500)).await;
                             }
                         } else {
-                            update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
-                                timestamp, error_str, attempt, MAX_TASK_RETRIES));
-                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
+                            timestamp, error_str, attempt, MAX_TASK_RETRIES));
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                         }
                     }
                     attempt += 1;
