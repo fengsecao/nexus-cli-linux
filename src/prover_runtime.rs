@@ -167,6 +167,8 @@ static GLOBAL_RATE_LIMITER: Lazy<Mutex<GlobalRateLimiter>> = Lazy::new(|| {
 
 // 全局429错误计数器
 static RECENT_429_ERRORS: Lazy<AtomicU32> = Lazy::new(|| AtomicU32::new(0));
+// 总429错误计数器（从程序启动起累计，不重置）
+static TOTAL_429_ERRORS: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
 // 速率配置
 static MIN_RATE: Lazy<Mutex<Option<f64>>> = Lazy::new(|| Mutex::new(None));
@@ -197,11 +199,17 @@ pub fn set_max_request_rate(rate: f64) {
 /// 增加429错误计数
 pub fn increment_429_error_count() {
     RECENT_429_ERRORS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    TOTAL_429_ERRORS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// 获取429错误计数（不重置）
 pub fn get_429_error_count() -> u32 {
     RECENT_429_ERRORS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 获取累计429错误计数（不重置）
+pub fn get_total_429_error_count() -> u64 {
+    TOTAL_429_ERRORS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// 获取并重置429错误计数
