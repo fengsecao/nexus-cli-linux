@@ -150,26 +150,26 @@ impl EnhancedOrchestratorClient {
                                     return Ok(());
                                 }
                                 
-                                // 对于可恢复的错误进行重试
+                                // 对于可恢复的错误进行重试（线性退避：2,4,6,8秒，封顶8秒）
                                 if (*status == 500 || *status == 502 || *status == 503 || *status == 504) && attempts < max_attempts {
-                                    let wait_time = 2_u64.pow(attempts as u32);
+                                    let wait_time = std::cmp::min(2 * attempts as u64, 8);
                                     warn!("服务器错误 ({}), 第{}次尝试失败，等待{}秒后重试...", status, attempts, wait_time);
                                     tokio::time::sleep(Duration::from_secs(wait_time)).await;
                                     continue;
                                 }
                                 
-                                // 对于其他HTTP错误，如果尝试次数未达上限，也进行重试
+                                // 对于其他HTTP错误，如果尝试次数未达上限，也进行重试（线性退避：2,4,6,8秒，封顶8秒）
                                 if attempts < max_attempts {
-                                    let wait_time = 1_u64.pow(attempts as u32);
+                                    let wait_time = std::cmp::min(2 * attempts as u64, 8);
                                     warn!("HTTP错误 ({}), 第{}次尝试失败，等待{}秒后重试...", status, attempts, wait_time);
                                     tokio::time::sleep(Duration::from_secs(wait_time)).await;
                                     continue;
                                 }
                             },
                             _ => {
-                                // 对于网络错误，也尝试重试
+                                // 对于网络错误，也尝试重试（线性退避：2,4,6,8秒，封顶8秒）
                                 if attempts < max_attempts {
-                                    let wait_time = 2_u64.pow(attempts as u32);
+                                    let wait_time = std::cmp::min(2 * attempts as u64, 8);
                                     warn!("网络错误, 第{}次尝试失败，等待{}秒后重试...", attempts, wait_time);
                                     tokio::time::sleep(Duration::from_secs(wait_time)).await;
                                     continue;
