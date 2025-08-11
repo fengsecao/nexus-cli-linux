@@ -286,8 +286,8 @@ impl FixedLineDisplay {
         // 本地统计信息 - 只计算总节点数量，活跃数使用全局计数
         let total_nodes = lines.len();
         
-        // 新增：从全局读取429累计次数
-        let total_429 = crate::prover_runtime::get_429_error_count();
+        // 新增：从全局读取429累计次数（从启动起累计，不重置）
+        let total_429 = crate::prover_runtime::get_total_429_error_count();
         
         println!("📊 状态: {} 总数 | {} 活跃/{} 并发 | {} 成功 | {} 失败 | {} 频繁", 
                  total_nodes, global_active_count, self.max_concurrency, successful_count, failed_count, total_429);

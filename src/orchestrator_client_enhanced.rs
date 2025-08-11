@@ -150,28 +150,28 @@ impl EnhancedOrchestratorClient {
                                     return Ok(());
                                 }
                                 
-                                // 对于可恢复的错误进行重试
+                                // 对于可恢复的错误进行重试（线性退避：0.1/0.2/0.3/0.4 秒）
                                 if (*status == 500 || *status == 502 || *status == 503 || *status == 504) && attempts < max_attempts {
-                                    let wait_time = 2_u64.pow(attempts as u32);
-                                    warn!("服务器错误 ({}), 第{}次尝试失败，等待{}秒后重试...", status, attempts, wait_time);
-                                    tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                    let millis = (attempts as u64) * 100; // 100, 200, 300, 400ms
+                                    warn!("服务器错误 ({}), 第{}次尝试失败，等待{}ms后重试...", status, attempts, millis);
+                                    tokio::time::sleep(Duration::from_millis(millis)).await;
                                     continue;
                                 }
                                 
-                                // 对于其他HTTP错误，如果尝试次数未达上限，也进行重试
+                                // 对于其他HTTP错误，如果尝试次数未达上限，也进行相同的线性退避
                                 if attempts < max_attempts {
-                                    let wait_time = 1_u64.pow(attempts as u32);
-                                    warn!("HTTP错误 ({}), 第{}次尝试失败，等待{}秒后重试...", status, attempts, wait_time);
-                                    tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                    let millis = (attempts as u64) * 100;
+                                    warn!("HTTP错误 ({}), 第{}次尝试失败，等待{}ms后重试...", status, attempts, millis);
+                                    tokio::time::sleep(Duration::from_millis(millis)).await;
                                     continue;
                                 }
                             },
                             _ => {
-                                // 对于网络错误，也尝试重试
+                                // 对于网络错误，也尝试相同的线性退避
                                 if attempts < max_attempts {
-                                    let wait_time = 2_u64.pow(attempts as u32);
-                                    warn!("网络错误, 第{}次尝试失败，等待{}秒后重试...", attempts, wait_time);
-                                    tokio::time::sleep(Duration::from_secs(wait_time)).await;
+                                    let millis = (attempts as u64) * 100; // 100, 200, 300, 400ms
+                                    warn!("网络错误, 第{}次尝试失败，等待{}ms后重试...", attempts, millis);
+                                    tokio::time::sleep(Duration::from_millis(millis)).await;
                                     continue;
                                 }
                             }
