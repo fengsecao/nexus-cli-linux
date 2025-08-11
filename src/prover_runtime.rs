@@ -31,6 +31,8 @@ use std::time::Instant;
 use std::future::Future;
 use std::collections::HashSet;
 use lazy_static;
+use std::fs::OpenOptions;
+use std::io::Write as IoWrite;
 
 /// Maximum number of completed tasks to keep in memory. Chosen to be larger than the task queue size.
 const MAX_COMPLETED_TASKS: usize = 500;
@@ -409,6 +411,16 @@ pub fn set_node_state(node_id: u64, state: &str) {
 pub fn get_node_state(node_id: u64) -> String {
     let states = NODE_STATES.lock();
     states.get(&node_id).cloned().unwrap_or_else(|| "等待任务".to_string())
+}
+
+/// 将每次429记录到文件，便于后续排查
+pub fn record_429_event(node_id: u64, reason: &str) {
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let line = format!("{} | node={} | {}\n", ts, node_id, reason);
+    let path = std::env::var("NEXUS_429_LOG").unwrap_or_else(|_| "429_nodes.log".to_string());
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(line.as_bytes());
+    }
 }
 
 /// Starts authenticated workers that fetch tasks from the orchestrator and process them.
@@ -2560,8 +2572,10 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
                                         if rotation_data.is_some() {
-                                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
-                                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
+                                             // 记录429到文件
+                                             record_429_event(node_id, "cached submit 429");
+                                             // 先更新状态，表明节点遇到429错误（但会立即轮转）
+                                             update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                                             // 更新节点状态
                                             set_node_state(node_id, "遇到429错误，准备轮转");
                                             
@@ -2816,6 +2830,8 @@ async fn run_memory_optimized_node(
                                         
                                         // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
                                         if rotation_data.is_some() {
+                                            // 记录429到文件
+                                            record_429_event(node_id, "submit 429");
                                             // 先更新状态，表明节点遇到429错误（但会立即轮转）
                                             update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                                             // 更新节点状态
@@ -2874,8 +2890,8 @@ async fn run_memory_optimized_node(
                                         }
                                         break;
                                     } else {
-                                        // 非429/404/409错误：按既有1s等待策略
-                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                        // 非429/404/409错误：按既有0.1s等待策略
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
                                         retry_count += 1;
                                     }
                                 }
@@ -2889,8 +2905,8 @@ async fn run_memory_optimized_node(
                                         update_status(format!("[{}] ⚠️ 429限制 - 等待60s后重试", timestamp));
                                         tokio::time::sleep(Duration::from_secs(60)).await;
                                     } else {
-                                        update_status(format!("[{}] ⚠️ 提交失败 - 等待1s后重试", timestamp));
-                                        tokio::time::sleep(Duration::from_secs(1)).await;
+                                        update_status(format!("[{}] ⚠️ 提交失败 - 等待0.1s后重试", timestamp));
+                                        tokio::time::sleep(Duration::from_millis(100)).await;
                                     }
                                 }
                                 break;
@@ -2905,7 +2921,7 @@ async fn run_memory_optimized_node(
                             rate_limit_tracker.reset_429_count(node_id).await;
                             
                             update_status(format!("[{}] ❌ 证明生成失败: {}", timestamp, e));
-                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
                     
@@ -2924,12 +2940,14 @@ async fn run_memory_optimized_node(
                         
                         // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
                         if rotation_data.is_some() {
+                            // 记录429到文件
+                            record_429_event(node_id, "fetch 429");
                             // 先更新状态，表明节点遇到429错误（但会立即轮转）
                             update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
-                            
+                             
                             log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                            
+                             
                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
@@ -2998,7 +3016,7 @@ async fn run_memory_optimized_node(
                         }
                         
                         // 如果轮转失败或未启用轮转，等待后继续
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     } else {
                         // 其他错误
                         _consecutive_failures += 1;
@@ -3008,8 +3026,8 @@ async fn run_memory_optimized_node(
                         // 重置429计数
                         rate_limit_tracker.reset_429_count(node_id).await;
                         
-                        // 失败重试策略：允许前2次快速重试，第3次开始轮转
-                        if rotation_data.is_some() && attempt >= 2 {
+                        // 失败重试策略：首次失败就轮转
+                        if rotation_data.is_some() && attempt >= 1 {
                             update_status(format!("[{}] ❌ 获取任务失败: {} (第 {}/{}) -> 轮转", timestamp, error_str, attempt, MAX_TASK_RETRIES));
                             log_println!("🔄 节点-{}: 获取任务失败已达到阈值，触发轮转", node_id);
                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "获取任务失败-达阈值轮转", &node_tx, &active_threads).await;
@@ -3023,12 +3041,12 @@ async fn run_memory_optimized_node(
                                 return;
                             } else {
                                 // 轮转失败，短暂等待
-                                tokio::time::sleep(Duration::from_millis(500)).await;
+                                tokio::time::sleep(Duration::from_millis(100)).await;
                             }
                         } else {
                         update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
                             timestamp, error_str, attempt, MAX_TASK_RETRIES));
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
                     attempt += 1;
@@ -3067,7 +3085,7 @@ async fn run_memory_optimized_node(
                 }
             } else {
                 // 如果不需要轮转，等待后继续尝试
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
         
