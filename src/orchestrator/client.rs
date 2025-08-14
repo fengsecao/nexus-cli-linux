@@ -26,6 +26,7 @@ use std::path::Path;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use crate::consts;
+use std::env; // 新增: 读取环境变量
 
 // Privacy-preserving country detection for network optimization.
 // Only stores 2-letter country codes (e.g., "US", "CA", "GB") to help route
@@ -235,9 +236,12 @@ impl OrchestratorClient {
             }
         }
         
+        // 读取超时（秒），默认10秒
+        let timeout = Self::get_fetch_timeout_secs(10);
+        
         Self {
             client: ClientBuilder::new()
-                .timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(timeout))
                 .build()
                 .expect("Failed to create HTTP client"),
             environment,
@@ -276,9 +280,12 @@ impl OrchestratorClient {
             }
         }
         
+        // 读取超时（秒），默认10秒（无代理时）
+        let timeout = Self::get_fetch_timeout_secs(10);
+        
         Self {
             client: ClientBuilder::new()
-                .timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(timeout))
                 .build()
                 .expect("Failed to create HTTP client"),
             environment,
@@ -346,13 +353,16 @@ impl OrchestratorClient {
             info!("使用代理: {} ({})", proxy_info.url, proxy_info.country);
         }
         
+        // 读取超时（秒），代理默认15秒
+        let timeout = Self::get_fetch_timeout_secs(15);
+        
         // 创建代理
         match Proxy::all(&proxy_info.url) {
             Ok(proxy) => {
                 let proxy_with_auth = proxy.basic_auth(&proxy_info.username, &proxy_info.password);
                 // 创建新的builder实例
                 let builder = ClientBuilder::new()
-                    .timeout(Duration::from_secs(15))  // 增加超时时间
+                    .timeout(Duration::from_secs(timeout))  // 使用可配置超时
                     .proxy(proxy_with_auth);
                 
                 match builder.build() {
@@ -377,8 +387,9 @@ impl OrchestratorClient {
         if VERBOSE_LOGS {
             info!("使用默认连接（无代理）");
         }
+        let fallback_timeout = Self::get_fetch_timeout_secs(10);
         ClientBuilder::new()
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(fallback_timeout))
             .build()
             .expect("Failed to create HTTP client")
     }
@@ -849,10 +860,19 @@ impl OrchestratorClient {
         if VERBOSE_LOGS {
             info!("使用默认连接（无代理）");
         }
+        let timeout = Self::get_fetch_timeout_secs(10);
         ClientBuilder::new()
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(timeout))
             .build()
             .expect("Failed to create HTTP client")
+    }
+
+    /// 内部工具：读取获取任务HTTP超时（秒），优先环境变量 NEXUS_FETCH_TIMEOUT_SECS
+    fn get_fetch_timeout_secs(default_secs: u64) -> u64 {
+        match env::var("NEXUS_FETCH_TIMEOUT_SECS") {
+            Ok(val) => val.parse::<u64>().map(|v| v.clamp(1, 300)).unwrap_or(default_secs),
+            Err(_) => default_secs,
+        }
     }
 }
 

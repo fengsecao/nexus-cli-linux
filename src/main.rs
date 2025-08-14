@@ -86,6 +86,10 @@ enum Command {
         /// Timeout in seconds for 429 errors (will vary by ±10%)
         #[arg(long = "timeout", value_name = "TIMEOUT")]
         timeout: Option<u64>,
+
+        /// Fetch task HTTP timeout in seconds
+        #[arg(long = "fetch-timeout", value_name = "SECS")]
+        fetch_timeout: Option<u64>,
     },
     /// Register a new user
     RegisterUser {
@@ -158,6 +162,10 @@ enum Command {
         /// Maximum request rate per second
         #[arg(long = "max-rate")]
         max_rate: Option<f64>,
+
+        /// Fetch task HTTP timeout in seconds
+        #[arg(long = "fetch-timeout", value_name = "SECS")]
+        fetch_timeout: Option<u64>,
     },
 }
 
@@ -426,9 +434,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             max_threads,
             proxy_file,
             timeout,
+            fetch_timeout,
         } => {
             let config_path = get_config_path()?;
-            return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout).await;
+            return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout, fetch_timeout).await;
         }
         Command::Logout => {
             println!("Logging out and clearing node configuration file...");
@@ -458,6 +467,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             initial_rate,
             min_rate,
             max_rate,
+            fetch_timeout,
         } => {
             if verbose {
                 // 设置详细日志级别
@@ -511,6 +521,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 initial_rate,
                 min_rate,
                 max_rate,
+                fetch_timeout,
             )
             .await
         }
@@ -535,6 +546,7 @@ async fn start(
     max_threads: Option<u32>,
     proxy_file: Option<String>,
     timeout: Option<u64>,
+    fetch_timeout: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
     let mut node_id = node_id;
     let _config = match Config::load_from_file(&config_path) {
@@ -551,6 +563,11 @@ async fn start(
     if let Some(timeout_value) = timeout {
         // 设置全局429超时参数
         crate::consts::set_retry_timeout(timeout_value);
+    }
+
+    // 设置获取任务HTTP超时（秒）
+    if let Some(fetch_secs) = fetch_timeout {
+        std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
     }
 
     // 创建增强型协调器客户端，传入代理文件
@@ -704,6 +721,7 @@ async fn start_batch_processing(
     initial_rate: Option<f64>,
     min_rate: Option<f64>,
     max_rate: Option<f64>,
+    fetch_timeout: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
     // 设置日志输出详细程度
     crate::prover_runtime::set_verbose_output(verbose);
@@ -715,6 +733,11 @@ async fn start_batch_processing(
     if let Some(timeout_value) = timeout {
         // 设置全局429超时参数
         crate::consts::set_retry_timeout(timeout_value);
+    }
+    
+    // 设置获取任务HTTP超时（秒）
+    if let Some(fetch_secs) = fetch_timeout {
+        std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
     }
     
     // 加载节点列表
@@ -745,6 +768,11 @@ async fn start_batch_processing(
         println!("⏰ 429错误超时: {}s (±10%)", timeout_val);
     } else {
         println!("⏰ 429错误超时: 默认值");
+    }
+    if let Some(fetch_secs) = fetch_timeout {
+        println!("🌐 获取任务HTTP超时: {}s", fetch_secs);
+    } else {
+        println!("🌐 获取任务HTTP超时: 默认值");
     }
     println!("🌍 环境: {:?}", environment);
     println!("🧵 每节点工作线程: {}", workers_per_node);
