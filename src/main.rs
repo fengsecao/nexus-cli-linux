@@ -567,7 +567,9 @@ async fn start(
 
     // 设置获取任务HTTP超时（秒）
     if let Some(fetch_secs) = fetch_timeout {
-        std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
+        unsafe {
+            std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
+        }
     }
 
     // 创建增强型协调器客户端，传入代理文件
@@ -737,7 +739,9 @@ async fn start_batch_processing(
     
     // 设置获取任务HTTP超时（秒）
     if let Some(fetch_secs) = fetch_timeout {
-        std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
+        unsafe {
+            std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
+        }
     }
     
     // 加载节点列表
