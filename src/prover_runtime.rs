@@ -2890,8 +2890,8 @@ async fn run_memory_optimized_node(
                                         }
                                         break;
                                     } else {
-                                        // 非429/404/409错误：按既有0.1s等待策略
-                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                        // 非429/404/409错误：按既有1s等待策略
+                                         tokio::time::sleep(Duration::from_secs(1)).await;
                                         retry_count += 1;
                                     }
                                 }
@@ -2905,8 +2905,8 @@ async fn run_memory_optimized_node(
                                         update_status(format!("[{}] ⚠️ 429限制 - 等待60s后重试", timestamp));
                                         tokio::time::sleep(Duration::from_secs(60)).await;
                                     } else {
-                                        update_status(format!("[{}] ⚠️ 提交失败 - 等待0.1s后重试", timestamp));
-                                        tokio::time::sleep(Duration::from_millis(100)).await;
+                                        update_status(format!("[{}] ⚠️ 提交失败 - 等待1s后重试", timestamp));
+                                        tokio::time::sleep(Duration::from_secs(1)).await;
                                     }
                                 }
                                 break;
@@ -2921,7 +2921,7 @@ async fn run_memory_optimized_node(
                             rate_limit_tracker.reset_429_count(node_id).await;
                             
                             update_status(format!("[{}] ❌ 证明生成失败: {}", timestamp, e));
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }
                     
@@ -3016,7 +3016,7 @@ async fn run_memory_optimized_node(
                         }
                         
                         // 如果轮转失败或未启用轮转，等待后继续
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                         tokio::time::sleep(Duration::from_secs(1)).await;
                     } else {
                         // 其他错误
                         _consecutive_failures += 1;
@@ -3041,12 +3041,12 @@ async fn run_memory_optimized_node(
                                 return;
                             } else {
                                 // 轮转失败，短暂等待
-                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                 tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         } else {
                         update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
-                            timestamp, error_str, attempt, MAX_TASK_RETRIES));
-                        tokio::time::sleep(Duration::from_millis(100)).await;
+                             timestamp, error_str, attempt, MAX_TASK_RETRIES));
+                         tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }
                     attempt += 1;
