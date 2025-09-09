@@ -11,6 +11,7 @@ use crate::consts::prover::{
 };
 use crate::error_classifier::{ErrorClassifier, LogLevel};
 use crate::events::Event;
+use crate::prover_runtime::set_node_state;
 use crate::orchestrator::Orchestrator;
 use crate::orchestrator::error::OrchestratorError;
 use crate::task::Task;
@@ -196,8 +197,23 @@ pub async fn fetch_prover_tasks(
                     log_queue_status(&event_sender, tasks_in_queue, &state).await;
                 }
 
+                // 当未到取任务时机但队列低水位，显示退避剩余时间
+                if tasks_in_queue < LOW_WATER_MARK && !state.should_fetch(tasks_in_queue) {
+                    let remain = state
+                        .backoff_duration
+                        .as_secs()
+                        .saturating_sub(state.last_fetch_time.elapsed().as_secs());
+                    set_node_state(node_id, &format!("等待 {}s 后再取任务", remain.max(0)));
+                }
+
                 // Attempt fetch if conditions are met
                 if state.should_fetch(tasks_in_queue) {
+                    // 若当前无可用取任务许可，则提示排队
+                    if GLOBAL_FETCH_SEMAPHORE.available_permits() == 0 {
+                        set_node_state(node_id, "排队等待取任务许可...");
+                    } else {
+                        set_node_state(node_id, "获取任务 (1/5)");
+                    }
                     // 串行放号：获取全局取任务许可
                     let _permit = GLOBAL_FETCH_SEMAPHORE.acquire().await.expect("semaphore poisoned");
 
@@ -502,6 +518,8 @@ async fn handle_fetch_error(
                             LogLevel::Warn,
                         ))
                         .await;
+                    // 把节点状态也更新为“等待Xs后重试”
+                    set_node_state(*node_id, &format!("等待 {}s 后再取任务", retry_after));
                 } else {
                     state.increase_backoff_for_rate_limit();
                 }
