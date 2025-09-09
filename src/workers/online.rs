@@ -197,23 +197,22 @@ pub async fn fetch_prover_tasks(
                     log_queue_status(&event_sender, tasks_in_queue, &state).await;
                 }
 
-                // 当未到取任务时机但队列低水位，显示退避剩余时间
-                if tasks_in_queue < LOW_WATER_MARK && !state.should_fetch(tasks_in_queue) {
-                    let remain = state
-                        .backoff_duration
-                        .as_secs()
-                        .saturating_sub(state.last_fetch_time.elapsed().as_secs());
-                    set_node_state(node_id, &format!("等待 {}s 后再取任务", remain.max(0)));
+                // 显示排队/退避倒计时（无论是否触发取任务）
+                let remain = state
+                    .backoff_duration
+                    .as_secs()
+                    .saturating_sub(state.last_fetch_time.elapsed().as_secs());
+                if GLOBAL_FETCH_SEMAPHORE.available_permits() == 0 {
+                    set_node_state(node_id, "排队等待取任务许可...");
+                } else if !state.should_fetch(tasks_in_queue) && remain > 0 {
+                    set_node_state(node_id, &format!("等待 {}s 后再取任务", remain));
                 }
 
                 // Attempt fetch if conditions are met
                 if state.should_fetch(tasks_in_queue) {
-                    // 若当前无可用取任务许可，则提示排队
-                    if GLOBAL_FETCH_SEMAPHORE.available_permits() == 0 {
-                        set_node_state(node_id, "排队等待取任务许可...");
-                    } else {
-                        set_node_state(node_id, "获取任务 (1/5)");
-                    }
+                    // 若当前无可用取任务许可，则提示排队；否则标记将取任务
+                    if GLOBAL_FETCH_SEMAPHORE.available_permits() == 0 { set_node_state(node_id, "排队等待取任务许可..."); }
+                    else { set_node_state(node_id, "获取任务 (1/5)"); }
                     // 串行放号：获取全局取任务许可
                     let _permit = GLOBAL_FETCH_SEMAPHORE.acquire().await.expect("semaphore poisoned");
 
