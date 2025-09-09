@@ -36,7 +36,7 @@ static GLOBAL_FETCH_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(1);
+        .unwrap_or(10);
     Semaphore::new(permits)
 });
 

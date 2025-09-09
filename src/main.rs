@@ -91,6 +91,10 @@ enum Command {
         #[arg(long = "fetch-timeout", value_name = "SECS")]
         fetch_timeout: Option<u64>,
 
+        /// Max concurrent task fetch permits (global)
+        #[arg(long = "fetch-concurrency", value_name = "N")]
+        fetch_concurrency: Option<usize>,
+
         /// Maximum task difficulty to request (small|medium|large|0|5|10)
         #[arg(long = "max-difficulty", value_name = "DIFFICULTY")]
         max_difficulty: Option<String>,
@@ -182,6 +186,10 @@ enum Command {
         /// Rotate after N consecutive 429s (0=disable rotation)
         #[arg(long = "rotate-after-429", value_name = "N")]
         rotate_after_429: Option<u32>,
+
+        /// Max concurrent task fetch permits (global)
+        #[arg(long = "fetch-concurrency", value_name = "N")]
+        fetch_concurrency: Option<usize>,
     },
 }
 
@@ -458,11 +466,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
             proxy_file,
             timeout,
             fetch_timeout,
+            fetch_concurrency,
             max_difficulty,
             rotate_after_429,
         } => {
             let config_path = get_config_path()?;
-            return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout, fetch_timeout, max_difficulty, rotate_after_429).await;
+            return start(
+                node_id,
+                environment,
+                config_path,
+                headless,
+                max_threads,
+                proxy_file,
+                timeout,
+                fetch_timeout,
+                fetch_concurrency,
+                max_difficulty,
+                rotate_after_429,
+            ).await;
         }
         Command::Logout => {
             println!("Logging out and clearing node configuration file...");
@@ -495,6 +516,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             fetch_timeout,
             max_difficulty,
             rotate_after_429,
+            fetch_concurrency,
         } => {
             if verbose {
                 // 设置详细日志级别
@@ -549,6 +571,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 min_rate,
                 max_rate,
                 fetch_timeout,
+                fetch_concurrency,
                 max_difficulty,
                 rotate_after_429,
             )
@@ -576,6 +599,7 @@ async fn start(
     proxy_file: Option<String>,
     timeout: Option<u64>,
     fetch_timeout: Option<u64>,
+    fetch_concurrency: Option<usize>,
     max_difficulty: Option<String>,
     rotate_after_429: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
@@ -600,6 +624,14 @@ async fn start(
     if let Some(fetch_secs) = fetch_timeout {
         unsafe {
             std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
+        }
+    }
+
+    // 设置全局取任务并发（许可数）
+    if let Some(n) = fetch_concurrency {
+        if n > 0 {
+            unsafe { std::env::set_var("NEXUS_FETCH_CONCURRENCY", n.to_string()); }
+            println!("🧵 取任务并发许可: {}", n);
         }
     }
 
@@ -765,6 +797,7 @@ async fn start_batch_processing(
     min_rate: Option<f64>,
     max_rate: Option<f64>,
     fetch_timeout: Option<u64>,
+    fetch_concurrency: Option<usize>,
     max_difficulty: Option<String>,
     rotate_after_429: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
@@ -784,6 +817,13 @@ async fn start_batch_processing(
     if let Some(fetch_secs) = fetch_timeout {
         unsafe {
             std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
+        }
+    }
+    // 设置全局取任务并发（许可数）
+    if let Some(n) = fetch_concurrency {
+        if n > 0 {
+            unsafe { std::env::set_var("NEXUS_FETCH_CONCURRENCY", n.to_string()); }
+            println!("🧵 取任务并发许可: {}", n);
         }
     }
     
