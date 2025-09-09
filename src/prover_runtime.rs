@@ -80,6 +80,9 @@ static CACHED_TIMESTAMP: Lazy<Mutex<String>> = Lazy::new(|| {
     Mutex::new(chrono::Local::now().format("%H:%M:%S").to_string())
 });
 
+// 应用启动时间，用于冷启动宽限期控制
+static APP_START_INSTANT: Lazy<Instant> = Lazy::new(|| Instant::now());
+
 /// 高性能时间戳生成 - 秒级缓存避免重复格式化
 fn get_timestamp_efficient() -> String {
     let now_secs = std::time::SystemTime::now()
@@ -3099,13 +3102,20 @@ async fn cleanup_active_nodes(
         }
     }
     
+    // 冷启动宽限期：应用启动后前10秒不触发强制清理/截断，仅做增量同步
+    let in_warmup = APP_START_INSTANT.elapsed() < Duration::from_secs(10);
+
     // 如果活跃节点数量超过最大并发数，强制限制
     let active_node_ids_limited = if active_node_ids.len() > max_concurrent {
-        log_println!("⚠️ 节点清理: 活跃节点数量 ({}) 超过最大并发数 ({}), 进行限制", 
-                active_node_ids.len(), max_concurrent);
-        
-        // 只保留前max_concurrent个节点
-        active_node_ids.iter().take(max_concurrent).cloned().collect::<Vec<u64>>()
+        if in_warmup {
+            log_println!("⏳ 冷启动: 活跃节点 {} > 并发 {}, 暂不截断，仅做增量同步", active_node_ids.len(), max_concurrent);
+            active_node_ids.clone()
+        } else {
+            log_println!("⚠️ 节点清理: 活跃节点数量 ({}) 超过最大并发数 ({}), 进行限制", 
+                    active_node_ids.len(), max_concurrent);
+            // 只保留前max_concurrent个节点
+            active_node_ids.iter().take(max_concurrent).cloned().collect::<Vec<u64>>()
+        }
     } else {
         active_node_ids
     };
@@ -3114,7 +3124,7 @@ async fn cleanup_active_nodes(
     let global_active_count = get_global_active_node_count();
     
     // 如果全局活跃节点数量与实际活跃节点数量不一致，打印警告
-    if global_active_count != active_node_ids_limited.len() {
+    if !in_warmup && global_active_count != active_node_ids_limited.len() {
         log_println!("⚠️ 节点清理: 全局活跃节点数量 ({}) 与实际活跃节点数量 ({}) 不一致，执行强制同步", 
                 global_active_count, active_node_ids_limited.len());
         
@@ -3139,9 +3149,9 @@ async fn cleanup_active_nodes(
         // 1. 活动节点列表为空
         // 2. 活动节点列表大小与实际活跃节点数量差异超过2
         // 3. 活动节点列表超过最大并发数
-        let should_rebuild = nodes_guard.is_empty() || 
+        let should_rebuild = !in_warmup && (nodes_guard.is_empty() || 
                             (nodes_guard.len() as i64 - active_node_ids_limited.len() as i64).abs() > 2 ||
-                            nodes_guard.len() > max_concurrent;
+                            nodes_guard.len() > max_concurrent);
         
         if should_rebuild {
             // 强制清空活动节点列表，以确保下面的操作从零开始，避免累积
@@ -3225,7 +3235,7 @@ async fn cleanup_active_nodes(
         }
         
         // 再次确保活动节点列表不超过最大并发数
-        if nodes_guard.len() > max_concurrent {
+        if !in_warmup && nodes_guard.len() > max_concurrent {
             log_println!("⚠️ 节点清理: 活动节点列表仍然超出限制 ({} > {}), 强制截断", 
                     nodes_guard.len(), max_concurrent);
             nodes_guard.truncate(max_concurrent);

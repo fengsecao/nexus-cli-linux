@@ -29,6 +29,7 @@ pub enum ProverError {
     GuestProgram(String),
 
     #[error("Analytics tracking error: {0}")]
+    #[allow(dead_code)]
     Analytics(String),
     
     #[error("Rate limited (429): {0}")]

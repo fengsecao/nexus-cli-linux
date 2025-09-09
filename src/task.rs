@@ -47,6 +47,7 @@ impl Task {
     }
 
     /// Combines multiple proof hashes into a single hash using Keccak-256
+    #[allow(dead_code)]
     pub fn combine_proof_hashes(hashes: &[String]) -> String {
         if hashes.is_empty() {
             return String::new();
@@ -76,6 +77,7 @@ impl Display for Task {
 }
 
 // From Task (older proto with single input only)
+#[allow(deprecated)]
 impl From<&crate::nexus_orchestrator::Task> for Task {
     fn from(task: &crate::nexus_orchestrator::Task) -> Self {
         // Use new fields if present; fall back to deprecated single input
@@ -85,7 +87,7 @@ impl From<&crate::nexus_orchestrator::Task> for Task {
             vec![task.public_inputs.clone()]
         };
         let public_inputs = public_inputs_list.first().cloned().unwrap_or_default();
-        let task_type = crate::nexus_orchestrator::TaskType::from_i32(task.task_type)
+        let task_type = <crate::nexus_orchestrator::TaskType as core::convert::TryFrom<i32>>::try_from(task.task_type)
             .unwrap_or(crate::nexus_orchestrator::TaskType::ProofRequired);
         Task {
             task_id: task.task_id.clone(),
@@ -98,6 +100,7 @@ impl From<&crate::nexus_orchestrator::Task> for Task {
 }
 
 // From GetProofTaskResponse (older proto with single input only)
+#[allow(deprecated)]
 impl From<&crate::nexus_orchestrator::GetProofTaskResponse> for Task {
     fn from(response: &crate::nexus_orchestrator::GetProofTaskResponse) -> Self {
         // Prefer embedded Task in response if available
