@@ -94,6 +94,10 @@ enum Command {
         /// Maximum task difficulty to request (small|medium|large|0|5|10)
         #[arg(long = "max-difficulty", value_name = "DIFFICULTY")]
         max_difficulty: Option<String>,
+
+        /// Rotate after N consecutive 429s (0=disable rotation)
+        #[arg(long = "rotate-after-429", value_name = "N")]
+        rotate_after_429: Option<u32>,
     },
     /// Register a new user
     RegisterUser {
@@ -174,6 +178,10 @@ enum Command {
         /// Maximum task difficulty to request (small|medium|large|0|5|10)
         #[arg(long = "max-difficulty", value_name = "DIFFICULTY")]
         max_difficulty: Option<String>,
+
+        /// Rotate after N consecutive 429s (0=disable rotation)
+        #[arg(long = "rotate-after-429", value_name = "N")]
+        rotate_after_429: Option<u32>,
     },
 }
 
@@ -446,7 +454,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             max_difficulty,
         } => {
             let config_path = get_config_path()?;
-            return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout, fetch_timeout, max_difficulty).await;
+            return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout, fetch_timeout, max_difficulty, rotate_after_429).await;
         }
         Command::Logout => {
             println!("Logging out and clearing node configuration file...");
@@ -533,6 +541,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 max_rate,
                 fetch_timeout,
                 max_difficulty,
+                rotate_after_429,
             )
             .await
         }
@@ -559,6 +568,7 @@ async fn start(
     timeout: Option<u64>,
     fetch_timeout: Option<u64>,
     max_difficulty: Option<String>,
+    rotate_after_429: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
     let mut node_id = node_id;
     let _config = match Config::load_from_file(&config_path) {
@@ -591,6 +601,10 @@ async fn start(
     if let Some(diff) = max_difficulty.as_ref() {
         unsafe { std::env::set_var("NEXUS_MAX_DIFFICULTY", diff); }
         println!("🎯 最大任务难度: {}", diff);
+    }
+    if let Some(n) = rotate_after_429 {
+        unsafe { std::env::set_var("NEXUS_ROTATE_AFTER_429", n.to_string()); }
+        println!("🔁 连续429阈值: {}", n);
     }
     // If no node ID is provided, try to load it from the config file.
     if node_id.is_none() && config_path.exists() {
@@ -743,6 +757,7 @@ async fn start_batch_processing(
     max_rate: Option<f64>,
     fetch_timeout: Option<u64>,
     max_difficulty: Option<String>,
+    rotate_after_429: Option<u32>,
 ) -> Result<(), Box<dyn Error>> {
     // 设置日志输出详细程度
     crate::prover_runtime::set_verbose_output(verbose);
@@ -766,6 +781,9 @@ async fn start_batch_processing(
     // 设置最大难度（通过环境变量传递给客户端解析）
     if let Some(diff) = max_difficulty.as_ref() {
         unsafe { std::env::set_var("NEXUS_MAX_DIFFICULTY", diff); }
+    }
+    if let Some(n) = rotate_after_429.as_ref() {
+        unsafe { std::env::set_var("NEXUS_ROTATE_AFTER_429", n.to_string()); }
     }
     
     // 加载节点列表
