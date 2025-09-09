@@ -2799,34 +2799,18 @@ async fn run_memory_optimized_node(
                                         // 缓存证明以便后续重试
                                         orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         
-                                        let wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
-                                        
-                                        // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
-                                        if rotation_data.is_some() {
-                                            // 记录429到文件
+                                        // 先退避，达阈值再轮转
+                                        let wait_time = if let Some(secs) = e.get_retry_after_seconds() { secs as u64 } else { 3 + rand::random::<u64>() % 4 };
+                                        if rotation_data.is_some() && (consecutive_429s as u32) >= max_consecutive_429s_before_rotation {
                                             record_429_event(node_id, "submit 429");
-                                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
-                                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
-                                            // 更新节点状态
+                                            update_status(format!("[{}] 🚫 429限制 - 达到阈值，执行轮转", timestamp));
                                             set_node_state(node_id, "遇到429错误，准备轮转");
-                                            
-                                            log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
-                                            log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                                            
-                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
-                                            if should_rotate {
-                                                if let Some(msg) = status_msg {
-                                                    update_status(msg);
-                                                }
-                                                return; // 结束当前节点的处理
-                                            } else {
-                                                log_println!("⚠️ 节点-{}: 轮转失败，继续使用当前节点", node_id);
-                                            }
+                                            let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "429错误达到阈值", &node_tx, &active_threads).await;
+                                            if should_rotate { if let Some(msg) = status_msg { update_status(msg); } return; }
                                         } else {
-                                            log_println!("节点-{}: 429错误 (轮转功能未启用)", node_id);
+                                            update_status(format!("[{}] 🚫 429限制 - 等待{}s后重试", timestamp, wait_time));
+                                            tokio::time::sleep(Duration::from_secs(wait_time)).await;
                                         }
-                                        
-                                        // 即使429，外层不等待，让轮转或上层逻辑处理
                                         break;
                                     } else if error_str.contains("404") || error_str.contains("NotFoundError") || error_str.contains("Task not found") {
                                         update_status(format!("[{}] 🔍 任务已不存在 (404)，触发节点轮转", timestamp));

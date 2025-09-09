@@ -452,6 +452,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             timeout,
             fetch_timeout,
             max_difficulty,
+            rotate_after_429,
         } => {
             let config_path = get_config_path()?;
             return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout, fetch_timeout, max_difficulty, rotate_after_429).await;
@@ -486,6 +487,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             max_rate,
             fetch_timeout,
             max_difficulty,
+            rotate_after_429,
         } => {
             if verbose {
                 // 设置详细日志级别
