@@ -2574,8 +2574,8 @@ async fn run_memory_optimized_node(
                                         if rotation_data.is_some() {
                                              // 记录429到文件
                                              record_429_event(node_id, "cached submit 429");
-                                             // 先更新状态，表明节点遇到429错误（但会立即轮转）
-                                             update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
+                                            // 先更新状态，表明节点遇到429错误（但会立即轮转）
+                                            update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
                                             // 更新节点状态
                                             set_node_state(node_id, "遇到429错误，准备轮转");
                                             
@@ -2852,7 +2852,7 @@ async fn run_memory_optimized_node(
                                         } else {
                                             log_println!("节点-{}: 429错误 (轮转功能未启用)", node_id);
                                         }
-                                         
+                                        
                                         // 即使429，外层不等待，让轮转或上层逻辑处理
                                         break;
                                     } else if error_str.contains("404") || error_str.contains("NotFoundError") || error_str.contains("Task not found") {
@@ -2863,7 +2863,7 @@ async fn run_memory_optimized_node(
                                             if should_rotate {
                                                 if let Some(msg) = status_msg { update_status(msg); }
                                                 return;
-                                            }
+                                        }
                                         }
                                         break;
                                     } else if error_str.contains("409") || error_str.contains("CONFLICT") || error_str.contains("已提交") {
@@ -2892,7 +2892,7 @@ async fn run_memory_optimized_node(
                                     } else {
                                         // 非429/404/409错误：按既有1s等待策略
                                          tokio::time::sleep(Duration::from_secs(1)).await;
-                                        retry_count += 1;
+                                    retry_count += 1;
                                     }
                                 }
                             }
@@ -2944,10 +2944,10 @@ async fn run_memory_optimized_node(
                             record_429_event(node_id, "fetch 429");
                             // 先更新状态，表明节点遇到429错误（但会立即轮转）
                             update_status(format!("[{}] 🚫 429限制 - 正在轮转到新节点...", timestamp));
-                             
+                            
                             log_println!("\n⚠️ 节点-{}: 检测到429错误，立即触发轮转\n", node_id);
                             log_println!("🔄 节点-{}: 429错误，触发轮转", node_id);
-                             
+                            
                             let (should_rotate, status_msg) = rotate_to_next_node(node_id, &rotation_data, "检测到429错误", &node_tx, &active_threads).await;
                             if should_rotate {
                                 if let Some(msg) = status_msg {
@@ -3045,7 +3045,7 @@ async fn run_memory_optimized_node(
                             }
                         } else {
                         update_status(format!("[{}] ❌ 获取任务失败: {} (尝试 {}/{})", 
-                             timestamp, error_str, attempt, MAX_TASK_RETRIES));
+                            timestamp, error_str, attempt, MAX_TASK_RETRIES));
                          tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }

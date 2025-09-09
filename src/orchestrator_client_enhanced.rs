@@ -117,7 +117,16 @@ impl EnhancedOrchestratorClient {
             
             loop {
                 attempts += 1;
-                match self.client.submit_proof(task_id, proof_hash, proof.clone(), signing_key.clone(), 1).await {
+                match self.client.submit_proof(
+                    task_id,
+                    proof_hash,
+                    proof.clone(),                    // legacy single proof
+                    vec![proof.clone()],              // proofs vector (single)
+                    signing_key.clone(),
+                    1,
+                    crate::nexus_orchestrator::TaskType::ProofRequired,
+                    &[],                               // no individual hashes
+                ).await {
                     Ok(_) => {
                         // 成功后移除缓存
                         self.remove_cached_proof(task_id);

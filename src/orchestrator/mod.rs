@@ -38,13 +38,17 @@ pub trait Orchestrator: Send + Sync {
         verifying_key: VerifyingKey,
     ) -> Result<Task, OrchestratorError>;
 
-    /// Submits a proof to the orchestrator.
+    /// Submits a proof to the orchestrator (0.10.10 API).
+    #[allow(clippy::too_many_arguments)]
     async fn submit_proof(
         &self,
         task_id: &str,
         proof_hash: &str,
-        proof: Vec<u8>,
+        legacy_proof: Vec<u8>,
+        proofs: Vec<Vec<u8>>,                    // multi-input proofs
         signing_key: SigningKey,
         num_provers: usize,
+        task_type: crate::nexus_orchestrator::TaskType,
+        individual_proof_hashes: &[String],      // for AllProofHashes
     ) -> Result<(), OrchestratorError>;
 }

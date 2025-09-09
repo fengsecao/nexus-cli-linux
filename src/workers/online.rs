@@ -787,9 +787,12 @@ async fn process_proof_submission(
         return None; // Skip this task
     }
 
-    // Serialize proof
+    // Serialize proof and derive hash
     let proof_bytes = postcard::to_allocvec(&proof).expect("Failed to serialize proof");
     let proof_hash = format!("{:x}", Keccak256::digest(&proof_bytes));
+    // Package for 0.10.10 API: legacy single proof plus multi-proof vector (single element for compatibility)
+    let proofs_vec = vec![proof_bytes.clone()];
+    let individual_hashes = vec![proof_hash.clone()];
 
     // Submit to orchestrator
     match orchestrator
@@ -797,8 +800,11 @@ async fn process_proof_submission(
             &task.task_id,
             &proof_hash,
             proof_bytes,
+            proofs_vec,
             signing_key.clone(),
             num_workers,
+            task.task_type,
+            &individual_hashes,
         )
         .await
     {

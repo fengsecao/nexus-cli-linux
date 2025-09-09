@@ -90,6 +90,10 @@ enum Command {
         /// Fetch task HTTP timeout in seconds
         #[arg(long = "fetch-timeout", value_name = "SECS")]
         fetch_timeout: Option<u64>,
+
+        /// Maximum task difficulty to request (small|medium|large|0|5|10)
+        #[arg(long = "max-difficulty", value_name = "DIFFICULTY")]
+        max_difficulty: Option<String>,
     },
     /// Register a new user
     RegisterUser {
@@ -166,6 +170,10 @@ enum Command {
         /// Fetch task HTTP timeout in seconds
         #[arg(long = "fetch-timeout", value_name = "SECS")]
         fetch_timeout: Option<u64>,
+
+        /// Maximum task difficulty to request (small|medium|large|0|5|10)
+        #[arg(long = "max-difficulty", value_name = "DIFFICULTY")]
+        max_difficulty: Option<String>,
     },
 }
 
@@ -435,9 +443,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             proxy_file,
             timeout,
             fetch_timeout,
+            max_difficulty,
         } => {
             let config_path = get_config_path()?;
-            return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout, fetch_timeout).await;
+            return start(node_id, environment, config_path, headless, max_threads, proxy_file, timeout, fetch_timeout, max_difficulty).await;
         }
         Command::Logout => {
             println!("Logging out and clearing node configuration file...");
@@ -468,6 +477,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             min_rate,
             max_rate,
             fetch_timeout,
+            max_difficulty,
         } => {
             if verbose {
                 // 设置详细日志级别
@@ -522,6 +532,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 min_rate,
                 max_rate,
                 fetch_timeout,
+                max_difficulty,
             )
             .await
         }
@@ -547,6 +558,7 @@ async fn start(
     proxy_file: Option<String>,
     timeout: Option<u64>,
     fetch_timeout: Option<u64>,
+    max_difficulty: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     let mut node_id = node_id;
     let _config = match Config::load_from_file(&config_path) {
@@ -574,6 +586,12 @@ async fn start(
 
     // 创建增强型协调器客户端，传入代理文件
     let _orchestrator = crate::orchestrator_client_enhanced::EnhancedOrchestratorClient::new_with_proxy(env.clone(), proxy_file.as_deref());
+
+    // 设置最大难度（通过环境变量传递给客户端解析）
+    if let Some(diff) = max_difficulty.as_ref() {
+        unsafe { std::env::set_var("NEXUS_MAX_DIFFICULTY", diff); }
+        println!("🎯 最大任务难度: {}", diff);
+    }
     // If no node ID is provided, try to load it from the config file.
     if node_id.is_none() && config_path.exists() {
         let config = Config::load_from_file(&config_path)?;
@@ -724,6 +742,7 @@ async fn start_batch_processing(
     min_rate: Option<f64>,
     max_rate: Option<f64>,
     fetch_timeout: Option<u64>,
+    max_difficulty: Option<String>,
 ) -> Result<(), Box<dyn Error>> {
     // 设置日志输出详细程度
     crate::prover_runtime::set_verbose_output(verbose);
@@ -742,6 +761,11 @@ async fn start_batch_processing(
         unsafe {
             std::env::set_var("NEXUS_FETCH_TIMEOUT_SECS", fetch_secs.to_string());
         }
+    }
+    
+    // 设置最大难度（通过环境变量传递给客户端解析）
+    if let Some(diff) = max_difficulty.as_ref() {
+        unsafe { std::env::set_var("NEXUS_MAX_DIFFICULTY", diff); }
     }
     
     // 加载节点列表
@@ -777,6 +801,11 @@ async fn start_batch_processing(
         println!("🌐 获取任务HTTP超时: {}s", fetch_secs);
     } else {
         println!("🌐 获取任务HTTP超时: 默认值");
+    }
+    if let Some(diff) = max_difficulty.as_ref() {
+        println!("🎯 最大任务难度: {}", diff);
+    } else {
+        println!("🎯 最大任务难度: 默认 (large)");
     }
     println!("🌍 环境: {:?}", environment);
     println!("🧵 每节点工作线程: {}", workers_per_node);

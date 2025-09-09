@@ -28,6 +28,15 @@ use std::collections::HashMap;
 use crate::consts;
 use std::env; // 新增: 读取环境变量
 
+// Build timestamp in milliseconds since epoch (optional)
+static BUILD_TIMESTAMP: &str = match option_env!("BUILD_TIMESTAMP") {
+    Some(ts) => ts,
+    None => "Build timestamp not available",
+};
+
+// User-Agent string with CLI version
+const USER_AGENT: &str = concat!("nexus-cli/", env!("CARGO_PKG_VERSION"));
+
 // Privacy-preserving country detection for network optimization.
 // Only stores 2-letter country codes (e.g., "US", "CA", "GB") to help route
 // requests to the nearest Nexus network servers for better performance.
@@ -302,6 +311,22 @@ impl OrchestratorClient {
         )
     }
 
+    /// Resolve max difficulty from env `NEXUS_MAX_DIFFICULTY` (small|medium|large|0|5|10)
+    fn resolve_max_difficulty() -> i32 {
+        match std::env::var("NEXUS_MAX_DIFFICULTY") {
+            Ok(val) => {
+                let lower = val.to_lowercase();
+                if lower == "small" || lower == "0" { return crate::nexus_orchestrator::TaskDifficulty::Small as i32; }
+                if lower == "medium" || lower == "5" { return crate::nexus_orchestrator::TaskDifficulty::Medium as i32; }
+                if lower == "large" || lower == "10" { return crate::nexus_orchestrator::TaskDifficulty::Large as i32; }
+                // Fallback to parsing integer
+                if let Ok(num) = lower.parse::<i32>() { return num; }
+                crate::nexus_orchestrator::TaskDifficulty::Large as i32
+            }
+            Err(_) => crate::nexus_orchestrator::TaskDifficulty::Large as i32,
+        }
+    }
+
     fn encode_request<T: Message>(request: &T) -> Vec<u8> {
         request.encode_to_vec()
     }
@@ -480,8 +505,7 @@ impl OrchestratorClient {
             let is_429 = self.is_429_error(error);
             
             let backoff_time = if is_429 {
-                // 使用配置的429超时时间（带±10%随机浮动）
-                consts::get_retry_timeout()
+                if let Some(secs) = error.get_retry_after_seconds() { secs as u64 } else { consts::get_retry_timeout() }
             } else if !has_proxy || failure_count > 1 {
                 // 对于其他错误，使用指数退避
                 std::cmp::min(2u64.pow((failure_count - 1) as u32), 30)
@@ -532,6 +556,8 @@ impl OrchestratorClient {
         let response = client
             .get(url)
             .header("Content-Type", "application/octet-stream")
+            .header("User-Agent", USER_AGENT)
+            .header("X-Build-Timestamp", BUILD_TIMESTAMP)
             .body(body)
             .send()
             .await?;
@@ -585,8 +611,7 @@ impl OrchestratorClient {
             let is_429 = self.is_429_error(error);
             
             let backoff_time = if is_429 {
-                // 使用配置的429超时时间（带±10%随机浮动）
-                consts::get_retry_timeout()
+                if let Some(secs) = error.get_retry_after_seconds() { secs as u64 } else { consts::get_retry_timeout() }
             } else if !has_proxy || failure_count > 1 {
                 // 对于其他错误，使用指数退避
                 std::cmp::min(2u64.pow((failure_count - 1) as u32), 30)
@@ -637,6 +662,8 @@ impl OrchestratorClient {
         let response = client
             .post(url)
             .header("Content-Type", "application/octet-stream")
+            .header("User-Agent", USER_AGENT)
+            .header("X-Build-Timestamp", BUILD_TIMESTAMP)
             .body(body)
             .send()
             .await?;
@@ -690,8 +717,7 @@ impl OrchestratorClient {
             let is_429 = self.is_429_error(error);
             
             let backoff_time = if is_429 {
-                // 使用配置的429超时时间（带±10%随机浮动）
-                consts::get_retry_timeout()
+                if let Some(secs) = error.get_retry_after_seconds() { secs as u64 } else { consts::get_retry_timeout() }
             } else if !has_proxy || failure_count > 1 {
                 // 对于其他错误，使用指数退避
                 std::cmp::min(2u64.pow((failure_count - 1) as u32), 30)
@@ -742,6 +768,8 @@ impl OrchestratorClient {
         let response = client
             .post(url)
             .header("Content-Type", "application/octet-stream")
+            .header("User-Agent", USER_AGENT)
+            .header("X-Build-Timestamp", BUILD_TIMESTAMP)
             .body(body)
             .send()
             .await?;
@@ -949,6 +977,7 @@ impl Orchestrator for OrchestratorClient {
             node_id: node_id.to_string(),
             node_type: NodeType::CliProver as i32,
             ed25519_public_key: verifying_key.to_bytes().to_vec(),
+            max_difficulty: Self::resolve_max_difficulty(),
         };
         let request_bytes = Self::encode_request(&request);
 
@@ -961,9 +990,12 @@ impl Orchestrator for OrchestratorClient {
         &self,
         task_id: &str,
         proof_hash: &str,
-        proof: Vec<u8>,
+        legacy_proof: Vec<u8>,
+        proofs: Vec<Vec<u8>>,
         signing_key: SigningKey,
         num_provers: usize,
+        task_type: crate::nexus_orchestrator::TaskType,
+        individual_proof_hashes: &[String],
     ) -> Result<(), OrchestratorError> {
         let (program_memory, total_memory) = get_memory_info();
         let flops = estimate_peak_gflops(num_provers);
@@ -971,11 +1003,23 @@ impl Orchestrator for OrchestratorClient {
 
         // Detect country for network optimization (privacy-preserving: only country code, no precise location)
         let location = self.get_country().await;
+        let (proof_to_send, proofs_to_send, all_proof_hashes_to_send) = {
+            // selection logic aligned with 0.10.10
+            match task_type {
+                crate::nexus_orchestrator::TaskType::ProofHash => (Vec::new(), Vec::new(), Vec::new()),
+                crate::nexus_orchestrator::TaskType::AllProofHashes => (Vec::new(), Vec::new(), individual_proof_hashes.to_vec()),
+                _ => {
+                    let legacy = if proofs.len() == 1 { legacy_proof } else { Vec::new() };
+                    (legacy, proofs, Vec::new())
+                }
+            }
+        };
+
         let request = SubmitProofRequest {
             task_id: task_id.to_string(),
             node_type: NodeType::CliProver as i32,
             proof_hash: proof_hash.to_string(),
-            proof,
+            proof: proof_to_send,
             node_telemetry: Some(crate::nexus_orchestrator::NodeTelemetry {
                 flops_per_sec: Some(flops as i32),
                 memory_used: Some(program_memory),
@@ -985,6 +1029,8 @@ impl Orchestrator for OrchestratorClient {
             }),
             ed25519_public_key: public_key,
             signature,
+            all_proof_hashes: all_proof_hashes_to_send,
+            proofs: proofs_to_send,
         };
         let request_bytes = Self::encode_request(&request);
 
