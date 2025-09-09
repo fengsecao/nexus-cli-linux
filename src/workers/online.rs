@@ -20,12 +20,24 @@ use ed25519_dalek::SigningKey;
 use sha3::{Digest, Keccak256};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
+use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use nexus_sdk::stwo::seq::Proof;
 use chrono;
+use once_cell::sync::Lazy;
+
+// 全局取任务调度器：限制同时取任务的并发数，默认1（串行放号）
+static GLOBAL_FETCH_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| {
+    let permits = std::env::var("NEXUS_FETCH_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(1);
+    Semaphore::new(permits)
+});
 
 /// 节点速率限制跟踪器，用于记录每个节点的连续429计数
 #[derive(Debug, Clone, Default)]
@@ -186,6 +198,13 @@ pub async fn fetch_prover_tasks(
 
                 // Attempt fetch if conditions are met
                 if state.should_fetch(tasks_in_queue) {
+                    // 串行放号：获取全局取任务许可
+                    let _permit = GLOBAL_FETCH_SEMAPHORE.acquire().await.expect("semaphore poisoned");
+
+                    // 为避免同时撞限，增加100-400ms随机抖动
+                    let jitter_ms = 100 + (rand::random::<u64>() % 301);
+                    tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+
                     if let Err(should_return) = attempt_task_fetch(
                         &*orchestrator_client,
                         &node_id,
@@ -200,6 +219,7 @@ pub async fn fetch_prover_tasks(
                             return;
                         }
                     }
+                    // _permit在此作用域结束时自动释放
                 }
             }
         }
@@ -471,8 +491,19 @@ async fn handle_fetch_error(
                 // Rate limiting requires special handling
                 if let Some(retry_after) = error.get_retry_after_seconds() {
                     state.set_backoff_from_server(retry_after);
+                    let _ = event_sender
+                        .send(Event::task_fetcher_with_level(
+                            format!(
+                                "[{}] 429限流: 服务端要求 Retry-After={}s",
+                                chrono::Local::now().format("%H:%M:%S"),
+                                retry_after
+                            ),
+                            crate::events::EventType::Warning,
+                            LogLevel::Warn,
+                        ))
+                        .await;
                 } else {
-                state.increase_backoff_for_rate_limit();
+                    state.increase_backoff_for_rate_limit();
                 }
                 state.increment_429_count(); // 保留原有的计数器
                 
