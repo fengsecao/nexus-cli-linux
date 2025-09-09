@@ -368,10 +368,17 @@ impl FixedLineDisplay {
             let mut active_sorted: Vec<u64> = active_node_ids.iter().copied().collect();
             active_sorted.sort_unstable();
             for node_id in active_sorted.iter().take(30) {
-                let status = lines.get(node_id).cloned().unwrap_or_else(|| {
-                    let s = crate::prover_runtime::get_node_state(*node_id);
-                    format!("{}", s)
-                });
+                // 合并显示：优先展示包含倒计时/排队信息的全局状态
+                let line_status_opt = lines.get(node_id).cloned();
+                let global_status = crate::prover_runtime::get_node_state(*node_id);
+                let use_global = global_status.contains("等待 ") || global_status.contains("排队等待");
+                let status = if use_global {
+                    global_status
+                } else if let Some(s) = line_status_opt {
+                    s
+                } else {
+                    global_status
+                };
                 let line_no_opt = self.line_numbers.get(node_id).copied();
                 if let Some(label) = self.labels.get(node_id) {
                     if let Some(line_no) = line_no_opt {
