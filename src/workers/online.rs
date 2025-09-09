@@ -793,6 +793,7 @@ async fn process_proof_submission(
     // Package for 0.10.10 API: legacy single proof plus multi-proof vector (single element for compatibility)
     let proofs_vec = vec![proof_bytes.clone()];
     let individual_hashes = vec![proof_hash.clone()];
+    // Convert our TaskType (now proto type) passthrough
 
     // Submit to orchestrator
     match orchestrator

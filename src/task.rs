@@ -7,13 +7,8 @@
 use sha3::{Digest, Keccak256};
 use std::fmt::Display;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum TaskType {
-    /// Full proof must be submitted
-    ProofRequired,
-    /// Only proof hash is used for scoring (server may ignore proof bytes)
-    ProofHash,
-}
+/// Back-compat alias so callers referencing `crate::task::TaskType` keep working
+pub type TaskType = crate::nexus_orchestrator::TaskType;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Task {
@@ -83,13 +78,21 @@ impl Display for Task {
 // From Task (older proto with single input only)
 impl From<&crate::nexus_orchestrator::Task> for Task {
     fn from(task: &crate::nexus_orchestrator::Task) -> Self {
+        // Use new fields if present; fall back to deprecated single input
+        let public_inputs_list = if !task.public_inputs_list.is_empty() {
+            task.public_inputs_list.clone()
+        } else {
+            vec![task.public_inputs.clone()]
+        };
+        let public_inputs = public_inputs_list.first().cloned().unwrap_or_default();
+        let task_type = crate::nexus_orchestrator::TaskType::from_i32(task.task_type)
+            .unwrap_or(crate::nexus_orchestrator::TaskType::ProofRequired);
         Task {
             task_id: task.task_id.clone(),
             program_id: task.program_id.clone(),
-            public_inputs: task.public_inputs.clone(),
-            public_inputs_list: vec![task.public_inputs.clone()],
-            // Older proto does not provide task type; default to ProofRequired
-            task_type: TaskType::ProofRequired,
+            public_inputs,
+            public_inputs_list,
+            task_type,
         }
     }
 }
@@ -97,13 +100,17 @@ impl From<&crate::nexus_orchestrator::Task> for Task {
 // From GetProofTaskResponse (older proto with single input only)
 impl From<&crate::nexus_orchestrator::GetProofTaskResponse> for Task {
     fn from(response: &crate::nexus_orchestrator::GetProofTaskResponse) -> Self {
+        // Prefer embedded Task in response if available
+        if let Some(task) = response.task.as_ref() {
+            return Task::from(task);
+        }
+        // Fallback for older fields
         Task {
             task_id: response.task_id.clone(),
             program_id: response.program_id.clone(),
             public_inputs: response.public_inputs.clone(),
             public_inputs_list: vec![response.public_inputs.clone()],
-            // Older proto does not provide task type; default to ProofRequired
-            task_type: TaskType::ProofRequired,
+            task_type: crate::nexus_orchestrator::TaskType::ProofRequired,
         }
     }
 }
