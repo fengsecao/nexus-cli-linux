@@ -2131,19 +2131,8 @@ async fn rotate_to_next_node(
                 }
             }
             
-            // 创建一个临时的活动线程状态映射，用于清理
-            let active_threads_for_cleanup = Arc::new(Mutex::new(HashMap::<u64, bool>::new()));
-            
-            // 将新节点标记为活跃状态
-            {
-                let mut threads_guard = active_threads_for_cleanup.lock();
-                threads_guard.insert(final_next_node_id, true);
-            }
-            
-            // 强制执行一次节点清理，确保状态一致
-            cleanup_active_nodes(active_nodes, &active_threads_for_cleanup, *max_concurrent).await;
-            
-            // 确保新节点在全局活跃节点集合中
+            // 不再执行全量清理，避免影响其他等待中的节点
+            // 此处仅确保新节点在全局活跃集合中（通常前面已经添加过，这里兜底一次）
             if !is_node_globally_active(final_next_node_id) {
                 add_global_active_node(final_next_node_id);
                 log_println!("🌍 节点-{}: 确保新节点-{} 在全局活跃节点集合中", node_id, final_next_node_id);
