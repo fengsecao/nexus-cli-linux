@@ -2370,7 +2370,7 @@ async fn run_memory_optimized_node(
     const MAX_CONSECUTIVE_429S_BEFORE_ROTATION: u32 = 0; // 连续429错误达到此数量时轮转（改为0，确保立即轮转）
     let mut _consecutive_failures = 0; // 改为_consecutive_failures
     let mut proof_count = 0;
-    let mut _consecutive_429s_counter = 0; // 跟踪连续429错误（未直接使用，仅防止告警）
+    let mut consecutive_429s = 0; // 跟踪连续429错误
     
     // 添加任务获取失败计数，用于触发轮转
     let mut task_fetch_failures = 0;
@@ -2826,7 +2826,7 @@ async fn run_memory_optimized_node(
                                         // 缓存证明以便后续重试
                                         orchestrator.cache_proof(&task.task_id, &proof_hash, &proof_bytes);
                                         
-                                        let _wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
+                                        let wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
                                         
                                         // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
                                         if rotation_data.is_some() {
@@ -2936,7 +2936,7 @@ async fn run_memory_optimized_node(
                         consecutive_429s += 1; // 增加连续429计数
                         task_fetch_failures += 1; // 增加任务获取失败计数
                         
-                        let _wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
+                        let wait_time = 3 + rand::random::<u64>() % 4; // 3-6秒随机
                         
                         // 如果启用了轮转功能，直接轮转到下一个节点（不管连续429错误数量）
                         if rotation_data.is_some() {
