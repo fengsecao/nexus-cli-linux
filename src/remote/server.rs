@@ -145,8 +145,12 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> Resul
     // Content-Length
     let mut content_length = 0usize;
     for h in &headers {
-        if let Some(v) = h.strip_prefix("Content-Length:") {
-            content_length = v.trim().parse::<usize>().unwrap_or(0);
+        let lower = h.to_lowercase();
+        if lower.starts_with("content-length:") {
+            if let Some(pos) = h.find(':') {
+                let v = &h[pos+1..];
+                content_length = v.trim().parse::<usize>().unwrap_or(0);
+            }
         }
     }
 
@@ -181,7 +185,7 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> Resul
         ("POST", "/v1/jobs") => {
             let req_json: Result<JobSubmitRequest, _> = serde_json::from_slice(&body);
             if req_json.is_err() {
-                let _ = write_json(&mut stream_ref, "400 Bad Request", json!({"ok": false, "error": "bad_request"})).await;
+                let _ = write_json(&mut stream_ref, "400 Bad Request", json!({"ok": false, "error": "bad_request", "hint": "expect application/json with task_id/program_id/task_type/public_inputs_list"})).await;
                 return Ok(());
             }
             let req = req_json.unwrap();
