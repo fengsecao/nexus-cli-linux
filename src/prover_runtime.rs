@@ -2730,7 +2730,24 @@ async fn run_memory_optimized_node(
                     // 更新节点状态
                     set_node_state(node_id, "生成证明中");
                     
-                    match crate::prover::authenticated_proving(&task, &environment, client_id.clone()).await {
+                    let proof_result = if std::env::var("NEXUS_MODE").unwrap_or_default() == "client" {
+                        let base_url = std::env::var("REMOTE_URL").unwrap_or_else(|_| "http://127.0.0.1:8088".to_string());
+                        let auth = std::env::var("REMOTE_AUTH_TOKEN").ok();
+                        let poll_ms = std::env::var("REMOTE_POLL_MS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1000);
+                        let timeout_secs = std::env::var("REMOTE_TIMEOUT_SECS").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(3600);
+                        let rpc = crate::remote::client::RemoteProverClient::new(base_url, auth, poll_ms, timeout_secs);
+                        set_node_state(node_id, "已提交远程作业，等待计算...");
+                        match rpc.request_proof(&task).await {
+                            Ok((proof, _hash)) => Ok(proof),
+                            Err(e) => {
+                                set_node_state(node_id, &format!("远程作业失败: {}", e));
+                                Err(crate::prover::ProverError::Stwo(e))
+                            }
+                        }
+                    } else {
+                        crate::prover::authenticated_proving(&task, &environment, client_id.clone()).await
+                    };
+                    match proof_result {
                         Ok(proof) => {
                             // 证明生成成功，开始提交
                             update_status(format!("[{}] 正在提交证明...", timestamp));
