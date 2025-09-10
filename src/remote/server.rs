@@ -1,6 +1,8 @@
-use axum::{routing::{get, post, delete}, Router, extract::{Path, State}, Json};
-use axum::http::{HeaderMap, StatusCode, header};
-use serde_json::json;
+use hyper::{Request, Response, Body, Method, StatusCode, Server};
+use hyper::service::{make_service_fn, service_fn};
+use http::header;
+use serde_json::{json, Value};
+use std::{convert::Infallible, net::SocketAddr};
 use std::{collections::{HashMap, VecDeque}, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
@@ -49,11 +51,7 @@ pub async fn run_server(listen: &str, environment: Environment, client_id: Strin
     };
 
     let app_state_for_monitor = state.clone();
-
-    let app = Router::new()
-        .route("/v1/jobs", post(submit_job))
-        .route("/v1/jobs/:id", get(get_job).delete(cancel_job))
-        .with_state(state);
+    let state_arc = Arc::new(state);
 
     // Server monitor: print metrics every second
     tokio::spawn(async move {
@@ -115,20 +113,51 @@ pub async fn run_server(listen: &str, environment: Environment, client_id: Strin
         }
     });
 
-    let listener = tokio::net::TcpListener::bind(listen).await.map_err(|e| e.to_string())?;
-    axum::serve(listener, app).await.map_err(|e| e.to_string())
-}
+    let addr: SocketAddr = listen.parse().map_err(|e| e.to_string())?;
+    let make_svc = {
+        let st = state_arc.clone();
+        make_service_fn(move |_conn| {
+            let st2 = st.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req| {
+                    let st3 = st2.clone();
+                    handle_request(req, st3)
+                }))
+            }
+        })
+    };
 
-async fn submit_job(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<JobSubmitRequest>) -> (StatusCode, Json<JobSubmitResponse>) {
-    // Optional bearer auth
+    Server::bind(&addr).serve(make_svc).await.map_err(|e| e.to_string())
+}
+ 
+async fn handle_request(req: Request<Body>, state: Arc<AppState>) -> Result<Response<Body>, Infallible> {
+    let path = req.uri().path().to_string();
+    let method = req.method().clone();
+    let headers = req.headers();
+    // Auth
     if let Some(expected) = &state.auth_token {
         let ok = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .map(|h| h == format!("Bearer {}", expected))
             .unwrap_or(false);
-        if !ok { return (StatusCode::UNAUTHORIZED, Json(JobSubmitResponse { job_id: String::new(), accepted: false })); }
+        if !ok {
+            let resp = Response::builder().status(StatusCode::UNAUTHORIZED).body(Body::from("unauthorized")).unwrap();
+            return Ok(resp);
+        }
     }
+
+    match (method, path.as_str()) {
+        (Method::POST, "/v1/jobs") => {
+            // read body
+            let whole = hyper::body::to_bytes(req.into_body()).await.unwrap_or_default();
+            let req_json: Result<JobSubmitRequest, _> = serde_json::from_slice(&whole);
+            if req_json.is_err() {
+                let resp = Response::builder().status(StatusCode::BAD_REQUEST).body(Body::from("bad request"))
+                    .unwrap();
+                return Ok(resp);
+            }
+            let req = req_json.unwrap();
     let job_id = Uuid::new_v4().to_string();
     let record = JobRecord {
         req,
@@ -143,7 +172,7 @@ async fn submit_job(State(state): State<AppState>, headers: HeaderMap, Json(req)
         jobs.insert(job_id.clone(), record.clone());
     }
 
-    let st = state.clone();
+    let st = state.as_ref().clone();
     let handle = tokio::spawn(async move {
         let _permit = st.semaphore.acquire().await.expect("semaphore");
         *record.state.lock().await = "running".to_string();
@@ -191,58 +220,49 @@ async fn submit_job(State(state): State<AppState>, headers: HeaderMap, Json(req)
         let mut hs = state.job_handles.lock().await;
         hs.insert(job_id.clone(), handle);
     }
-
-    (StatusCode::OK, Json(JobSubmitResponse { job_id, accepted: true }))
-}
-
-async fn get_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> (StatusCode, Json<JobStatusResponse>) {
-    // Optional bearer auth
-    if let Some(expected) = &state.auth_token {
-        let ok = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .map(|h| h == format!("Bearer {}", expected))
-            .unwrap_or(false);
-        if !ok { return (StatusCode::UNAUTHORIZED, Json(JobStatusResponse { job_id: id, state: "unauthorized".into(), phase: None, elapsed_secs: 0, error: Some("unauthorized".into()), proof: None, proof_hash: None })); }
+            let resp = Response::builder().status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&JobSubmitResponse { job_id, accepted: true }).unwrap())).unwrap();
+            Ok(resp)
+        }
+        (Method::GET, p) if p.starts_with("/v1/jobs/") => {
+            let id = p.trim_start_matches("/v1/jobs/").to_string();
+            let jobs = state.jobs.read().await;
+            if let Some(rec) = jobs.get(&id) {
+                let st = rec.state.lock().await.clone();
+                let err = rec.error.lock().await.clone();
+                let proof = rec.result.lock().await.clone();
+                let phash = rec.result_hash.lock().await.clone();
+                let elapsed = rec.started_at.elapsed().as_secs();
+                let phase = match (st.as_str(), proof.is_some()) {
+                    ("queued", _) => Some("received".to_string()),
+                    ("running", false) => Some("computing".to_string()),
+                    ("succeeded", true) => Some("returning".to_string()),
+                    _ => None,
+                };
+                let body = serde_json::to_vec(&JobStatusResponse { job_id: id, state: st, phase, elapsed_secs: elapsed, error: err, proof, proof_hash: phash }).unwrap();
+                let resp = Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).unwrap();
+                return Ok(resp);
+            }
+            let body = serde_json::to_vec(&JobStatusResponse { job_id: id, state: "not_found".to_string(), phase: None, elapsed_secs: 0, error: Some("not found".into()), proof: None, proof_hash: None }).unwrap();
+            let resp = Response::builder().status(StatusCode::NOT_FOUND).header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).unwrap();
+            Ok(resp)
+        }
+        (Method::DELETE, p) if p.starts_with("/v1/jobs/") => {
+            let id = p.trim_start_matches("/v1/jobs/").to_string();
+            if let Some(handle) = state.job_handles.lock().await.remove(&id) { handle.abort(); }
+            if let Some(rec) = state.jobs.write().await.get_mut(&id) {
+                *rec.state.lock().await = "failed".to_string();
+                *rec.error.lock().await = Some("canceled".to_string());
+            }
+            let resp = Response::builder().status(StatusCode::OK).header(header::CONTENT_TYPE, "application/json").body(Body::from(json!({"ok": true}).to_string())).unwrap();
+            Ok(resp)
+        }
+        _ => {
+            let resp = Response::builder().status(StatusCode::NOT_FOUND).body(Body::empty()).unwrap();
+            Ok(resp)
+        }
     }
-    let jobs = state.jobs.read().await;
-    if let Some(rec) = jobs.get(&id) {
-        let st = rec.state.lock().await.clone();
-        let err = rec.error.lock().await.clone();
-        let proof = rec.result.lock().await.clone();
-        let phash = rec.result_hash.lock().await.clone();
-        let elapsed = rec.started_at.elapsed().as_secs();
-        let phase = match (st.as_str(), proof.is_some()) {
-            ("queued", _) => Some("received".to_string()),
-            ("running", false) => Some("computing".to_string()),
-            ("succeeded", true) => Some("returning".to_string()),
-            _ => None,
-        };
-        return (StatusCode::OK, Json(JobStatusResponse { job_id: id, state: st, phase, elapsed_secs: elapsed, error: err, proof, proof_hash: phash }));
-    }
-    (StatusCode::NOT_FOUND, Json(JobStatusResponse { job_id: id, state: "not_found".to_string(), phase: None, elapsed_secs: 0, error: Some("not found".into()), proof: None, proof_hash: None }))
-}
-
-async fn cancel_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
-    // Optional bearer auth
-    if let Some(expected) = &state.auth_token {
-        let ok = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .map(|h| h == format!("Bearer {}", expected))
-            .unwrap_or(false);
-        if !ok { return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false, "error": "unauthorized"}))); }
-    }
-    // Abort running task if present
-    if let Some(handle) = state.job_handles.lock().await.remove(&id) {
-        handle.abort();
-    }
-    // Mark job as canceled
-    if let Some(rec) = state.jobs.write().await.get_mut(&id) {
-        *rec.state.lock().await = "failed".to_string();
-        *rec.error.lock().await = Some("canceled".to_string());
-    }
-    (StatusCode::OK, Json(json!({"ok": true})))
 }
 
 
