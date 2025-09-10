@@ -416,6 +416,41 @@ pub fn get_node_state(node_id: u64) -> String {
     states.get(&node_id).cloned().unwrap_or_else(|| "等待任务".to_string())
 }
 
+// ===== 远程作业统计 =====
+#[derive(Clone, Copy, Default, Debug)]
+pub struct RemoteStats {
+    pub received: u64,
+    pub completed: u64,
+    pub failed: u64,
+}
+
+lazy_static::lazy_static! {
+    static ref REMOTE_NODE_STATS: Mutex<HashMap<u64, RemoteStats>> = Mutex::new(HashMap::new());
+}
+
+pub fn remote_stats_inc_received(node_id: u64) {
+    let mut m = REMOTE_NODE_STATS.lock();
+    let e = m.entry(node_id).or_insert(RemoteStats::default());
+    e.received = e.received.saturating_add(1);
+}
+
+pub fn remote_stats_inc_completed(node_id: u64) {
+    let mut m = REMOTE_NODE_STATS.lock();
+    let e = m.entry(node_id).or_insert(RemoteStats::default());
+    e.completed = e.completed.saturating_add(1);
+}
+
+pub fn remote_stats_inc_failed(node_id: u64) {
+    let mut m = REMOTE_NODE_STATS.lock();
+    let e = m.entry(node_id).or_insert(RemoteStats::default());
+    e.failed = e.failed.saturating_add(1);
+}
+
+pub fn remote_stats_get(node_id: u64) -> RemoteStats {
+    let m = REMOTE_NODE_STATS.lock();
+    m.get(&node_id).copied().unwrap_or_default()
+}
+
 /// 将每次429记录到文件，便于后续排查
 pub fn record_429_event(node_id: u64, reason: &str) {
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");

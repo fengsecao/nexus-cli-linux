@@ -16,6 +16,7 @@ mod nexus_orchestrator;
 mod orchestrator;
 mod pretty;
 mod prover;
+mod remote;
 mod prover_runtime;
 mod register;
 pub mod system;
@@ -32,6 +33,7 @@ use crate::orchestrator::OrchestratorClient;
 use crate::prover_runtime::{start_anonymous_workers, start_authenticated_workers};
 use crate::register::{register_node, register_user};
 use crate::utils::system::MemoryDefragmenter;
+use crate::remote;
 use clap::{ArgAction, Parser, Subcommand};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -102,6 +104,42 @@ enum Command {
         /// Rotate after N consecutive 429s (0=disable rotation)
         #[arg(long = "rotate-after-429", value_name = "N")]
         rotate_after_429: Option<u32>,
+
+        /// Run mode: normal (default), client (task fetcher), server (compute)
+        #[arg(long = "mode", value_name = "MODE")] 
+        mode: Option<String>,
+
+        /// Server listen address when mode=server (e.g. 0.0.0.0:8088)
+        #[arg(long = "listen-addr", value_name = "ADDR")]
+        listen_addr: Option<String>,
+
+        /// Server max concurrent proving jobs when mode=server
+        #[arg(long = "server-max-concurrency", value_name = "N")]
+        server_max_concurrency: Option<usize>,
+
+        /// Server auth token (mode=server)
+        #[arg(long = "server-auth-token", value_name = "TOKEN")]
+        server_auth_token: Option<String>,
+
+        /// Server job timeout seconds (mode=server)
+        #[arg(long = "server-job-timeout-secs", value_name = "SECS")]
+        server_job_timeout_secs: Option<u64>,
+
+        /// Remote prover base URL (mode=client)
+        #[arg(long = "remote-url", value_name = "URL")]
+        remote_url: Option<String>,
+
+        /// Remote prover auth token (mode=client)
+        #[arg(long = "remote-auth-token", value_name = "TOKEN")]
+        remote_auth_token: Option<String>,
+
+        /// Remote poll interval ms (mode=client)
+        #[arg(long = "remote-poll-ms", value_name = "MS")]
+        remote_poll_ms: Option<u64>,
+
+        /// Remote total timeout secs (mode=client)
+        #[arg(long = "remote-timeout-secs", value_name = "SECS")]
+        remote_timeout_secs: Option<u64>,
     },
     /// Register a new user
     RegisterUser {
@@ -190,6 +228,26 @@ enum Command {
         /// Max concurrent task fetch permits (global)
         #[arg(long = "fetch-concurrency", value_name = "N")]
         fetch_concurrency: Option<usize>,
+
+        /// Run mode: normal (default), client (task fetcher), server (compute)
+        #[arg(long = "mode", value_name = "MODE")] 
+        mode: Option<String>,
+
+        /// Remote prover base URL (mode=client)
+        #[arg(long = "remote-url", value_name = "URL")]
+        remote_url: Option<String>,
+
+        /// Remote prover auth token (mode=client)
+        #[arg(long = "remote-auth-token", value_name = "TOKEN")]
+        remote_auth_token: Option<String>,
+
+        /// Remote poll interval ms (mode=client)
+        #[arg(long = "remote-poll-ms", value_name = "MS")]
+        remote_poll_ms: Option<u64>,
+
+        /// Remote total timeout secs (mode=client)
+        #[arg(long = "remote-timeout-secs", value_name = "SECS")]
+        remote_timeout_secs: Option<u64>,
     },
 }
 
@@ -380,13 +438,18 @@ impl FixedLineDisplay {
                 let line_status_opt = lines.get(node_id).cloned();
                 let global_status = crate::prover_runtime::get_node_state(*node_id);
                 let use_global = global_status.contains("等待 ") || global_status.contains("排队等待");
-                let status = if use_global {
+                let mut status = if use_global {
                     global_status
                 } else if let Some(s) = line_status_opt {
                     s
                 } else {
                     global_status
                 };
+                // 追加远程统计（若存在）
+                let rs = crate::prover_runtime::remote_stats_get(*node_id);
+                if rs.received + rs.completed + rs.failed > 0 {
+                    status = format!("{} | 远程: 收:{} 完:{} 败:{}", status, rs.received, rs.completed, rs.failed);
+                }
                 let line_no_opt = self.line_numbers.get(node_id).copied();
                 if let Some(label) = self.labels.get(node_id) {
                     if let Some(line_no) = line_no_opt {
@@ -469,6 +532,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
             fetch_concurrency,
             max_difficulty,
             rotate_after_429,
+            mode,
+            listen_addr,
+            server_max_concurrency,
+            server_auth_token,
+            server_job_timeout_secs,
+            remote_url,
+            remote_auth_token,
+            remote_poll_ms,
+            remote_timeout_secs,
         } => {
             let config_path = get_config_path()?;
             return start(
@@ -483,6 +555,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 fetch_concurrency,
                 max_difficulty,
                 rotate_after_429,
+                mode,
+                listen_addr,
+                server_max_concurrency,
+                server_auth_token,
+                server_job_timeout_secs,
+                remote_url,
+                remote_auth_token,
+                remote_poll_ms,
+                remote_timeout_secs,
             ).await;
         }
         Command::Logout => {
@@ -517,6 +598,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             max_difficulty,
             rotate_after_429,
             fetch_concurrency,
+            mode,
+            remote_url,
+            remote_auth_token,
+            remote_poll_ms,
+            remote_timeout_secs,
         } => {
             if verbose {
                 // 设置详细日志级别
@@ -574,6 +660,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 fetch_concurrency,
                 max_difficulty,
                 rotate_after_429,
+                mode,
+                remote_url,
+                remote_auth_token,
+                remote_poll_ms,
+                remote_timeout_secs,
             )
             .await
         }
@@ -602,6 +693,15 @@ async fn start(
     fetch_concurrency: Option<usize>,
     max_difficulty: Option<String>,
     rotate_after_429: Option<u32>,
+    mode: Option<String>,
+    listen_addr: Option<String>,
+    server_max_concurrency: Option<usize>,
+    server_auth_token: Option<String>,
+    server_job_timeout_secs: Option<u64>,
+    remote_url: Option<String>,
+    remote_auth_token: Option<String>,
+    remote_poll_ms: Option<u64>,
+    remote_timeout_secs: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
     let mut node_id = node_id;
     let _config = match Config::load_from_file(&config_path) {
@@ -646,6 +746,32 @@ async fn start(
     if let Some(n) = rotate_after_429 {
         unsafe { std::env::set_var("NEXUS_ROTATE_AFTER_429", n.to_string()); }
         println!("🔁 连续429阈值: {}", n);
+    }
+
+    // 设置运行模式（normal|client|server），默认 normal
+    let selected_mode = mode.unwrap_or_else(|| "normal".to_string());
+    unsafe { std::env::set_var("NEXUS_MODE", &selected_mode); }
+    println!("🧭 运行模式: {}", selected_mode);
+
+    // 若为 server 模式，直接启动远程证明服务并返回
+    if selected_mode == "server" {
+        let listen = listen_addr.unwrap_or_else(|| "0.0.0.0:8088".to_string());
+        let maxc = server_max_concurrency.unwrap_or(1);
+        let token = server_auth_token;
+        let job_timeout = server_job_timeout_secs.unwrap_or(0);
+        if job_timeout > 0 { println!("⏱️ 作业超时: {}s", job_timeout); }
+        println!("🖥️ 启动远程计算服务: {} 并发={}...", &listen, maxc);
+        return crate::remote::server::run_server(&listen, env, client_id_for_server()?, maxc, token, job_timeout)
+            .await
+            .map_err(|e| e.into());
+    }
+
+    // 若为 client 模式，设置远程参数环境变量
+    if selected_mode == "client" {
+        if let Some(url) = &remote_url { unsafe { std::env::set_var("REMOTE_URL", url); } println!("🌐 远程计算URL: {}", url); }
+        if let Some(tok) = &remote_auth_token { unsafe { std::env::set_var("REMOTE_AUTH_TOKEN", tok); } }
+        if let Some(ms) = remote_poll_ms { unsafe { std::env::set_var("REMOTE_POLL_MS", ms.to_string()); } println!("⏳ 轮询间隔: {}ms", ms); }
+        if let Some(secs) = remote_timeout_secs { unsafe { std::env::set_var("REMOTE_TIMEOUT_SECS", secs.to_string()); } println!("⏱️ 作业超时: {}s", secs); }
     }
     // If no node ID is provided, try to load it from the config file.
     if node_id.is_none() && config_path.exists() {
@@ -701,6 +827,22 @@ async fn start(
     } else {
         uuid::Uuid::new_v4().to_string() // Fallback to random UUID
     };
+
+    // Helper for server mode client_id reuse
+    fn client_id_for_server() -> Result<String, Box<dyn Error>> {
+        let config_path = get_config_path()?;
+        let id = if config_path.exists() {
+            match Config::load_from_file(&config_path) {
+                Ok(config) => {
+                    if !config.user_id.is_empty() { config.user_id } else if !config.node_id.is_empty() { config.node_id } else { uuid::Uuid::new_v4().to_string() }
+                }
+                Err(_) => uuid::Uuid::new_v4().to_string(),
+            }
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        Ok(id)
+    }
 
     let (mut event_receiver, mut join_handles) = match node_id {
         Some(node_id) => {
@@ -800,6 +942,11 @@ async fn start_batch_processing(
     fetch_concurrency: Option<usize>,
     max_difficulty: Option<String>,
     rotate_after_429: Option<u32>,
+    mode: Option<String>,
+    remote_url: Option<String>,
+    remote_auth_token: Option<String>,
+    remote_poll_ms: Option<u64>,
+    remote_timeout_secs: Option<u64>,
 ) -> Result<(), Box<dyn Error>> {
     // 设置日志输出详细程度
     crate::prover_runtime::set_verbose_output(verbose);
@@ -834,6 +981,11 @@ async fn start_batch_processing(
     if let Some(n) = rotate_after_429.as_ref() {
         unsafe { std::env::set_var("NEXUS_ROTATE_AFTER_429", n.to_string()); }
     }
+
+    // 设置运行模式（normal|client|server），默认 normal
+    let selected_mode = mode.unwrap_or_else(|| "normal".to_string());
+    unsafe { std::env::set_var("NEXUS_MODE", &selected_mode); }
+    println!("🧭 运行模式: {}", selected_mode);
     
     // 加载节点列表
     let mut node_ids = node_list::load_node_list(file_path)?;
@@ -879,6 +1031,22 @@ async fn start_batch_processing(
     println!("🧠 内存优化: 已启用");
     println!("📝 详细日志: {}", if verbose { "已启用" } else { "已禁用" });
     println!("🔄 显示刷新间隔: {}秒", refresh_interval);
+    // 打印运行模式与远程配置（如有）
+    let selected_mode = mode.clone().unwrap_or_else(|| "normal".to_string());
+    println!("🧭 运行模式: {}", selected_mode);
+    if selected_mode == "client" {
+        if let Some(url) = &remote_url { println!("🌐 远程计算URL: {}", url); }
+        if let Some(ms) = remote_poll_ms { println!("⏳ 轮询间隔: {}ms", ms); }
+        if let Some(secs) = remote_timeout_secs { println!("⏱️ 作业超时: {}s", secs); }
+    }
+
+    // 若为 client 模式，设置远程参数环境变量
+    if selected_mode == "client" {
+        if let Some(url) = &remote_url { unsafe { std::env::set_var("REMOTE_URL", url); } }
+        if let Some(tok) = &remote_auth_token { unsafe { std::env::set_var("REMOTE_AUTH_TOKEN", tok); } }
+        if let Some(ms) = remote_poll_ms { unsafe { std::env::set_var("REMOTE_POLL_MS", ms.to_string()); } }
+        if let Some(secs) = remote_timeout_secs { unsafe { std::env::set_var("REMOTE_TIMEOUT_SECS", secs.to_string()); } }
+    }
     if rotation {
         println!("🔄 节点轮转: 已启用 (成功提交或连续1次429错误后立即轮转)");
     } else {
