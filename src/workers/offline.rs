@@ -104,7 +104,7 @@ pub fn start_workers(
                                 crate::prover_runtime::set_node_state(node_id, "已提交远程作业，等待计算...");
                             }
                             // 支持在节点轮转/关闭时取消远程作业
-                            let cancel_rpc = rpc.clone();
+                            // let _cancel_rpc = rpc.clone(); // 预留精确取消接口
                             match tokio::select! {
                                 biased;
                                 res = rpc.request_proof(&task) => res,

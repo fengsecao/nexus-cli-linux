@@ -983,7 +983,7 @@ async fn start_batch_processing(
     }
 
     // 设置运行模式（normal|client|server），默认 normal
-    let selected_mode = mode.unwrap_or_else(|| "normal".to_string());
+    let selected_mode = mode.clone().unwrap_or_else(|| "normal".to_string());
     unsafe { std::env::set_var("NEXUS_MODE", &selected_mode); }
     println!("🧭 运行模式: {}", selected_mode);
     

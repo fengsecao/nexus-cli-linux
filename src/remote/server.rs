@@ -1,5 +1,5 @@
 use axum::{routing::{get, post, delete}, Router, extract::{Path, State}, Json};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use serde_json::json;
 use std::{collections::{HashMap, VecDeque}, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
@@ -123,7 +123,7 @@ async fn submit_job(State(state): State<AppState>, headers: HeaderMap, Json(req)
     // Optional bearer auth
     if let Some(expected) = &state.auth_token {
         let ok = headers
-            .get(axum::http::header::AUTHORIZATION)
+            .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .map(|h| h == format!("Bearer {}", expected))
             .unwrap_or(false);
@@ -199,7 +199,7 @@ async fn get_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Pa
     // Optional bearer auth
     if let Some(expected) = &state.auth_token {
         let ok = headers
-            .get(axum::http::header::AUTHORIZATION)
+            .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .map(|h| h == format!("Bearer {}", expected))
             .unwrap_or(false);
@@ -227,7 +227,7 @@ async fn cancel_job(State(state): State<AppState>, headers: HeaderMap, Path(id):
     // Optional bearer auth
     if let Some(expected) = &state.auth_token {
         let ok = headers
-            .get(axum::http::header::AUTHORIZATION)
+            .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .map(|h| h == format!("Bearer {}", expected))
             .unwrap_or(false);
