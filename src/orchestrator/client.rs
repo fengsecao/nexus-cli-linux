@@ -311,19 +311,35 @@ impl OrchestratorClient {
         )
     }
 
-    /// Resolve max difficulty from env `NEXUS_MAX_DIFFICULTY` (small|medium|large|0|5|10)
+    /// Resolve max difficulty from env `NEXUS_MAX_DIFFICULTY` (small|small_medium|medium|large|extra_large|0|3|5|10|15)
     fn resolve_max_difficulty() -> i32 {
         match std::env::var("NEXUS_MAX_DIFFICULTY") {
             Ok(val) => {
                 let lower = val.to_lowercase();
-                if lower == "small" || lower == "0" { return crate::nexus_orchestrator::TaskDifficulty::Small as i32; }
-                if lower == "medium" || lower == "5" { return crate::nexus_orchestrator::TaskDifficulty::Medium as i32; }
-                if lower == "large" || lower == "10" { return crate::nexus_orchestrator::TaskDifficulty::Large as i32; }
+                if lower == "small" || lower == "0" {
+                    return crate::nexus_orchestrator::TaskDifficulty::Small as i32;
+                }
+                if lower == "small_medium" || lower == "3" {
+                    // Fallback to literal 3 if enum variant missing in current proto
+                    return crate::nexus_orchestrator::TaskDifficulty::Small as i32 + 3;
+                }
+                if lower == "medium" || lower == "5" {
+                    return crate::nexus_orchestrator::TaskDifficulty::Medium as i32;
+                }
+                if lower == "large" || lower == "10" {
+                    return crate::nexus_orchestrator::TaskDifficulty::Large as i32;
+                }
+                if lower == "extra_large" || lower == "15" {
+                    // Fallback to literal 15 if enum variant missing in current proto
+                    return 15;
+                }
                 // Fallback to parsing integer
                 if let Ok(num) = lower.parse::<i32>() { return num; }
-                crate::nexus_orchestrator::TaskDifficulty::Large as i32
+                // Default to EXTRA_LARGE when unspecified/invalid
+                15
             }
-            Err(_) => crate::nexus_orchestrator::TaskDifficulty::Large as i32,
+            // Default to EXTRA_LARGE when not provided
+            Err(_) => 15,
         }
     }
 
