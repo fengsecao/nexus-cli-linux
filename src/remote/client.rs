@@ -4,6 +4,7 @@ use nexus_sdk::stwo::seq::Proof;
 use reqwest::Client;
 use sha3::{Digest, Keccak256};
 
+#[derive(Clone)]
 pub struct RemoteProverClient {
     http: Client,
     base_url: String,

@@ -1,5 +1,5 @@
 use axum::{routing::{get, post, delete}, Router, extract::{Path, State}, Json};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use serde_json::json;
 use std::{collections::{HashMap, VecDeque}, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
@@ -119,7 +119,7 @@ pub async fn run_server(listen: &str, environment: Environment, client_id: Strin
     axum::serve(listener, app).await.map_err(|e| e.to_string())
 }
 
-async fn submit_job(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<JobSubmitRequest>) -> (axum::http::StatusCode, Json<JobSubmitResponse>) {
+async fn submit_job(State(state): State<AppState>, headers: HeaderMap, Json(req): Json<JobSubmitRequest>) -> (StatusCode, Json<JobSubmitResponse>) {
     // Optional bearer auth
     if let Some(expected) = &state.auth_token {
         let ok = headers
@@ -127,9 +127,7 @@ async fn submit_job(State(state): State<AppState>, headers: HeaderMap, Json(req)
             .and_then(|v| v.to_str().ok())
             .map(|h| h == format!("Bearer {}", expected))
             .unwrap_or(false);
-        if !ok {
-            return (axum::http::StatusCode::UNAUTHORIZED, Json(JobSubmitResponse { job_id: String::new(), accepted: false }));
-        }
+        if !ok { return (StatusCode::UNAUTHORIZED, Json(JobSubmitResponse { job_id: String::new(), accepted: false })); }
     }
     let job_id = Uuid::new_v4().to_string();
     let record = JobRecord {
@@ -194,10 +192,10 @@ async fn submit_job(State(state): State<AppState>, headers: HeaderMap, Json(req)
         hs.insert(job_id.clone(), handle);
     }
 
-    (axum::http::StatusCode::OK, Json(JobSubmitResponse { job_id, accepted: true }))
+    (StatusCode::OK, Json(JobSubmitResponse { job_id, accepted: true }))
 }
 
-async fn get_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> (axum::http::StatusCode, Json<JobStatusResponse>) {
+async fn get_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> (StatusCode, Json<JobStatusResponse>) {
     // Optional bearer auth
     if let Some(expected) = &state.auth_token {
         let ok = headers
@@ -205,9 +203,7 @@ async fn get_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Pa
             .and_then(|v| v.to_str().ok())
             .map(|h| h == format!("Bearer {}", expected))
             .unwrap_or(false);
-        if !ok {
-            return (axum::http::StatusCode::UNAUTHORIZED, Json(JobStatusResponse { job_id: id, state: "unauthorized".into(), elapsed_secs: 0, error: Some("unauthorized".into()), proof: None, proof_hash: None }));
-        }
+        if !ok { return (StatusCode::UNAUTHORIZED, Json(JobStatusResponse { job_id: id, state: "unauthorized".into(), phase: None, elapsed_secs: 0, error: Some("unauthorized".into()), proof: None, proof_hash: None })); }
     }
     let jobs = state.jobs.read().await;
     if let Some(rec) = jobs.get(&id) {
@@ -222,12 +218,12 @@ async fn get_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Pa
             ("succeeded", true) => Some("returning".to_string()),
             _ => None,
         };
-        return (axum::http::StatusCode::OK, Json(JobStatusResponse { job_id: id, state: st, phase, elapsed_secs: elapsed, error: err, proof, proof_hash: phash }));
+        return (StatusCode::OK, Json(JobStatusResponse { job_id: id, state: st, phase, elapsed_secs: elapsed, error: err, proof, proof_hash: phash }));
     }
-    (axum::http::StatusCode::NOT_FOUND, Json(JobStatusResponse { job_id: id, state: "not_found".to_string(), phase: None, elapsed_secs: 0, error: Some("not found".into()), proof: None, proof_hash: None }))
+    (StatusCode::NOT_FOUND, Json(JobStatusResponse { job_id: id, state: "not_found".to_string(), phase: None, elapsed_secs: 0, error: Some("not found".into()), proof: None, proof_hash: None }))
 }
 
-async fn cancel_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+async fn cancel_job(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> (StatusCode, Json<serde_json::Value>) {
     // Optional bearer auth
     if let Some(expected) = &state.auth_token {
         let ok = headers
@@ -235,9 +231,7 @@ async fn cancel_job(State(state): State<AppState>, headers: HeaderMap, Path(id):
             .and_then(|v| v.to_str().ok())
             .map(|h| h == format!("Bearer {}", expected))
             .unwrap_or(false);
-        if !ok {
-            return (axum::http::StatusCode::UNAUTHORIZED, Json(json!({"ok": false, "error": "unauthorized"})));
-        }
+        if !ok { return (StatusCode::UNAUTHORIZED, Json(json!({"ok": false, "error": "unauthorized"}))); }
     }
     // Abort running task if present
     if let Some(handle) = state.job_handles.lock().await.remove(&id) {
@@ -248,7 +242,7 @@ async fn cancel_job(State(state): State<AppState>, headers: HeaderMap, Path(id):
         *rec.state.lock().await = "failed".to_string();
         *rec.error.lock().await = Some("canceled".to_string());
     }
-    (axum::http::StatusCode::OK, Json(json!({"ok": true})))
+    (StatusCode::OK, Json(json!({"ok": true})))
 }
 
 
