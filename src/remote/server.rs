@@ -93,9 +93,14 @@ pub async fn run_server(listen: &str, environment: Environment, client_id: Strin
             if queued > app_state_for_monitor.max_concurrency * 2 {
                 println!("⚠️ 队列拥堵: 排队 {} 个，建议提升并发或增加计算节点", queued);
             }
+            let elapsed = start.elapsed().as_secs();
+            let d = elapsed / 86400;
+            let h = (elapsed % 86400) / 3600;
+            let mi = (elapsed % 3600) / 60;
+            let se = elapsed % 60;
             println!(
-                "🖥️ RemoteProver 服务 | 运行:{}s | 总:{} 排队:{} 运行:{} 成功:{} 失败:{} | 并发上限:{} | 吞吐(近5分): {:.2} 次/分",
-                start.elapsed().as_secs(), total, queued, running, succeeded, failed, app_state_for_monitor.max_concurrency, per_min
+                "🖥️ RemoteProver 服务 | 运行: {}天 {}小时 {}分钟 {}秒 | 总:{} 排队:{} 运行:{} 成功:{} 失败:{} | 并发上限:{} | 吞吐(近5分): {:.2} 次/分",
+                d, h, mi, se, total, queued, running, succeeded, failed, app_state_for_monitor.max_concurrency, per_min
             );
             if !running_list.is_empty() {
                 println!("运行中(前10):");
@@ -168,7 +173,7 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> Resul
     async fn write_json(stream: &mut TcpStream, code: &str, value: serde_json::Value) -> Result<(), String> {
         let payload = value.to_string();
         let resp = format!(
-            "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             code,
             payload.len(),
             payload
@@ -281,7 +286,7 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> Resul
             Ok(())
         }
         _ => {
-            stream_ref.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await.map_err(|e| e.to_string())?;
+            stream_ref.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.map_err(|e| e.to_string())?;
             Ok(())
         }
     }
