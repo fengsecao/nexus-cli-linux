@@ -112,7 +112,7 @@ pub async fn run_server(listen: &str, environment: Environment, client_id: Strin
         }
     });
 
-    let addr: SocketAddr = listen.parse().map_err(|e| e.to_string())?;
+    let addr: SocketAddr = listen.parse::<SocketAddr>().map_err(|e| e.to_string())?;
     let listener = TcpListener::bind(addr).await.map_err(|e| e.to_string())?;
     loop {
         let (stream, _) = listener.accept().await.map_err(|e| e.to_string())?;
@@ -124,7 +124,7 @@ pub async fn run_server(listen: &str, environment: Environment, client_id: Strin
 }
 
 async fn handle_connection(mut stream: TcpStream, state: Arc<AppState>) -> Result<(), String> {
-    let mut reader = BufReader::new(stream.clone());
+    let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
     reader.read_line(&mut request_line).await.map_err(|e| e.to_string())?;
     if request_line.is_empty() { return Ok(()); }
